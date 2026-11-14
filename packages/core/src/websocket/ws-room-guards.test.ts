@@ -204,11 +204,28 @@ class RoomGateway extends BaseWebSocketGateway {
     return topics.some((topic) => socket?.isSubscribed(topic) ?? false);
   }
 
+  /** Record a client in the storage directly, as another instance sharing it does. */
+  async addStoredClient(client: WsClientData): Promise<void> {
+    await this.storage?.addClient(client);
+  }
+
+  /** Change a stored client record directly, as another instance sharing the storage does. */
+  async updateStoredClient(clientId: string, data: Partial<WsClientData>): Promise<void> {
+    await this.storage?.updateClient(clientId, data);
+  }
+
+  /** Record a membership in the storage alone, as another instance's server-side join does. */
+  async addStoredMembership(clientId: string, room: string): Promise<void> {
+    await this.storage?.addClientToRoom(clientId, room);
+  }
+
   /**
    * Hold this gateway's own room writes until released, as a remote storage's latency does. The
-   * framework's calls go to the storage directly and are not held.
+   * framework's calls go to the storage directly and are not held. `late` (the default) applies a
+   * held write on release; `early` applies it at once and holds only its answer, as a remote
+   * storage that has executed a command still has to send the reply back.
    */
-  holdRoomWrites(): { held(): boolean; release(): void } {
+  holdRoomWrites(apply: 'late' | 'early' = 'late'): { held(): boolean; release(): void } {
     const storage = this.storage;
     if (!storage) {
       throw new Error('The gateway has no storage');
@@ -225,6 +242,12 @@ class RoomGateway extends BaseWebSocketGateway {
         if (property === 'addClientToRoom') {
           return async (clientId: string, roomName: string): Promise<void> => {
             held = true;
+            if (apply === 'early') {
+              await target.addClientToRoom(clientId, roomName);
+              await opened;
+
+              return;
+            }
             await opened;
             await target.addClientToRoom(clientId, roomName);
           };
@@ -269,6 +292,32 @@ class RoomGateway extends BaseWebSocketGateway {
     };
 
     return { release: () => open() };
+  }
+
+  /**
+   * Make the storage's writes of a client record answer late, as a remote storage's do. Patched on
+   * the storage instance itself, which the framework shares with this gateway.
+   */
+  holdClientUpdates(): { held(): boolean; release(): void } {
+    const storage = this.storage;
+    if (!storage) {
+      throw new Error('The gateway has no storage');
+    }
+
+    let open: () => void = () => undefined;
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let held = false;
+    const update = storage.updateClient.bind(storage);
+
+    storage.updateClient = async (clientId: string, data: Partial<WsClientData>): Promise<void> => {
+      held = true;
+      await opened;
+      await update(clientId, data);
+    };
+
+    return { held: () => held, release: () => open() };
   }
 }
 
@@ -1260,15 +1309,118 @@ describe('room messages the guards cannot be bypassed with', () => {
     const reads = admin.delayStoredRoomReads();
     peer.send('40/admin,');
     await waitUntil(() => (admin.clients.has(peer.id) ? true : undefined), 'the move');
-    await admin.joinRoom(peer.id, 'lobby');
+    const joining = admin.joinRoom(peer.id, 'lobby');
 
     reads.release();
+    await joining;
     await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
 
     expect(await admin.membership(peer.id, 'lobby')).toEqual(IN);
     expect(await admin.membership(peer.id, 'x:1')).toEqual(OUT);
     await admin.emitToRooms(['lobby'], 'news', {});
     await waitUntil(() => peer.frames.find((frame) => frame.includes('"news"')), 'the lobby broadcast');
+  });
+
+  it('keeps a room the storage alone recorded at the move that the new gateway joins the client to again', async () => {
+    @WebSocketGateway({ path: '/ws', namespace: 'public' })
+    class PublicGateway extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws', namespace: 'admin' })
+    class AdminGateway extends RoomGateway {}
+
+    const app = await boot([PublicGateway, AdminGateway], true);
+    const publicGateway = gatewayOf(PublicGateway);
+    const admin = gatewayOf(AdminGateway);
+    const peer = await connectSocketio(app, publicGateway, '&namespace=public');
+
+    // A membership only the storage records, as another instance's server-side join leaves one.
+    // The move removes it — and the admin gateway joins the client to the same room meanwhile.
+    await publicGateway.addStoredMembership(peer.id, 'lobby');
+    const reads = admin.delayStoredRoomReads();
+    peer.send('40/admin,');
+    await waitUntil(() => (admin.clients.has(peer.id) ? true : undefined), 'the move');
+    // The admin gateway's write is executed at once and answered late.
+    const writes = admin.holdRoomWrites('early');
+    const joining = admin.joinRoom(peer.id, 'lobby');
+
+    reads.release();
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+    writes.release();
+    await joining;
+
+    expect(await admin.membership(peer.id, 'lobby')).toEqual(IN);
+    await admin.emitToRooms(['lobby'], 'news', {});
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"news"')), 'the lobby broadcast');
+  });
+
+  it('refuses a server-side joinRoom() the old gateway makes once the move has begun', async () => {
+    @WebSocketGateway({ path: '/ws', namespace: 'public' })
+    class PublicGateway extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws', namespace: 'admin' })
+    class AdminGateway extends RoomGateway {}
+
+    const app = await boot([PublicGateway, AdminGateway], true);
+    const publicGateway = gatewayOf(PublicGateway);
+    const admin = gatewayOf(AdminGateway);
+    const peer = await connectSocketio(app, publicGateway, '&namespace=public');
+
+    // The move's write of the client record answers late, as a remote storage's does.
+    const updates = admin.holdClientUpdates();
+    peer.send('40/admin,');
+    await waitUntil(() => (updates.held() ? true : undefined), 'the record update');
+    await publicGateway.joinRoom(peer.id, SECRET);
+
+    updates.release();
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+    // And one made once the move is over.
+    await publicGateway.joinRoom(peer.id, 'later');
+
+    expect(admin.clients.has(peer.id)).toBe(true);
+    expect(await admin.membership(peer.id, SECRET)).toEqual(OUT);
+    expect(await admin.storedMembers(SECRET)).toEqual([]);
+    expect(await admin.storedMembers('later')).toEqual([]);
+
+    await admin.emitToRooms([SECRET, 'later'], 'news', {});
+    admin.emit(peer.id, 'marker', {});
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"marker"')), 'the marker');
+    expect(peer.frames.filter((frame) => frame.includes('news'))).toEqual([]);
+  });
+
+  it('takes back a joinRoom() for a client of another instance whose record moved to another gateway during the write', async () => {
+    @WebSocketGateway({ path: '/ws', namespace: 'public' })
+    class PublicGateway extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws', namespace: 'admin' })
+    class AdminGateway extends RoomGateway {}
+
+    await boot([PublicGateway, AdminGateway], true);
+    const publicGateway = gatewayOf(PublicGateway);
+    const admin = gatewayOf(AdminGateway);
+
+    // Two clients of the public gateway connected to another instance: only their records are here.
+    const remote = (id: string): WsClientData => ({
+      id,
+      rooms: [],
+      connectedAt: 0,
+      auth: null,
+      metadata: {},
+      protocol: 'socketio',
+      gatewayKey: '/ws:public',
+    });
+    await publicGateway.addStoredClient(remote('moving'));
+    await publicGateway.addStoredClient(remote('staying'));
+
+    const writes = publicGateway.holdRoomWrites();
+    const moving = publicGateway.joinRoom('moving', SECRET);
+    const staying = publicGateway.joinRoom('staying', SECRET);
+    await waitUntil(() => (writes.held() ? true : undefined), 'the joinRoom writes');
+    // That instance moves one of them to the admin gateway while the writes are in flight.
+    await admin.updateStoredClient('moving', { gatewayKey: '/ws:admin' });
+    writes.release();
+    await Promise.all([moving, staying]);
+
+    expect(await admin.storedMembers(SECRET)).toEqual(['staying']);
   });
 
   it('drops a join or leave whose room is not a string, and keeps serving the connection', async () => {

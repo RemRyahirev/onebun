@@ -350,7 +350,7 @@ export class ChatGateway extends BaseWebSocketGateway {
 |--------|------|---------|-------------|
 | `path` | `string` | `'/'` | WebSocket connection path |
 | `namespace` | `string` | - | Distinguishes gateways that share a path. See [Which gateway a connection belongs to](#which-gateway-a-connection-belongs-to) |
-| `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
+| `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade, and at a Socket.IO CONNECT that moves a connection to this gateway. See below |
 
 ### Which gateway serves a path
 
@@ -434,30 +434,162 @@ The CONNECT packet decides, and `@OnConnect` runs when it arrives rather than at
    never refuses the connection;
 4. `@OnConnect` runs on the gateway that was chosen.
 
-When the CONNECT packet moves the connection to another gateway, the connection arrives there in
-no room: every room joined before the move is left in the same step as the move — storage,
-`client.rooms` and pub/sub subscriptions alike — and a server-side `joinRoom()` still writing at
-that moment is taken back. Rooms joined under one gateway's `@OnJoinRoom` guards, or under none,
-never reach another gateway's rooms. Joins still waiting on the first gateway's guards are
-cancelled and answered with a `FORBIDDEN` error frame; the move does not wait for them. Rooms the
-client needs on the new gateway it joins again there, under that gateway's guards.
-
-`client.auth` and `client.metadata` do move with the connection: what the first gateway's
-`authenticate` hook set at upgrade is what the new gateway's guards read.
-
 ::: warning
 A Socket.IO client that never sends a CONNECT packet never gets `@OnConnect`. OneBun's own
 `WsClient` sends it as soon as the handshake arrives, carrying its `namespace` option.
-
-Switching to a gateway that declares an `authenticate` hook is refused with a Socket.IO
-`connect_error`: the hook gates the upgrade, and by CONNECT time there is no upgrade request left
-to run it against. Reach such a gateway with `?namespace=` so the hook runs where it belongs. The
-transport stays open, so the client may name another namespace.
 :::
 
 Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
 gateway's `authenticate` hook runs for it, exactly as for a native client: a hook that returns
 `false` refuses the Socket.IO connection.
+
+#### Moving to another namespace
+
+A CONNECT that names another gateway's namespace moves the connection there. A standard
+`socket.io-client` does this on every connection that does not put `?namespace=` in its query:
+`io('https://host/admin', { query: { token } })` upgrades on the shared path — bound to the first
+registered gateway — and then sends `40/admin,`.
+
+Who the connection is on the new gateway is that gateway's decision:
+
+- **The new gateway has an `authenticate` hook.** It runs at the CONNECT with what the upgrade
+  gave the first gateway's hook: the same `token`, and a `request` with the upgrade request's URL —
+  query included — and headers, cookies included. `client.auth` and `client.metadata` become what
+  it returns — fresh objects, on the live connection and in storage; nothing the first gateway's
+  hook or handlers set remains. A hook that returns `false`, throws, or has not answered within 10
+  seconds refuses the CONNECT with a Socket.IO `connect_error` whose message is `Unauthorized` —
+  what a refused upgrade answers as HTTP 401 — and the move does not happen.
+- **The new gateway has no hook, and the first gateway has one.** The CONNECT is refused with a
+  `connect_error` naming the namespace. Reach such a gateway with `?namespace=`, so it is the
+  gateway bound at upgrade.
+- **Neither gateway has a hook.** The connection moves as it is: `client.auth` and
+  `client.metadata` are what the upgrade parsed — `client.auth` is `{ authenticated: false, token }`,
+  or `null` without a token — plus whatever a handler of the first gateway wrote to them before the
+  CONNECT.
+
+What one gateway's `authenticate` hook grants never reaches another gateway's guards, nor the
+handler bodies and what they await: a gateway with a hook replaces the identity only once the
+other gateway is done, and one without a hook is never reached from a gateway with a hook. Two
+limits. The rule covers what hooks grant, not what handlers write: a handler that sets
+`client.auth` itself — a `login` message, say — grants it to every gateway without a hook that the
+connection moves to afterwards. And work a handler leaves running without awaiting it is not
+waited for — see below.
+
+```typescript
+@WebSocketGateway({
+  path: '/ws',
+  namespace: 'public',
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    return user ? { userId: user.id } : null;
+  },
+})
+export class PublicGateway extends BaseWebSocketGateway {}
+
+@WebSocketGateway({
+  path: '/ws',
+  namespace: 'admin',
+  // Runs at upgrade for `?namespace=admin`, and at a CONNECT that moves a connection here.
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    if (!user?.permissions.includes('admin')) return false; // connect_error "Unauthorized"
+    return { userId: user.id, permissions: user.permissions };
+  },
+})
+export class AdminGateway extends BaseWebSocketGateway {
+  @UseWsGuards(new WsPermissionGuard('admin'))
+  @OnMessage('audit')
+  handleAudit(@Client() client: WsClientData) {
+    return { event: 'audit:ok', data: { by: client.auth?.userId } };
+  }
+}
+```
+
+A refused CONNECT changes nothing: the connection stays on its gateway with its identity and its
+rooms, and the transport stays open, so the client may name another namespace. The move is all or
+nothing, and while it is being decided the connection belongs to the first gateway:
+
+1. **While the new gateway's hook decides,** an EVENT packet is served by the first gateway, with
+   the first identity, whatever namespace it names. A standard Socket.IO client holds its emits
+   until the CONNECT is answered and never sends one.
+2. **Once the hook has allowed the move,** the first gateway takes no new message from the
+   connection: EVENT packets are held, belonging to neither gateway yet. The move waits for every
+   message the first gateway is still serving — guards and handler bodies, a join waiting on its
+   guards included, which is waited for rather than cancelled — and only then swaps the identity.
+   If they have not settled within 10 seconds the CONNECT is refused with `connect_error`
+   `The connection could not be moved`, as it is when the client record cannot be written; the
+   record is then put back as it was. A move holds at most 100 EVENT packets. One more while it
+   still waits on the first gateway refuses it with `connect_error`
+   `Too many messages arrived while the connection was being moved`; one more once it can no longer
+   be refused — while it is recorded and the old rooms are removed — closes the connection with that
+   reason.
+3. **When it is decided,** the held packets are served in the order they arrived: by the new
+   gateway after a move, by the first gateway after a refusal. A closed connection's are dropped.
+   If the move fails after the connection changed hands — the rooms it left cannot be removed from
+   storage — the CONNECT is answered with `connect_error` `The connection could not be moved` and the
+   connection is closed.
+
+The wait covers what a message's guards and handler await. Work a handler starts without awaiting
+it — a promise it leaves running, a timer — is not waited for: once the identity is swapped, such
+work reads the new `client.auth` and `client.metadata`, and what it writes to them lands on the new
+gateway's identity.
+
+A second CONNECT while one is decided is refused with a `connect_error`. A hook call that has not
+answered within its 10 seconds keeps running; until it settles, a further CONNECT that would call
+the hook is refused without calling it. A CONNECT naming a gateway that needs no hook is served.
+
+Between two gateways without a hook nothing waits: the move lands as soon as it is decided. A
+message the first gateway was still serving runs no further guard and no handler body once the
+move has taken the connection away from it — it is answered with the `FORBIDDEN` error frame,
+`message` `Message cancelled: the connection moved to another gateway`. That check is not tied to
+moves without a hook: no guard or handler body of a gateway runs once a move has taken the
+connection away from it. A close is not a move: the message of a connection that closed runs its
+guards and handler as it would have.
+
+When the move happens, the connection arrives on the new gateway in no room: every room joined
+before the move is left in the same step as the move — storage, `client.rooms` and pub/sub
+subscriptions alike — and a server-side `joinRoom()` still writing at that moment is taken back,
+also when it runs on another instance sharing Redis storage. Rooms joined under one gateway's
+`@OnJoinRoom` guards, or under none, never reach another gateway's rooms. On a move between
+gateways without a hook, joins still waiting on the first gateway's guards are cancelled and
+answered with a `FORBIDDEN` error frame. Rooms the client needs on the new gateway it joins again
+there, under that gateway's guards; a join made while the move is still removing the old rooms
+waits for it on the instance holding the connection. With shared Redis storage, a server-side
+`joinRoom()` the new gateway makes from another instance in that time can be removed with the old
+rooms — the client is then not in that room. A connection that closes before the move is answered
+gets no `@OnConnect` on the new gateway.
+
+To have what the hook reads at a move, a Socket.IO connection keeps its upgrade request's URL and
+headers in memory until its first CONNECT is served — and only when a gateway with a namespace and
+an `authenticate` hook is one it could move to. They are never written to storage. Until then
+the connection's EVENT packets are also counted while they are served, so that a move can wait
+for them.
+
+::: tip Migrating gateways reached by a CONNECT
+A gateway that a Socket.IO client reaches by a CONNECT and that guards on `client.auth` —
+`WsAuthGuard`, `WsPermissionGuard` — needs its own `authenticate` hook: a move from a gateway with
+a hook to one without is refused. This includes the standard `io('/<namespace>')` client: without
+`?namespace=` in its query it upgrades onto the default gateway — the sole one, or the first
+registered — and when that one has a hook and `<namespace>`'s gateway has none, the CONNECT is
+refused. Give that gateway its own hook, or connect with `?namespace=<namespace>` (`query:
+{ namespace: '<namespace>' }`) so the upgrade binds the connection to it directly.
+:::
+
+<llm-only>
+
+- On Socket.IO a connection's identity on a gateway is that gateway's own hook's answer. When
+  generating gateways a client reaches with `io('/<namespace>')`, give every gateway that guards on
+  `client.auth` its own `authenticate` hook; never rely on the hook of the gateway the connection
+  was bound to at upgrade.
+- `client.auth` and `client.metadata` are replaced by fresh objects when a CONNECT moves the
+  connection to a gateway with a hook. Read them in the handler; do not cache them from before the
+  CONNECT.
+- The move waits only for what a handler awaits. Background work a handler starts without awaiting
+  it sees the new gateway's identity after the move; await it, or capture what it needs first.
+- Between two hook-less gateways identity moves as it is, including whatever a handler wrote to
+  `client.auth`. Do not authenticate in message handlers by assigning `client.auth`; use the hook.
+
+</llm-only>
 
 ### Authentication
 
@@ -485,7 +617,9 @@ Three outcomes, because a gateway usually needs all of them:
 | `true` | The client is authenticated, with no identity attached |
 | `{ userId, permissions, metadata }` | The client is authenticated and the identity reaches `client.auth` |
 
-The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, headers, the peer address. A hook that throws refuses the upgrade.
+The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, other headers, query parameters. A hook that throws refuses the upgrade.
+
+On Socket.IO the hook also runs when a CONNECT moves a connection to its gateway from another one, with the same token and a request carrying the upgrade's URL and headers; a refusal there answers the CONNECT with a `connect_error` instead of a 401. See [Moving to another namespace](#moving-to-another-namespace).
 
 ::: tip Setting `client.auth` in `@OnConnect`
 Without `authenticate`, the framework parses the token into `client.auth` as `{ authenticated: false, token }`, and nothing else sets `authenticated` to `true`. Setting `client.auth.authenticated` yourself in an `@OnConnect` handler also lets the client past `WsAuthGuard`, but `authenticate` is the supported way to do it.

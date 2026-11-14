@@ -1022,6 +1022,97 @@ describe('docs/api/websocket.md', () => {
       await app.stop();
     }
   });
+
+  /**
+   * `io('https://host/admin', { query: { token } })` upgrades on the shared Socket.IO path — bound
+   * to the first registered gateway, `public` — and then sends `40/admin,`. The admin gateway's own
+   * hook decides who the connection is there: an admin token is admitted with the admin identity
+   * the guard reads, any other token is answered `connect_error` "Unauthorized" and stays on
+   * `public`.
+   *
+   * @source docs:api/websocket.md#moving-to-another-namespace
+   */
+  it('authenticates a Socket.IO connection with the hook of the gateway its CONNECT moves it to', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      root: { id: 'u-root', permissions: ['admin'] },
+      guest: { id: 'u-guest', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    @WebSocketGateway({
+      path: '/ws',
+      namespace: 'public',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id } : null;
+      },
+    })
+    class PublicGateway extends BaseWebSocketGateway {}
+
+    @WebSocketGateway({
+      path: '/ws',
+      namespace: 'admin',
+      // Runs at upgrade for `?namespace=admin`, and at a CONNECT that moves a connection here.
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+        if (!user?.permissions.includes('admin')) {
+          return false; // connect_error "Unauthorized"
+        }
+
+        return { userId: user.id, permissions: user.permissions };
+      },
+    })
+    class AdminGateway extends BaseWebSocketGateway {
+      @UseWsGuards(new WsPermissionGuard('admin'))
+      @OnMessage('audit')
+      handleAudit(@Client() client: WsClientData) {
+        return { event: 'audit:ok', data: { by: client.auth?.userId } };
+      }
+    }
+
+    @Module({ controllers: [PublicGateway, AdminGateway] })
+    class MoveModule {}
+
+    const app = new OneBunApplication(MoveModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: { socketio: { enabled: true, path: '/socket.io' } },
+    });
+
+    await app.start();
+
+    const open = async (token: string) => {
+      const raw = openRawSocket(`${wsUrl(app, '/socket.io')}/?EIO=4&transport=websocket&token=${token}`);
+      await raw.opened;
+      await waitUntil(() => raw.frames.find((f) => f.startsWith('0')), 'engine.io OPEN');
+
+      return raw;
+    };
+
+    try {
+      const root = await open('root');
+      root.send('40/admin,');
+      await waitUntil(() => root.frames.find((f) => f.startsWith('42/admin,["connect"')), 'the admin CONNECT');
+      root.send('421["audit",{}]');
+      const audit = await waitUntil(() => root.frames.find((f) => f.startsWith('431')), 'audit ack');
+      expect(JSON.parse(audit.slice(3))).toEqual([{ event: 'audit:ok', data: { by: 'u-root' } }]);
+
+      const guest = await open('guest');
+      guest.send('40/admin,');
+      const refusal = await waitUntil(() => guest.frames.find((f) => f.startsWith('44/admin,')), 'connect_error');
+      expect(JSON.parse(refusal.slice('44/admin,'.length))).toEqual([{ message: 'Unauthorized' }]);
+
+      // Still on the public gateway: the CONNECT that names it is served.
+      guest.send('40/public,');
+      await waitUntil(() => guest.frames.find((f) => f.startsWith('42/public,["connect"')), 'the public CONNECT');
+
+      root.close();
+      guest.close();
+    } finally {
+      await app.stop();
+    }
+  });
 });
 
 // --- docs/examples/websocket-chat.md ---------------------------------------------------------

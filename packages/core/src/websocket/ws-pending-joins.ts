@@ -1,9 +1,11 @@
 /**
- * Client room joins waiting on their `@OnJoinRoom` guards.
+ * Client room joins waiting on their `@OnJoinRoom` guards, and a Socket.IO move's removal of a
+ * connection's stored rooms that a join has to wait for.
  *
  * Shared by the two places that change a client's rooms: `WsHandler`, which tracks a join while its
- * guards run, and `BaseWebSocketGateway`, whose server-side `leaveRoom()` has to cancel a join of
- * that room still waiting — or the join would land after the leave. Keyed by the socket, so two
+ * guards run and makes the move, and `BaseWebSocketGateway`, whose server-side `leaveRoom()` has to
+ * cancel a join of that room still waiting — or the join would land after the leave — and whose
+ * server-side `joinRoom()` has to wait for a move's removal. Keyed by the socket, so two
  * applications in one process never see each other's joins.
  *
  * @internal
@@ -68,4 +70,28 @@ export function cancelRoomJoins(socket: object, reason: RoomJoinCancellation, ro
       join.answer(reason);
     }
   }
+}
+
+const clearingBySocket = new WeakMap<object, Promise<void>>();
+
+/**
+ * Record that a Socket.IO move is removing `socket`'s stored rooms until `clearing` settles.
+ *
+ * The removal reads the rooms the storage records at the move and removes them once that read has
+ * answered. A join of one of those rooms written in between — by the client or by the server — is
+ * removed with them, so every join of a socket waits for {@link roomsClearing} first.
+ */
+export function trackRoomsClearing(socket: object, clearing: Promise<unknown>): void {
+  const settled = clearing.then(() => undefined, () => undefined);
+  clearingBySocket.set(socket, settled);
+  void settled.then(() => {
+    if (clearingBySocket.get(socket) === settled) {
+      clearingBySocket.delete(socket);
+    }
+  });
+}
+
+/** The removal a Socket.IO move is still making of `socket`'s stored rooms, if any. Never rejects. */
+export function roomsClearing(socket: object): Promise<void> | undefined {
+  return clearingBySocket.get(socket);
 }

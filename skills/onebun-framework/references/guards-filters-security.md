@@ -125,9 +125,25 @@ once with the same `FORBIDDEN` frame; its guards' later verdict is ignored. A co
 before the guard answers is not added. Pending joins are not limited in number. A Socket.IO CONNECT
 that moves a connection to another gateway (`40/<namespace>,`) takes it out of every room it had in
 the same step (a server-side `joinRoom()` still writing is taken back), so no membership crosses
-gateways and the client rejoins rooms on the new gateway. `client.auth` / `client.metadata` set by
-the first gateway's `authenticate` hook DO move with it. A `join`/`leave` whose room is not a string
-is ignored.
+gateways and the client rejoins rooms on the new gateway. A hook's grant does NOT cross a move: a
+target gateway with an `authenticate` hook runs it at the CONNECT (same token, a request with the
+upgrade's URL and headers) and `client.auth` / `client.metadata` become fresh copies of its answer;
+a hook that returns `false`, throws or takes over 10 s answers `connect_error` `Unauthorized` and the
+connection stays on its gateway, rooms and identity intact. Once the hook allowed, new EVENTs are
+held (≤ 100; more refuses the move, or closes the connection once the move is being recorded) and the swap waits (≤ 10 s, else `connect_error` `The connection
+could not be moved`) until the first gateway finished every message it was serving — a join pending
+on its guards is waited for, not cancelled — so no guard or handler body the first gateway awaits
+sees the target's grant; held EVENTs then go to whichever gateway the connection ends on. Work a
+handler starts WITHOUT awaiting it is not waited for and reads/writes the new identity after the
+swap. A second CONNECT meanwhile is refused. A target WITHOUT a hook refuses a move from a gateway that has one (`connect_error`).
+Between two hook-less gateways the connection moves as it is, INCLUDING what a handler wrote to
+`client.auth` — authenticate in the hook, never by assigning `client.auth` in a handler. A guard or
+handler body of a gateway a move took the connection away from never runs (answered `FORBIDDEN`,
+`Message cancelled: the connection moved to another gateway`); a close is not a move — a closed
+connection's message runs on. Every gateway a Socket.IO client
+reaches with `io('/<namespace>')` that guards on `client.auth` needs its OWN `authenticate` hook —
+or the client connects with `?namespace=<namespace>`. A `join`/`leave` whose room is not a string is
+ignored.
 
 The other lifecycle denials are silent to the client. A denied `@OnConnect` leaves the socket open
 without running the handler or sending its reply; a denied `@OnDisconnect` skips the cleanup written

@@ -22,7 +22,7 @@ import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
 
-import { cancelRoomJoins } from './ws-pending-joins';
+import { cancelRoomJoins, roomsClearing } from './ws-pending-joins';
 import { createFullEventMessage, createNativeMessage } from './ws-socketio-protocol';
 import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
 
@@ -839,6 +839,10 @@ export abstract class BaseWebSocketGateway {
    *
    * A server-side join: no `@OnJoinRoom` guard is asked. Those decide the client's own `join`
    * message only.
+   *
+   * Only for a client this gateway serves. A join still being written when the client moves to
+   * another gateway by a Socket.IO CONNECT — on this instance or, with shared Redis storage, on
+   * another — is taken back.
    */
   async joinRoom(clientId: string, roomName: string): Promise<void> {
     if (!this.storage) {
@@ -848,7 +852,14 @@ export abstract class BaseWebSocketGateway {
     // while only the subscribe half was fenced, so one gateway could enrol another's client
     // into a room — a write neither gateway could then see.
     const socket = this.ownSockets.get(clientId);
-    if (!socket && !this._owns(await this.storage.getClient(clientId))) {
+    if (socket) {
+      // The connection has just moved here by a Socket.IO CONNECT, and the move is still removing
+      // the rooms it had: a write made now could be removed with them.
+      const clearing = roomsClearing(socket);
+      if (clearing) {
+        await clearing;
+      }
+    } else if (!this._owns(await this.storage.getClient(clientId))) {
       return;
     }
 
@@ -857,8 +868,10 @@ export abstract class BaseWebSocketGateway {
     // The socket may have moved to another gateway (a Socket.IO CONNECT naming its namespace) or
     // closed while the write was in flight. Either one has already taken it out of every room, so
     // the write is taken back rather than handing the new owner a membership its own guards never
-    // saw, or leaving a dead id in the room.
-    if (socket && this.ownSockets.get(clientId) !== socket) {
+    // saw, or leaving a dead id in the room. A client connected to another instance can do the
+    // same there, and its record says so: it is read again, and a record no longer this gateway's
+    // takes the write back too.
+    if (socket ? this.ownSockets.get(clientId) !== socket : !this._owns(await this.storage.getClient(clientId))) {
       await this.storage.removeClientFromRoom(clientId, roomName);
 
       return;

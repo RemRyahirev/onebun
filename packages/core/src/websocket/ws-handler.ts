@@ -20,7 +20,12 @@ import type {
   WsHandlerMetadata,
   WebSocketApplicationOptions,
 } from './ws.types';
-import type { WsAuthResult, WsHandlerResponse } from './ws.types';
+import type {
+  WsAuthContext,
+  WsAuthData,
+  WsAuthResult,
+  WsHandlerResponse,
+} from './ws.types';
 import type { OneBunRequest } from '../types';
 import type { Server, ServerWebSocket } from 'bun';
 
@@ -43,7 +48,9 @@ import { WsExecutionContextImpl, executeGuards } from './ws-guards';
 import { matchPattern } from './ws-pattern-matcher';
 import {
   cancelRoomJoins,
+  roomsClearing,
   trackRoomJoin,
+  trackRoomsClearing,
   untrackRoomJoin,
   type PendingRoomJoin,
 } from './ws-pending-joins';
@@ -85,6 +92,55 @@ const WS_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 
 /** `ServerWebSocket.readyState` of an open connection. */
 const WS_OPEN = 1;
+
+/**
+ * How long a Socket.IO CONNECT that moves a connection waits for the target gateway's
+ * `authenticate` hook. A hook that has not answered by then refuses the move, so one that never
+ * settles cannot hold the CONNECT unanswered.
+ */
+const MOVE_AUTHENTICATE_TIMEOUT_MS = 10_000;
+
+/** What a refused upgrade answers, and the CONNECT_ERROR message of a move the target's hook refused. */
+const UNAUTHORIZED = 'Unauthorized';
+
+/** The CONNECT_ERROR message of a move that could not be made once the target's hook allowed it. */
+const MOVE_FAILED = 'The connection could not be moved';
+
+/**
+ * How many EVENT packets a Socket.IO connection may send while a move holds them. A standard
+ * client sends none — it holds its emits until the CONNECT is answered — and the client decides
+ * how long the hold lasts, so past this many the move is refused while it is still waiting on the
+ * current gateway, and the connection is closed once it no longer can be.
+ */
+const MAX_HELD_MESSAGES = 100;
+
+/** The CONNECT_ERROR message, and close reason, when a move held more than `MAX_HELD_MESSAGES`. */
+const HELD_OVERFLOW = 'Too many messages arrived while the connection was being moved';
+
+/** RFC 6455 "policy violation": what a connection that floods a move is closed with. */
+const WS_POLICY_VIOLATION = 1008;
+
+/** The CONNECT_ERROR message of a CONNECT that arrives while another one of the connection is decided. */
+const CONNECT_PENDING = 'A previous CONNECT of this connection is still being decided';
+
+/** The CONNECT_ERROR message of a CONNECT that arrives while a hook call for the connection has not settled. */
+const AUTHENTICATION_PENDING = 'A previous authentication of this connection has not finished';
+
+/** What a move's `authenticate` call settles to when the bound expires first. */
+const HOOK_TIMED_OUT = Symbol('onebun:ws:hook-timed-out');
+
+/**
+ * What `executeHandler` returns when a Socket.IO move has taken the connection away from the
+ * gateway that started a message by the time its next guard or its handler body would run. The
+ * rest of the message is not run. A close is not a move: a closed connection's message runs on.
+ */
+const MOVED_AWAY = Symbol('onebun:ws:moved-away');
+
+/** What asking a handler's guards decided: allowed, denied, or stopped by a Socket.IO move. */
+type GuardVerdict = boolean | typeof MOVED_AWAY;
+
+/** The `message` of the `FORBIDDEN` frame answering a message a Socket.IO move stopped. */
+const MESSAGE_CANCELLED_BY_MOVE_MESSAGE = 'Message cancelled: the connection moved to another gateway';
 
 const ParamType = WsParamType;
 const HandlerType = WsHandlerType;
@@ -144,6 +200,93 @@ interface MatchedRoomHandler {
   gateway: GatewayInstance;
   handler: WsHandlerMetadata;
   params: Record<string, string>;
+}
+
+/**
+ * What a Socket.IO connection keeps of its upgrade request, so that a CONNECT moving it to another
+ * gateway can give that gateway's `authenticate` hook what the upgrade gave the first one: the URL,
+ * query included, and the headers — `Authorization`, `Cookie` and whatever a proxy added. The
+ * token is read from those two the way the upgrade reads it.
+ */
+interface UpgradeRequest {
+  readonly url: string;
+  readonly headers: Headers;
+}
+
+/** Who an `authenticate` hook's answer makes a connection. */
+interface HookIdentity {
+  auth: WsAuthData | null;
+  metadata: Record<string, unknown>;
+}
+
+/** A Socket.IO EVENT held while a move is made, to be served once it is decided. */
+interface HeldMessage {
+  event: string;
+  data: unknown;
+  ackId?: number;
+}
+
+/**
+ * A Socket.IO connection that a CONNECT can still move to a gateway with an `authenticate` hook:
+ * what that hook will need, and what the move needs to swap the connection's identity only once
+ * nothing of the current gateway still runs for it.
+ */
+interface SocketioMove {
+  readonly upgrade: UpgradeRequest;
+  /** EVENT packets of this connection being served right now — guards and handler bodies. */
+  inFlight: number;
+  /** Called when `inFlight` drops to zero while a move waits for it. */
+  idle?: () => void;
+  /**
+   * Present while a move holds the connection's new EVENT packets: from the moment the target's
+   * hook allowed the move until it is decided and every held packet has been started. Arrival
+   * order, at most `MAX_HELD_MESSAGES`.
+   */
+  held?: HeldMessage[];
+  /** Set while the move still waits on the current gateway: refuses it when the hold overflows. */
+  overflow?: () => void;
+  /** A hook call for this connection that has not settled — also one past its bound. */
+  hookUnsettled: boolean;
+}
+
+/** The bearer token of an upgrade request: `?token=`, else the `Authorization` header. */
+function upgradeToken(url: URL, headers: Headers): string | undefined {
+  return url.searchParams.get('token') || headers.get('Authorization')?.replace('Bearer ', '');
+}
+
+/**
+ * The identity an `authenticate` hook's answer gives a connection, or `undefined` when the hook
+ * refused it. One function for the upgrade and for a Socket.IO move, so the two cannot disagree on
+ * what an answer means.
+ */
+function identityFrom(token: string | undefined, result: WsAuthResult): HookIdentity | undefined {
+  if (result === false) {
+    return undefined;
+  }
+
+  const unauthenticated: WsAuthData | null = token ? { authenticated: false, token } : null;
+
+  // `null` means "connect, but anonymous" — the client is admitted and every guard that
+  // requires authentication still denies it. A gateway serving both public and private
+  // events needs that third outcome; without it the hook can only be all-or-nothing.
+  if (result === null) {
+    return { auth: unauthenticated, metadata: {} };
+  }
+
+  const identity = typeof result === 'object' ? result : {};
+
+  // Fresh objects, never the hook's own: at a move they replace the live identity, and nothing
+  // that held the old one — or the hook's answer — can reach the new one through a shared reference.
+  return {
+    auth: {
+      ...unauthenticated,
+      authenticated: true,
+      token,
+      userId: identity.userId,
+      permissions: identity.permissions ? [...identity.permissions] : identity.permissions,
+    },
+    metadata: identity.metadata ? { ...identity.metadata } : {},
+  };
 }
 
 /**
@@ -246,10 +389,25 @@ export class WsHandler {
   private readonly socketioConnected = new WeakSet<ServerWebSocket<WsClientData>>();
 
   /**
-   * A Socket.IO move's removal of a connection's stored rooms, while it runs — see
-   * `rebindSocket`. Present only during a move.
+   * Socket.IO sockets whose CONNECT packet is being decided — the target gateway's `authenticate`
+   * hook, then the move. A CONNECT arriving meanwhile is ignored, so two moves never race.
    */
-  private readonly roomsMoving = new WeakMap<ServerWebSocket<WsClientData>, Promise<void>>();
+  private readonly socketioConnecting = new WeakSet<ServerWebSocket<WsClientData>>();
+
+  /**
+   * The Socket.IO connections a CONNECT could still move to a gateway with an `authenticate`
+   * hook — what each keeps of its upgrade request for that hook, and its in-flight messages —
+   * keyed by its client data, the object `server.upgrade` makes `ws.data`. Only such
+   * connections have an entry; it is never written to storage, and it is dropped once a CONNECT
+   * is served: after that the connection cannot move.
+   */
+  private readonly socketioMoves = new WeakMap<WsClientData, SocketioMove>();
+
+  /**
+   * The gateway a Socket.IO move took each moved connection away from. A connection moves at most
+   * once, and only a move — never a close — stops a message that gateway had started.
+   */
+  private readonly movedAway = new WeakMap<ServerWebSocket<WsClientData>, GatewayInstance>();
 
   constructor(
     private logger: SyncLogger,
@@ -513,6 +671,21 @@ export class WsHandler {
   }
 
   /**
+   * Whether a CONNECT could move a Socket.IO connection bound to `bound` onto a gateway whose
+   * `authenticate` hook then runs: a gateway a CONNECT can name — one with a namespace — that has
+   * a hook and is not `bound`.
+   */
+  private hookReachableByMove(bound: GatewayInstance | undefined): boolean {
+    for (const gateway of this.gateways.values()) {
+      if (gateway !== bound && gateway.metadata?.namespace && gateway.metadata.authenticate) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * The gateway that admitted this socket, or undefined when it cannot be established.
    *
    * The key on `ws.data` is a hint, not a credential: it is reachable from user code through
@@ -650,8 +823,7 @@ export class WsHandler {
     }
 
     // Extract auth from query or headers
-    const token = url.searchParams.get('token') ||
-      req.headers.get('Authorization')?.replace('Bearer ', '');
+    const token = upgradeToken(url, req.headers);
 
     // Create client ID
     const clientId = crypto.randomUUID();
@@ -686,31 +858,22 @@ export class WsHandler {
       } catch (error) {
         this.logger.warn(`WebSocket authenticate hook threw, refusing upgrade: ${error}`);
 
-        return new Response('Unauthorized', { status: 401 });
+        return new Response(UNAUTHORIZED, { status: 401 });
       }
 
-      if (result === false) {
-        return new Response('Unauthorized', { status: 401 });
+      const identity = identityFrom(token, result);
+      if (!identity) {
+        return new Response(UNAUTHORIZED, { status: 401 });
       }
-
-      // `null` means "connect, but anonymous" — the client is admitted and every guard that
-      // requires authentication still denies it. A gateway serving both public and private
-      // events needs that third outcome; without it the hook can only be all-or-nothing.
-      const anonymous = result === null;
-      const identity = typeof result === 'object' && result !== null ? result : {};
-      if (!anonymous) {
-        clientData.auth = {
-          ...clientData.auth,
-          authenticated: true,
-          token,
-          userId: identity.userId,
-          permissions: identity.permissions,
-        };
-      }
-      if (identity.metadata) {
-        clientData.metadata = { ...clientData.metadata, ...identity.metadata };
-      }
+      clientData.auth = identity.auth;
+      clientData.metadata = identity.metadata;
     }
+
+    // A Socket.IO CONNECT may move this connection to a gateway whose hook then runs, and needs
+    // what this request gave the hook here. Nothing is kept for a connection that cannot get there.
+    const upgradeRequest: UpgradeRequest | undefined = protocol === 'socketio' && this.hookReachableByMove(gateway)
+      ? { url: req.url, headers: new Headers(req.headers) }
+      : undefined;
 
     // Try to upgrade
     const success = server.upgrade(req, {
@@ -718,6 +881,10 @@ export class WsHandler {
     });
 
     if (success) {
+      if (upgradeRequest) {
+        this.socketioMoves.set(clientData, { upgrade: upgradeRequest, inFlight: 0, hookUnsettled: false });
+      }
+
       return undefined; // Bun handles the 101 response
     }
 
@@ -889,7 +1056,13 @@ export class WsHandler {
         if (packet.data && Array.isArray(packet.data) && packet.data.length > 0) {
           const [event, ...args] = packet.data;
           if (typeof event === 'string') {
-            await this.routeMessage(ws, event, args[0], packet.id);
+            // Only a connection a CONNECT could still move to a gateway with a hook has an entry.
+            const move = this.socketioMoves.get(ws.data);
+            if (move) {
+              await this.routeMovable(ws, move, event, args[0], packet.id);
+            } else {
+              await this.routeMessage(ws, event, args[0], packet.id);
+            }
           }
         }
         break;
@@ -897,6 +1070,95 @@ export class WsHandler {
       case SocketIOPacketType.ACK:
         // Acknowledgement - not implemented yet
         break;
+    }
+  }
+
+  /**
+   * Route an EVENT of a connection a CONNECT could still move: counted while it is served, so a
+   * move can wait for it, and held instead while a move is being made — it belongs to neither
+   * gateway until the move is decided.
+   */
+  private async routeMovable(
+    ws: ServerWebSocket<WsClientData>,
+    move: SocketioMove,
+    event: string,
+    data: unknown,
+    ackId?: number,
+  ): Promise<void> {
+    if (!move.held) {
+      await this.routeCounted(ws, move, event, data, ackId);
+
+      return;
+    }
+
+    if (move.held.length < MAX_HELD_MESSAGES) {
+      move.held.push({ event, data, ackId });
+
+      return;
+    }
+
+    if (move.overflow) {
+      // Still waiting on the current gateway: the move is refused, and this packet is served there
+      // after the others it held.
+      move.held.push({ event, data, ackId });
+      move.overflow();
+
+      return;
+    }
+
+    this.logger.warn(
+      `Socket.IO client ${ws.data.id} sent more than ${MAX_HELD_MESSAGES} messages while it was being moved; `
+      + 'closing it.',
+    );
+    ws.close(WS_POLICY_VIOLATION, HELD_OVERFLOW);
+  }
+
+  /** Serve an EVENT of a connection that could still move, counted while it runs. */
+  private async routeCounted(
+    ws: ServerWebSocket<WsClientData>,
+    move: SocketioMove,
+    event: string,
+    data: unknown,
+    ackId?: number,
+  ): Promise<void> {
+    move.inFlight += 1;
+    try {
+      await this.routeMessage(ws, event, data, ackId);
+    } finally {
+      move.inFlight -= 1;
+      if (move.inFlight === 0) {
+        move.idle?.();
+      }
+    }
+  }
+
+  /**
+   * Serve the EVENTs a move held, in the order they arrived, on the gateway now serving the
+   * connection: the new one after a move, the same one after a refusal — and end the hold. They are
+   * started in one synchronous step, so an EVENT arriving later cannot overtake them; the step is
+   * short because a hold never exceeds `MAX_HELD_MESSAGES` (plus the one that overflowed it). A
+   * closed connection has nobody to answer, so they are dropped then.
+   */
+  private releaseHeld(
+    ws: ServerWebSocket<WsClientData>,
+    move: SocketioMove,
+    serve: (message: HeldMessage) => Promise<void>,
+  ): void {
+    const held = move.held ?? [];
+    move.held = undefined;
+
+    if (ws.readyState !== WS_OPEN) {
+      if (held.length > 0) {
+        this.logger.debug(`Dropping ${held.length} message(s) of closed WebSocket client ${ws.data.id} held by a move`);
+      }
+
+      return;
+    }
+
+    for (const message of held) {
+      void serve(message).catch((error: unknown) => {
+        this.logger.error(`Error serving a message held by a move for client ${ws.data.id}: ${error}`);
+      });
     }
   }
 
@@ -918,6 +1180,16 @@ export class WsHandler {
       return;
     }
 
+    if (this.socketioConnecting.has(ws)) {
+      this.logger.warn(
+        `Socket.IO client ${ws.data.id} sent a CONNECT packet for "${nsp}" while another of its CONNECT `
+        + 'packets is being decided; refusing it.',
+      );
+      this.refuseConnect(ws, nsp, CONNECT_PENDING);
+
+      return;
+    }
+
     const provisional = this.ownerOf(ws);
     if (!provisional) {
       this.logger.warn(
@@ -932,28 +1204,249 @@ export class WsHandler {
     const target = this.gatewayForPacketNamespace(nsp) ?? provisional;
 
     if (target !== provisional) {
-      // The upgrade ran the PROVISIONAL gateway's `authenticate` hook, and the upgrade request it
-      // would need is gone. A gateway that guards its connections must not be handed one its own
-      // hook never saw, so the switch is refused — and the transport stays open, so a client can
-      // name a namespace it is allowed to reach.
-      if (target.metadata?.authenticate) {
-        this.logger.warn(
-          `Socket.IO client ${ws.data.id} asked for namespace "${nsp}", whose gateway authenticates `
-          + 'connections at upgrade. Connect with ?namespace= so the hook runs.',
-        );
-        ws.send(wrapInEngineIO(createConnectErrorPacket({
-          message: `Namespace "${nsp}" authenticates at upgrade; connect with ?namespace=`,
-        }, nsp)));
-
+      this.socketioConnecting.add(ws);
+      let moved: boolean;
+      try {
+        moved = await this.moveSocketio(ws, nsp, provisional, target);
+      } finally {
+        this.socketioConnecting.delete(ws);
+      }
+      // A connection that closed while the move cleared its rooms has already run the new
+      // gateway's `@OnDisconnect`; its `@OnConnect` must not run after that.
+      if (!moved || !this.servedBy(ws, target)) {
         return;
       }
-
-      await this.rebindSocket(ws, provisional, target);
     }
 
+    // Served: the connection cannot move any more, so nothing of it is kept or counted from here.
+    // The EVENTs a move held arrived after this CONNECT: they are the new gateway's.
+    const move = this.socketioMoves.get(ws.data);
+    this.socketioMoves.delete(ws.data);
     this.socketioConnected.add(ws);
     ws.send(createFullEventMessage('connect', { sid: ws.data.id }, nsp));
-    await this.runConnectHandlers(target, ws);
+    const connecting = this.runConnectHandlers(target, ws);
+    if (move?.held) {
+      this.releaseHeld(ws, move, async ({ event, data, ackId }) => await this.routeMessage(ws, event, data, ackId));
+    }
+    await connecting;
+  }
+
+  /**
+   * Move a Socket.IO connection to the gateway its CONNECT named, all or nothing, and say whether it
+   * moved.
+   *
+   * The connection's identity is the target gateway's to decide. A target with an `authenticate`
+   * hook runs it, as the upgrade would have, and the connection becomes what it returns; a refusal
+   * refuses the CONNECT. A target without one never receives a connection another gateway's hook
+   * authenticated, so that move is refused. Between two gateways without a hook the connection
+   * moves as it is. Until the move is made the connection stays where it was — rooms, identity and
+   * the gateway serving its messages — so a refused CONNECT leaves it exactly as it was, and the
+   * transport stays open for a namespace the client may reach.
+   *
+   * Once a hook has allowed it, the identity is swapped only when nothing of the current gateway
+   * still runs for the connection: its new EVENTs are held, and the move waits — within the same
+   * bound as the hook — for the ones the current gateway is serving, guards and handler bodies.
+   * One that does not settle in time refuses the move. The held EVENTs are then served where the
+   * connection ends up.
+   */
+  private async moveSocketio(
+    ws: ServerWebSocket<WsClientData>,
+    nsp: string,
+    from: GatewayInstance,
+    to: GatewayInstance,
+  ): Promise<boolean> {
+    const authenticate = to.metadata?.authenticate;
+
+    if (!authenticate) {
+      if (from.metadata?.authenticate) {
+        this.logger.warn(
+          `Socket.IO client ${ws.data.id} asked for namespace "${nsp}", whose gateway has no `
+          + `authenticate hook, from ${from.key}, whose hook authenticated it; refusing the move.`,
+        );
+        this.refuseConnect(
+          ws,
+          nsp,
+          `Namespace "${nsp}" has no authenticate hook, and this connection was authenticated by another `
+          + `gateway's; connect with ?namespace=${to.metadata?.namespace}`,
+        );
+
+        return false;
+      }
+
+      // Neither gateway has a hook: no identity to swap, so nothing to wait for. A message of
+      // `from` still running stops at its next guard or before its handler body.
+      const outcome = await this.rebindSocket(ws, from, to);
+      if (outcome !== 'moved') {
+        this.failMove(ws, nsp, outcome);
+
+        return false;
+      }
+
+      return true;
+    }
+
+    const move = this.socketioMoves.get(ws.data);
+    if (!move) {
+      // Every connection a CONNECT can bring to a gateway with a hook has one, so this is a client
+      // data object user code replaced. Without its upgrade request there is nothing to
+      // authenticate against.
+      this.logger.warn(`Socket.IO client ${ws.data.id} has no upgrade request left to authenticate a move to "${nsp}"`);
+      this.refuseConnect(ws, nsp, UNAUTHORIZED);
+
+      return false;
+    }
+    if (move.hookUnsettled) {
+      this.logger.warn(
+        `Socket.IO client ${ws.data.id} asked for namespace "${nsp}" while an earlier authenticate call `
+        + 'for it has not settled; refusing it without calling the hook again.',
+      );
+      this.refuseConnect(ws, nsp, AUTHENTICATION_PENDING);
+
+      return false;
+    }
+
+    const identity = await this.authenticateMove(ws, nsp, move, authenticate);
+    if (!identity) {
+      this.refuseConnect(ws, nsp, UNAUTHORIZED);
+
+      return false;
+    }
+
+    // The hook may have taken a while; a connection that closed meanwhile goes nowhere.
+    if (!this.servedBy(ws, from)) {
+      return false;
+    }
+
+    const waited = await this.quiesce(move);
+    if (waited !== 'quiet') {
+      this.logger.warn(
+        waited === 'overflow'
+          ? `Socket.IO client ${ws.data.id} sent more than ${MAX_HELD_MESSAGES} messages while its move to `
+            + `"${nsp}" waited; refusing the move.`
+          : `Socket.IO client ${ws.data.id} still had messages running on ${from.key} after `
+            + `${MOVE_AUTHENTICATE_TIMEOUT_MS} ms; refusing its move to "${nsp}".`,
+      );
+    }
+    const outcome = waited === 'quiet' && this.servedBy(ws, from)
+      ? await this.rebindSocket(ws, from, to, identity)
+      : 'refused';
+    if (outcome === 'moved') {
+      return true;
+    }
+
+    this.failMove(ws, nsp, outcome, waited === 'overflow' ? HELD_OVERFLOW : MOVE_FAILED);
+    // Refused, the connection is still `from`'s, as before the CONNECT: so are the EVENTs the move
+    // held. Broken, it was closed, and they are dropped.
+    this.releaseHeld(ws, move, async ({ event, data, ackId }) => await this.routeCounted(ws, move, event, data, ackId));
+
+    return false;
+  }
+
+  /**
+   * Answer a CONNECT whose move did not happen. Refused before the connection changed hands, it
+   * stays where it was. Broken — the connection changed hands and the move could not finish — it is
+   * closed: it would otherwise sit on the new gateway with its CONNECT unanswered.
+   */
+  private failMove(
+    ws: ServerWebSocket<WsClientData>,
+    nsp: string,
+    outcome: 'refused' | 'broken',
+    message: string = MOVE_FAILED,
+  ): void {
+    this.refuseConnect(ws, nsp, message);
+    if (outcome === 'broken' && ws.readyState === WS_OPEN) {
+      ws.close(WS_INTERNAL_ERROR_CODE, MOVE_FAILED);
+    }
+  }
+
+  /**
+   * Hold the connection's new EVENTs and wait, within the bound, until the ones its current
+   * gateway is serving have settled: `quiet` when they did, `busy` when the bound expired first,
+   * `overflow` when the client sent more than `MAX_HELD_MESSAGES` meanwhile.
+   */
+  private async quiesce(move: SocketioMove): Promise<'quiet' | 'busy' | 'overflow'> {
+    move.held = [];
+    if (move.inFlight === 0) {
+      return 'quiet';
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        new Promise<'quiet'>((resolve) => {
+          move.idle = () => resolve('quiet');
+        }),
+        new Promise<'overflow'>((resolve) => {
+          move.overflow = () => resolve('overflow');
+        }),
+        new Promise<'busy'>((resolve) => {
+          timer = setTimeout(() => resolve('busy'), MOVE_AUTHENTICATE_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      move.idle = undefined;
+      move.overflow = undefined;
+    }
+  }
+
+  /**
+   * Run the target gateway's `authenticate` hook for a move, with what the upgrade gave the first
+   * gateway's: the same token and a request with the upgrade's URL and headers. The identity it
+   * answers, or `undefined` when it refused — by answering `false`, by throwing, or by not
+   * answering within the bound. A call past its bound keeps `hookUnsettled` until it settles.
+   */
+  private async authenticateMove(
+    ws: ServerWebSocket<WsClientData>,
+    nsp: string,
+    move: SocketioMove,
+    authenticate: (context: WsAuthContext) => WsAuthResult | Promise<WsAuthResult>,
+  ): Promise<HookIdentity | undefined> {
+    const { upgrade } = move;
+    const token = upgradeToken(new URL(upgrade.url), upgrade.headers);
+    const request = new Request(upgrade.url, { headers: upgrade.headers });
+
+    move.hookUnsettled = true;
+    const call = (async () => await authenticate({ token, request }))();
+    const settled = (): void => {
+      move.hookUnsettled = false;
+    };
+    void call.then(settled, settled);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let result: WsAuthResult | typeof HOOK_TIMED_OUT;
+    try {
+      result = await Promise.race([
+        call,
+        new Promise<typeof HOOK_TIMED_OUT>((resolve) => {
+          timer = setTimeout(() => resolve(HOOK_TIMED_OUT), MOVE_AUTHENTICATE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      this.logger.warn(`WebSocket authenticate hook threw on a move to "${nsp}", refusing it: ${error}`);
+
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (result === HOOK_TIMED_OUT) {
+      this.logger.warn(
+        `WebSocket authenticate hook did not answer a move to "${nsp}" within `
+        + `${MOVE_AUTHENTICATE_TIMEOUT_MS} ms; refusing it.`,
+      );
+
+      return undefined;
+    }
+
+    return identityFrom(token, result);
+  }
+
+  /** Answer a CONNECT with a Socket.IO CONNECT_ERROR, if anyone is still there to read it. */
+  private refuseConnect(ws: ServerWebSocket<WsClientData>, nsp: string, message: string): void {
+    if (ws.readyState === WS_OPEN) {
+      ws.send(wrapInEngineIO(createConnectErrorPacket({ message }, nsp)));
+    }
   }
 
   /**
@@ -985,24 +1478,70 @@ export class WsHandler {
   }
 
   /**
-   * Move an open socket from one gateway to another, registry and stored record together.
+   * Move an open socket from one gateway to another, stored record and registry, and say how it
+   * went: `moved`; `refused` when the connection closed or its record could not be written, before
+   * anything changed hands; `broken` when the connection changed hands and the removal of the rooms
+   * it left failed — it can be neither finished nor undone, so the caller closes it.
+   *
+   * The stored record moves first: from then on a gateway reading it — `from`'s fence in a
+   * server-side `joinRoom()`, on this instance or another — no longer finds the client its own.
+   * `identity`, when `to`'s hook gave one, is written with it, and becomes the live `auth` and
+   * `metadata` in the same synchronous step as the registry move, so `to`'s guards never see the
+   * connection with another identity. Without one, `auth` and `metadata` stay as they are.
    *
    * Rooms do not move with it: the socket arrives on `to` in no room. A room joined while it
    * belonged to `from` was joined under `from`'s `@OnJoinRoom` guards, or under none, and `to`'s
    * were never asked; carried over, the membership would receive `to`'s room broadcasts unchecked.
-   * The rooms are cleared in the same synchronous step as the move, so there is no moment at which
-   * the socket belongs to `to` and still holds `from`'s rooms. Nothing here waits on a join: one
-   * still pending on `from`'s guards is cancelled and answered at once.
-   *
-   * `auth` and `metadata` — what `from`'s `authenticate` hook set at upgrade — stay as they are.
+   * The rooms are cleared in that same synchronous step, so there is no moment at which the socket
+   * belongs to `to` and still holds `from`'s rooms. Nothing here waits on a join: one still pending
+   * on `from`'s guards is cancelled and answered at once.
    */
   private async rebindSocket(
     ws: ServerWebSocket<WsClientData>,
     from: GatewayInstance,
     to: GatewayInstance,
-  ): Promise<void> {
+    identity?: HookIdentity,
+  ): Promise<'moved' | 'refused' | 'broken'> {
     const client = ws.data;
     const clientId = client.id;
+
+    try {
+      await this.storage.updateClient(clientId, identity ? { gatewayKey: to.key, ...identity } : { gatewayKey: to.key });
+    } catch (error) {
+      this.logger.error(`WebSocket client ${clientId} could not be moved to ${to.key}: ${error}`);
+      // The write may have been applied and only its answer lost. The connection stays on `from`
+      // as it is, so its record says so again.
+      try {
+        await this.storage.updateClient(clientId, {
+          gatewayKey: from.key,
+          auth: client.auth,
+          metadata: client.metadata,
+        });
+      } catch (restoreError) {
+        this.logger.error(`WebSocket client ${clientId}'s record could not be restored after a failed move: ${restoreError}`);
+      }
+
+      return 'refused';
+    }
+
+    if (!this.servedBy(ws, from)) {
+      // Closed while the record was written. Its close removed the record, and a write that
+      // landed after that removal put it back; nothing would remove it again.
+      if (ws.readyState !== WS_OPEN) {
+        try {
+          await this.storage.removeClient(clientId);
+        } catch (error) {
+          this.logger.error(`WebSocket client ${clientId}'s record could not be removed after it closed during a move: ${error}`);
+        }
+      }
+
+      return 'refused';
+    }
+
+    if (identity) {
+      client.auth = identity.auth;
+      client.metadata = identity.metadata;
+    }
 
     // The gateway's own map IS the handler's map for that key — `_attachSockets` shares the one
     // object — so these two calls move the socket in both at once. A join started on `from`
@@ -1010,6 +1549,7 @@ export class WsHandler {
     from.instance._unregisterSocket(clientId);
     client.gatewayKey = to.key;
     to.instance._registerSocket(clientId, ws);
+    this.movedAway.set(ws, from);
 
     // Joins waiting on `from`'s guards.
     cancelRoomJoins(ws, 'moved');
@@ -1026,23 +1566,21 @@ export class WsHandler {
     // connection had are issued now — the in-memory adapter completes them before anything else
     // runs — and so is the read of the rooms the storage alone records. On Redis that read is
     // ordered before any write issued after the move, so the sweep removes only rooms the
-    // connection had at the move, never one `to` adds once it owns the socket. A join the client
-    // sends meanwhile waits for this (see handleRoomJoin).
+    // connection had at the move, never one `to` adds once it owns the socket. Every join of this
+    // socket meanwhile — the client's or a server-side `joinRoom()` — waits for it.
     const removed = Promise.all(rooms.map(async (room) => await this.storage.removeClientFromRoom(clientId, room)));
     const stored = this.storage.getRoomsForClient(clientId);
     const clearing = this.sweepStoredRooms(ws, rooms, removed, stored);
-    this.roomsMoving.set(ws, clearing);
+    trackRoomsClearing(ws, clearing);
     try {
       await clearing;
-    } finally {
-      if (this.roomsMoving.get(ws) === clearing) {
-        this.roomsMoving.delete(ws);
-      }
+    } catch (error) {
+      this.logger.error(`WebSocket client ${clientId} moved to ${to.key}, but the rooms it left could not be removed: ${error}`);
+
+      return 'broken';
     }
 
-    // The stored record carries the key every other gateway's reads are fenced against, so it
-    // has to move too or the connection is invisible to the gateway now serving it.
-    await this.storage.updateClient(clientId, { gatewayKey: to.key });
+    return 'moved';
   }
 
   /**
@@ -1117,6 +1655,7 @@ export class WsHandler {
     const owner = this.ownerOf(ws);
     for (const gateway of owner ? [owner] : []) {
       const handlers = gateway.handlers.get(HandlerType.MESSAGE) || [];
+      let ran = false;
 
       for (const handler of handlers) {
         if (!handler.pattern) {
@@ -1126,7 +1665,21 @@ export class WsHandler {
         const match = matchPattern(handler.pattern, event);
         if (match.matched) {
           try {
-            const result = await this.executeHandler(gateway, handler, ws, data, match.params);
+            // A second handler of the same message starts after the first one's wait, and a
+            // Socket.IO move may have taken the connection away from this gateway meanwhile.
+            const result = ran && this.movedFrom(ws, gateway)
+              ? MOVED_AWAY
+              : await this.executeHandler(gateway, handler, ws, data, match.params);
+            ran = true;
+
+            if (result === MOVED_AWAY) {
+              // A Socket.IO move landed while the message was on its way: the rest of it is not run.
+              if (ws.readyState === WS_OPEN) {
+                this.sendForbidden(ws, event, ackId, MESSAGE_CANCELLED_BY_MOVE_MESSAGE);
+              }
+
+              return;
+            }
 
             if (result === GUARD_DENIED) {
               this.sendForbidden(ws, event, ackId);
@@ -1198,9 +1751,9 @@ export class WsHandler {
 
     // A Socket.IO move is clearing this connection's stored rooms: a join must not land between
     // that clearing's read and its removals, or the removal takes the new membership with it.
-    const moving = this.roomsMoving.get(ws);
-    if (moving) {
-      await moving;
+    const clearing = roomsClearing(ws);
+    if (clearing) {
+      await clearing;
     }
 
     // OnJoinRoom handlers — owning gateway only — matched before the room changes, because their
@@ -1223,7 +1776,7 @@ export class WsHandler {
     }
 
     if (await this.addToRoom(ws, roomName, joinOwner)) {
-      await this.runJoinHandlers(ws, data, ackId, roomName, matched);
+      await this.runJoinHandlers(ws, event, data, ackId, roomName, matched);
     }
   }
 
@@ -1264,7 +1817,7 @@ export class WsHandler {
     }
 
     if (joined) {
-      await this.runJoinHandlers(ws, data, ackId, roomName, matched);
+      await this.runJoinHandlers(ws, event, data, ackId, roomName, matched);
     }
   }
 
@@ -1289,9 +1842,16 @@ export class WsHandler {
       if (!this.joinWanted(ws, joinOwner, join)) {
         return false;
       }
-      if (!(await this.joinGuardsAllow(gateway, handler, ws, data, params))) {
+      const verdict = await this.joinGuardsAllow(gateway, handler, ws, data, params);
+      if (verdict !== true) {
+        // A join a move stopped was answered when the move cancelled it.
         if (join.cancelled === undefined) {
-          this.sendForbidden(ws, event, ackId);
+          this.sendForbidden(
+            ws,
+            event,
+            ackId,
+            verdict === MOVED_AWAY ? JOIN_CANCELLED_BY_MOVE_MESSAGE : GUARD_DENIED_MESSAGE,
+          );
         }
 
         return false;
@@ -1352,24 +1912,49 @@ export class WsHandler {
     return true;
   }
 
-  /** Run the matched `@OnJoinRoom` handlers once the client is in the room; their guards have run. */
+  /**
+   * Run the matched `@OnJoinRoom` handlers once the client is in the room; their guards have run.
+   *
+   * A body does not run once a Socket.IO move has taken the connection away from the gateway that
+   * made the join: the move has taken the client out of the room again, so the rest of the join is
+   * not run, and a join no handler answered yet is answered as one the move cancelled.
+   */
   private async runJoinHandlers(
     ws: ServerWebSocket<WsClientData>,
+    event: string,
     data: unknown,
     ackId: number | undefined,
     roomName: string,
     matched: MatchedRoomHandler[],
   ): Promise<void> {
+    let answered = false;
     for (const { gateway, handler, params } of matched) {
+      if (this.movedFrom(ws, gateway)) {
+        if (!answered && ws.readyState === WS_OPEN) {
+          this.sendForbidden(ws, event, ackId, JOIN_CANCELLED_BY_MOVE_MESSAGE);
+        }
+
+        return;
+      }
       try {
         const result = await this.executeHandler(gateway, handler, ws, data, params, roomName, true);
         if (result !== undefined && isWsHandlerResponse(result)) {
           ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
+          answered = true;
         }
       } catch (error) {
         this.logger.error(`Error in OnJoinRoom handler: ${error}`);
       }
     }
+  }
+
+  /**
+   * Whether a Socket.IO move took the connection away from `gateway`: the one reason a message
+   * `gateway` started stops before its next guard or its handler body. A connection that closed has
+   * not moved, and its message runs on as it always did.
+   */
+  private movedFrom(ws: ServerWebSocket<WsClientData>, gateway: GatewayInstance): boolean {
+    return this.movedAway.get(ws) === gateway;
   }
 
   /** Whether the socket is still open and still bound to the gateway a room change started on. */
@@ -1390,7 +1975,7 @@ export class WsHandler {
     ws: ServerWebSocket<WsClientData>,
     data: unknown,
     patternParams: Record<string, string>,
-  ): Promise<boolean> {
+  ): Promise<GuardVerdict> {
     try {
       return await this.guardsAllow(gateway, handler, ws, data, patternParams);
     } catch (error) {
@@ -1443,11 +2028,17 @@ export class WsHandler {
     const leaveOwner = this.ownerOf(ws);
     for (const gateway of leaveOwner ? [leaveOwner] : []) {
       const handlers = gateway.handlers.get(HandlerType.LEAVE_ROOM) || [];
+      let ran = false;
 
       for (const handler of handlers) {
         const match = handler.pattern ? matchPattern(handler.pattern, roomName) : { matched: true, params: {} };
-        
+
         if (match.matched) {
+          // A second handler starts after the first one's wait; a Socket.IO move may have landed.
+          if (ran && this.movedFrom(ws, gateway)) {
+            return;
+          }
+          ran = true;
           try {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params, roomName);
             if (result !== undefined && isWsHandlerResponse(result)) {
@@ -1463,6 +2054,12 @@ export class WsHandler {
 
   /**
    * Run a handler's guards, logging a denial and a guard that threw.
+   *
+   * One guard at a time, confirming after each that no Socket.IO move has taken the connection
+   * away from `gateway`. A guard may wait, and a move landing meanwhile hands the connection — the
+   * client object the guards read — to another gateway, with that gateway's identity. A guard of
+   * the gateway that started the message never reads it, and neither does its handler body. A
+   * close is not a move: the message of a connection that closed runs on.
    */
   private async guardsAllow(
     gateway: GatewayInstance,
@@ -1470,7 +2067,7 @@ export class WsHandler {
     ws: ServerWebSocket<WsClientData>,
     data: unknown,
     patternParams: Record<string, string>,
-  ): Promise<boolean> {
+  ): Promise<GuardVerdict> {
     const client = ws.data;
     const context = new WsExecutionContextImpl(
       client,
@@ -1479,23 +2076,30 @@ export class WsHandler {
       handler,
       patternParams,
     );
-
-    const canActivate = await executeGuards(handler.guards ?? [], context, (name, error) => {
+    const onError = (name: string, error: unknown): void => {
       // The framework's own diagnostic. Before this, a guard that threw denied the message
       // and said nothing anywhere — indistinguishable from a guard that meant to deny.
       this.logger.error(
         `WebSocket guard ${name} threw on ${gateway.metadata?.path ?? '/'} ` +
         `${handler.handler} for client ${client.id}, denying: ${error}`,
       );
-    });
-    if (!canActivate) {
-      this.logger.warn(
-        `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
-        `for client ${client.id}`,
-      );
+    };
+
+    for (const guard of handler.guards ?? []) {
+      if (!(await executeGuards([guard], context, onError))) {
+        this.logger.warn(
+          `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
+          `for client ${client.id}`,
+        );
+
+        return false;
+      }
+      if (this.movedFrom(ws, gateway)) {
+        return MOVED_AWAY;
+      }
     }
 
-    return canActivate;
+    return true;
   }
 
   /**
@@ -1517,9 +2121,13 @@ export class WsHandler {
     const instance = gateway.instance;
 
     // Check guards
-    if (!guardsChecked && handler.guards && handler.guards.length > 0
-      && !(await this.guardsAllow(gateway, handler, ws, data, patternParams))) {
-      return GUARD_DENIED;
+    let waited = false;
+    if (!guardsChecked && handler.guards && handler.guards.length > 0) {
+      const verdict = await this.guardsAllow(gateway, handler, ws, data, patternParams);
+      if (verdict !== true) {
+        return verdict === false ? GUARD_DENIED : MOVED_AWAY;
+      }
+      waited = true;
     }
 
     // Build arguments
@@ -1565,15 +2173,29 @@ export class WsHandler {
       return undefined;
     }
 
-    const handlerFn = async (): Promise<unknown> => await method.apply(instance, args);
+    // After a wait — the guards', or an interceptor's before it calls the handler — the body does
+    // not run once a Socket.IO move has taken the connection away from `gateway`.
+    const intercepted = handler.interceptors !== undefined && handler.interceptors.length > 0;
+    let movedAway = false;
+    const handlerFn = async (): Promise<unknown> => {
+      if ((waited || intercepted) && this.movedFrom(ws, gateway)) {
+        movedAway = true;
 
-    if (handler.interceptors && handler.interceptors.length > 0) {
+        return undefined;
+      }
+
+      return await method.apply(instance, args);
+    };
+
+    let result: unknown;
+    if (intercepted) {
       const ctx = new WsExecutionContextImpl(client, ws, data, handler, patternParams);
-
-      return await composeInterceptors(handler.interceptors, ctx, handlerFn)();
+      result = await composeInterceptors(handler.interceptors ?? [], ctx, handlerFn)();
+    } else {
+      result = await handlerFn();
     }
 
-    return await handlerFn();
+    return movedAway ? MOVED_AWAY : result;
   }
 
   /**

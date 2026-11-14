@@ -241,7 +241,7 @@ describe('socket.io namespace routing', () => {
     expect(seen).toEqual(['admin.connect']);
   });
 
-  test('should refuse a namespace whose authenticate hook never ran', async () => {
+  test('should refuse a namespace whose authenticate hook refuses the connection', async () => {
     const app = boot(GuardedModule);
     await app.start();
 
@@ -250,8 +250,8 @@ describe('socket.io namespace routing', () => {
     await waitFor(() => raw.frames.find((frame) => frame.startsWith('0')), 'engine.io OPEN');
 
     // The upgrade ran ChatGateway's hook (it has none). Switching to a gateway that DOES guard
-    // its connections would admit a client its hook never saw, so the switch is refused rather
-    // than performed unchecked.
+    // its connections runs that gateway's hook first, and this one refuses everybody, so the
+    // switch is refused rather than performed unchecked.
     raw.send('40/guarded,');
     const refusal = await waitFor(
       () => raw.frames.find((frame) => frame.startsWith('44')),
