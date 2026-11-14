@@ -76,14 +76,54 @@ export interface MessageMetadata {
  * @see docs:api/queue.md
  */
 export interface Message<T = unknown> {
-  /** Unique message ID */
+  /** Unique message ID, as the publisher wrote it */
   id: string;
 
-  /** Message pattern/topic */
+  /**
+   * The topic the message was delivered on — the same value as `subject` on every built-in
+   * adapter. Never the subscription's own pattern: `@Subscribe('orders.{id}')` receiving
+   * `orders.123` reads `'orders.123'`. The `pattern` field a publisher writes into the message
+   * envelope is not read on delivery.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
   pattern: string;
 
   /**
-   * Values captured by the `{name}` parameters of the pattern this handler subscribed with.
+   * The subject the message was delivered on, as the receiving side observed it.
+   *
+   * On NATS and JetStream it is the subject the server delivered the message on, so it carries
+   * whatever the server's per-subject publish permissions prove about the publisher. On Redis it
+   * is the topic whose list the message was claimed from; on the in-memory adapter, the topic
+   * passed to `publish()`. Set by every built-in adapter; optional in the type so that a
+   * hand-built `Message` — a test double, a custom adapter — still compiles.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly subject?: string;
+
+  /**
+   * The JetStream stream the message was delivered from. `undefined` on every other adapter.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly stream?: string;
+
+  /**
+   * The transport headers the message arrived with: each name, in the case the publisher wrote
+   * it, mapped to every value it carried in arrival order. Set by the NATS and JetStream adapters
+   * when the message carried headers, `undefined` otherwise and on every other adapter.
+   *
+   * Not merged into `metadata.headers`, which is the publisher's own record inside the envelope.
+   * Treat it as read-only.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly headers?: ReadonlyMap<string, readonly string[]>;
+
+  /**
+   * Values captured by the `{name}` parameters of the pattern this handler subscribed with,
+   * matched against the delivery subject.
    *
    * `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
    * Always an object — `{}` for a pattern with no named parameters, and for a `*` or `#`

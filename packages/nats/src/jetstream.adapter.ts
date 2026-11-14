@@ -62,7 +62,7 @@ import {
   stampMetadata,
   type StampMetadata,
 } from './config-stamp';
-import { NatsClient } from './nats-client';
+import { NatsClient, toHeaderMap } from './nats-client';
 import { toNatsSubject, widensOnTranslation } from './subject';
 import {
   natsSubjectCovers,
@@ -248,6 +248,10 @@ function durableConsumerName(group: string, filterSubject: string): string {
 /** The wire envelope OneBun publishes. Anything else on the subject is foreign. */
 interface OneBunEnvelope {
   id?: string;
+  /**
+   * Written by `publish()` and never read on delivery: the subject the server delivered the
+   * message on is the topic, and this field is only the publisher's claim about it.
+   */
   pattern?: string;
   data?: unknown;
   timestamp?: number;
@@ -635,6 +639,10 @@ interface ResolvedStream extends StreamDefinition {
 class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The subject the server delivered the message on. */
+  readonly subject: string;
+  /** The stream the server delivered it from, read off the reply subject the driver parses. */
+  readonly stream?: string;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -642,6 +650,63 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   metadata: MessageMetadata;
   attempt?: number;
   maxAttempts?: number;
+
+  /**
+   * The wire headers, through the same `toHeaderMap()` the core-NATS path uses.
+   *
+   * An own, enumerable property of every instance, so `{ ...message }` and `Object.assign` carry
+   * it the way they carry the core-NATS adapter's — but converted only when first read, because
+   * every message published with a `messageId` carries `Nats-Msg-Id` and most handlers never
+   * look. Until then it is an accessor installed from the one shared `lazyHeaders` descriptor; the
+   * first read or write replaces it with a plain data property, so every later read returns the
+   * same map. Declared, not defined: a class field would install a data property first.
+   *
+   * A message frozen or sealed before that first read — by a guard, an interceptor, a test —
+   * cannot have the accessor replaced. Its value is kept in `unsettledHeaders` instead, so the
+   * read still answers, and answers with the same map every time.
+   */
+  declare readonly headers?: ReadonlyMap<string, readonly string[]>;
+
+  /** Shared by every instance, so installing it allocates nothing per message. */
+  private static readonly lazyHeaders: PropertyDescriptor = {
+    configurable: true,
+    enumerable: true,
+    get(this: JetStreamMessage<unknown>): ReadonlyMap<string, readonly string[]> | undefined {
+      if (JetStreamMessage.unsettledHeaders.has(this)) {
+        return JetStreamMessage.unsettledHeaders.get(this);
+      }
+
+      const raw = this.jsMsg.headers;
+
+      return JetStreamMessage.settleHeaders(this, raw ? toHeaderMap(raw) : undefined);
+    },
+    set(this: JetStreamMessage<unknown>, value: ReadonlyMap<string, readonly string[]> | undefined): void {
+      JetStreamMessage.settleHeaders(this, value);
+    },
+  };
+
+  /** `headers` of the messages whose accessor could not be replaced; empty unless one was frozen. */
+  private static readonly unsettledHeaders = new WeakMap<
+    JetStreamMessage<unknown>,
+    ReadonlyMap<string, readonly string[]> | undefined
+  >();
+
+  /** Turns the lazy accessor into the plain, writable data property the core-NATS message has. */
+  private static settleHeaders(
+    message: JetStreamMessage<unknown>,
+    value: ReadonlyMap<string, readonly string[]> | undefined,
+  ): ReadonlyMap<string, readonly string[]> | undefined {
+    try {
+      Object.defineProperty(message, 'headers', {
+        configurable: true, enumerable: true, writable: true, value,
+      });
+    } catch {
+      // Frozen or sealed: the accessor is no longer configurable and stays. It reads from here.
+      JetStreamMessage.unsettledHeaders.set(message, value);
+    }
+
+    return value;
+  }
 
   private acked = false;
   private nacked = false;
@@ -661,7 +726,6 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
 
   constructor(
     id: string,
-    pattern: string,
     params: Record<string, string>,
     data: T,
     timestamp: number,
@@ -672,13 +736,16 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
     serverTracksDelivery = true,
   ) {
     this.id = id;
-    this.pattern = pattern;
+    this.pattern = jsMsg.subject;
+    this.subject = jsMsg.subject;
+    Object.defineProperty(this, 'headers', JetStreamMessage.lazyHeaders);
     this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
     this.jsMsg = jsMsg;
     this.redelivered = jsMsg?.info?.redelivered ?? false;
+    this.stream = jsMsg?.info?.stream;
     // Read from the wire in the same place `redelivered` is: the server counts deliveries,
     // and that count is 1-based, so the documented `isLastAttempt(attempt, maxAttempts)`
     // check works as written. An unlimited consumer's cap arrives as `-1` whatever value at
@@ -2311,8 +2378,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           continue;
         }
 
-        // Check if pattern matches
-        const match = entry.matcher(messageData.pattern || msg.subject);
+        // Matched on the subject the server delivered on, never on the envelope's `pattern`: the
+        // envelope is the publisher's to write, and a client allowed to publish on one subject
+        // could otherwise name another there and pick the handler and its captures.
+        const match = entry.matcher(msg.subject);
         if (!match.matched) {
           // Always ack, including under ackMode 'manual': a message this subscription
           // does not match is not the handler's to acknowledge, and under explicit acks
@@ -2326,7 +2395,6 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         }
 
         const id = messageData.id || this.generateMessageId();
-        const messagePattern = messageData.pattern || msg.subject;
         const metadata = messageData.metadata || {};
 
         // Built only when the subscription configured a dead-letter queue AND the broker
@@ -2341,7 +2409,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
             entry,
             msg,
             {
-              id, pattern: messagePattern, data: messageData.data, metadata, 
+              id, pattern: msg.subject, data: messageData.data, metadata,
             },
             failure,
           );
@@ -2352,7 +2420,6 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
         const message = new JetStreamMessage(
           id,
-          messagePattern,
           // The consumer's `filter_subject` is the WIDENED subject — `{id}` binds `*` — so
           // the values come from the in-process match that just narrowed it back, at line
           // `entry.matcher(...)` above.

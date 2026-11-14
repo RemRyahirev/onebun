@@ -8,6 +8,7 @@
  */
 
 import { DeliverPolicy } from '@nats-io/jetstream';
+import { headers as natsHeaders } from '@nats-io/transport-node';
 import {
   afterAll,
   beforeAll,
@@ -774,6 +775,156 @@ describe('Negative acknowledgement (docs/api/queue.md)', () => {
 
     expect(jsMsg.term).toHaveBeenCalled();
     expect(jsMsg.nak).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#message-subject
+ */
+describe('Where pattern, params and subject come from (docs/api/queue.md)', () => {
+  /** The documented `ResultConsumer`, recording what it reads instead of logging it. */
+  class ResultConsumer {
+    readonly seen: Array<Record<string, unknown>> = [];
+    readonly refused: Array<string | undefined> = [];
+
+    @Subscribe('*.wq.result.{runId}', { group: 'results' })
+    async onResult(message: Message<{ status: string }>): Promise<void> {
+      const { runId } = message.params;
+      if (!/^\d+$/.test(runId)) {
+        this.refused.push(message.subject);
+        await message.nack(false);
+
+        return;
+      }
+
+      const application = message.subject?.split('.')[0];
+      this.seen.push({
+        subject: message.subject,
+        pattern: message.pattern,
+        runId,
+        stream: message.stream,
+        msgId: message.headers?.get('Nats-Msg-Id'),
+        application,
+      });
+    }
+  }
+
+  /** The envelope application A's worker writes, claiming application B's subject and run. */
+  const FORGED = JSON.stringify({
+    id: 'forged-1', pattern: 'app-b.wq.result.999', data: { status: 'succeeded' }, timestamp: 1, metadata: {},
+  });
+
+  /**
+   * Runs the documented consumer through QueueService on a JetStream adapter whose consumer hands
+   * out one message delivered on `subject`. Settles on the loop's own disposition — `ack()` after
+   * a handler that returned, `term()` after `nack(false)` — so no timer decides when it is done.
+   */
+  async function consumeOnJetStream(subject: string): Promise<{ consumer: ResultConsumer; jsMsg: AnyRecord }> {
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'forged-1');
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const jsMsg: AnyRecord = {
+      ack: mock(() => settle()),
+      nak: mock(() => undefined),
+      term: mock(() => settle()),
+      data: new TextEncoder().encode(FORGED),
+      subject,
+      headers: wire,
+      info: { redelivered: false, deliveryCount: 1, stream: 'RESULTS' },
+    };
+
+    const adapter = createJetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [{ name: 'RESULTS', subjects: ['*.wq.result.>'] }],
+    });
+    const a = adapter as unknown as AnyRecord;
+    a.connected = true;
+    a.client = { isConnected: mock(() => true), disconnect: mock(() => Promise.resolve()) };
+    a.jsm = {
+      consumers: {
+        add: mock(() => Promise.resolve()),
+        info: mock(() => Promise.reject(Object.assign(new Error('consumer not found'), { code: 10014 }))),
+        update: mock(() => Promise.resolve()),
+      },
+    };
+    a.js = {
+      consumers: {
+        get: mock(() => Promise.resolve({
+          consume: mock(() => Promise.resolve({
+            async *[Symbol.asyncIterator] () {
+              yield jsMsg;
+              await new Promise(() => undefined);
+            },
+            close: mock(() => Promise.resolve()),
+            status: mock(() => ({
+              async *[Symbol.asyncIterator] () {
+                await new Promise(() => undefined);
+              },
+            })),
+          })),
+        })),
+      },
+    };
+
+    const service = new QueueService({ adapter: 'jetstream' });
+    const consumer = new ResultConsumer();
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+    await settled;
+    await service.stop();
+
+    return { consumer, jsMsg };
+  }
+
+  it('reads subject, stream and headers from the JetStream delivery, not from the envelope', async () => {
+    const { consumer } = await consumeOnJetStream('app-a.wq.result.1');
+
+    expect(consumer.seen).toEqual([{
+      subject: 'app-a.wq.result.1',
+      pattern: 'app-a.wq.result.1',
+      runId: '1',
+      stream: 'RESULTS',
+      msgId: ['forged-1'],
+      application: 'app-a',
+    }]);
+  });
+
+  it('refuses a run id the publisher spelled as a wildcard token, and JetStream terminates it', async () => {
+    // "a publish to `app-a.wq.result.*` captures `runId === '*'`"
+    const { consumer, jsMsg } = await consumeOnJetStream('app-a.wq.result.*');
+
+    expect(consumer.refused).toEqual(['app-a.wq.result.*']);
+    expect(consumer.seen).toEqual([]);
+    expect(jsMsg.term).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads subject and headers from the NATS delivery, and has no stream', async () => {
+    const adapter = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
+    const consumer = new ResultConsumer();
+
+    await (adapter as unknown as AnyRecord).processMessage({
+      pattern: '*.wq.result.{runId}',
+      handler: async (message: Message<{ status: string }>) => await consumer.onResult(message),
+      matcher: createQueuePatternMatcher('*.wq.result.{runId}'),
+      paused: false,
+      ackMode: resolveAckMode(undefined),
+    }, {
+      subject: 'app-a.wq.result.1',
+      data: FORGED,
+      headers: new Map([['Nats-Msg-Id', ['forged-1']]]),
+    });
+
+    expect(consumer.seen).toEqual([{
+      subject: 'app-a.wq.result.1',
+      pattern: 'app-a.wq.result.1',
+      runId: '1',
+      stream: undefined,
+      msgId: ['forged-1'],
+      application: 'app-a',
+    }]);
   });
 });
 

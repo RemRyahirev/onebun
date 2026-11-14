@@ -33,7 +33,10 @@ broker is unreachable.
 ```typescript
 interface Message<T> {
   id: string;                    // unique message ID
-  pattern: string;               // message topic as DELIVERED
+  pattern: string;               // message topic as DELIVERED — the same value as `subject`
+  readonly subject?: string;     // where it was delivered; set by every built-in adapter
+  readonly stream?: string;      // JetStream stream; undefined elsewhere
+  readonly headers?: ReadonlyMap<string, readonly string[]>; // wire headers, NATS and JetStream only
   params: Record<string, string>; // values captured by the pattern's {name}s; {} when none
   data: T;                       // payload
   timestamp: number;             // unix timestamp (ms)
@@ -62,6 +65,29 @@ gives each handler its own values. It is therefore NOT in the published envelope
 do not look for it in `metadata`, and do not put it there: `PublishOptions.metadata` is the publisher's, and on
 Redis a receiver-written metadata key would be persisted into the requeued envelope and handed to whichever
 subscription claims the message next.
+
+**`subject`, `pattern` and `params` come from the delivery, never from the envelope.** `publish()` writes a
+`pattern` field into the JSON body, and no adapter reads it on receive: the handler a message reaches and the
+`params` it captures follow the subject the message was delivered on — `msg.subject` on NATS/JetStream, the
+list the message was claimed from on Redis, the published topic in memory. For anything `publish()` sent to a
+literal topic, `pattern` and `subject` are that topic and `params` is what the subscription captures from it.
+Never publish to a non-literal topic: JetStream sends `{name}` as `*` and `#` as `>`, so the handler sees
+`orders.*` with `params.id === '*'`.
+
+A subject proves where the broker delivered a message, not who sent it. On NATS/JetStream the server assigns
+it, so under per-subject publish permissions (`<app>.>` per application) a message on `app-a.…` came from a
+client allowed to publish there — `message.subject?.split('.')[0]` is the strongest sender check a handler
+has. Within its grant the publisher still picks the subject, wildcard tokens included: a raw publish to
+`app-a.wq.result.*` reaches `*.wq.result.{runId}` with `params.runId === '*'`, and a subject spelling the
+subscription pattern itself matches as a literal with `params` `{}`. **Validate `params` values like any other
+input.** `metadata` (`serviceId`, `authorization`, `headers`), `id`, `timestamp` and `data` are the publisher's
+own claims on every adapter. A Redis subject proves only keyspace access: delayed and priority messages are
+routed by their envelope, and a list entry that is not a OneBun envelope (an object with a string `id` and a
+numeric `timestamp`; `metadata` an object and `attempt` a number when present) goes to `onError` naming the
+topic, never to a handler. `data` may be absent — `publish(topic, undefined)` and a job method returning
+nothing write no `data` key — and arrives as `undefined`. `subject` is optional in the type so
+hand-built test doubles compile — built-in adapters always set it. `headers` is an own property on both NATS
+adapters, so `{ ...message }` keeps it.
 
 The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves both `undefined`, along with `redelivered`.
 The memory adapter retries in-process only; retries do not survive a restart.
@@ -521,7 +547,7 @@ const app = new OneBunApplication(AppModule, {
 - Consumer groups via NATS queue groups
 - Pattern conversion via `toNatsSubject`: OneBun's `#` wildcard → NATS `>`, and a `{name}` parameter → NATS `*` (automatic)
 - `metadata.headers` travels twice: in the envelope (what the handler's `message.metadata` holds) and as NATS wire headers, so `nats sub` sees them too. Names keep their published case on both paths — look them up (`metadata.headers[...]`, `MessageHeaderGuard`) spelled exactly as published. Headers a message brings on its own (`Nats-Msg-Id` from a JetStream `messageId`, a name another client repeated) are delivered but never merged into `metadata`
-- Wire headers are readable through `NatsClient.subscribe()` / `request()`: `NatsMessage.headers` is a `Map<string, string[]>` (every value in arrival order, absent when none). Inside the package, read driver headers only through `toHeaderMap()` (`MsgHdrs.keys()` + `values()`) — `MsgHdrs` has no `entries()`, and any throw inside `NatsClient`'s consume loop ends the subscription for good
+- Wire headers reach a handler as `message.headers` on both NATS adapters (JetStream converts them on first read), and `NatsClient.subscribe()` / `request()` give the same map as `NatsMessage.headers`: a `Map<string, string[]>` (every value in arrival order, absent when none). Inside the package, read driver headers only through `toHeaderMap()` (`MsgHdrs.keys()` + `values()`) — `MsgHdrs` has no `entries()`, and any throw inside `NatsClient`'s consume loop ends the subscription for good
 
 ### Connection options (both adapters)
 

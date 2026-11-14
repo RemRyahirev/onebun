@@ -13,6 +13,7 @@
  */
 
 import * as realJetStream from '@nats-io/jetstream';
+import { headers as natsHeaders } from '@nats-io/transport-node';
 import {
   describe,
   it,
@@ -25,7 +26,8 @@ import {
 
 import type { JetStreamAdapterOptions } from '../src/types';
 
-import { isLastAttempt } from '@onebun/core';
+import type { Message } from '@onebun/core';
+import { createQueuePatternMatcher, isLastAttempt } from '@onebun/core';
 import { useFakeTimers } from '@onebun/core/testing';
 
 
@@ -5931,5 +5933,255 @@ describe('workqueue streams: a vanished consumer comes back deliver-all', () => 
     expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(2);
     expect(callArg(mockJsm.consumers.add, 0, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
     expect(callArg(mockJsm.consumers.add, 1, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+  });
+});
+
+// ============================================================================
+// Delivery subject (FB-40)
+//
+// The server routes a message by its subject, and a publisher writes the JSON
+// envelope. `pattern` and `params` are read from the subject; the envelope's own
+// `pattern` field is the publisher's claim and never decides which handler runs or
+// what it captures.
+// ============================================================================
+
+describe('delivery subject: pattern and params follow the subject, not the envelope', () => {
+  /** A message the server delivered on `subject`, whose envelope names `envelopePattern`. */
+  function deliveredOn(subject: string, envelopePattern: string, extra: Partial<AnyRecord> = {}): AnyRecord {
+    return makeMockJsMsg({
+      subject,
+      data: new TextEncoder().encode(JSON.stringify({
+        id: 'forged-1',
+        pattern: envelopePattern,
+        data: { ok: true },
+        timestamp: 1,
+        metadata: { claimedBy: 'b' },
+      })),
+      ...extra,
+    });
+  }
+
+  /**
+   * Subscribes `pattern` and feeds `jsMsg` through the consume loop. Settles on the loop's own
+   * `ack()` — sent after a handler that returned, and for a stray the pattern does not match — so
+   * no timer decides when the message has been handled.
+   */
+  async function consume(
+    pattern: string,
+    jsMsg: AnyRecord,
+    adapter: JetStreamQueueAdapter = makeConnectedAdapter().adapter,
+  ): Promise<Message | null> {
+    const settled = makeDeferred();
+    jsMsg.ack = mock(() => settled.resolve());
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(makeMockConsumer([jsMsg])));
+
+    let received: Message | null = null;
+    await adapter.subscribe(pattern, async (message) => {
+      received = message;
+    }, { group: 'g' });
+    await settled.promise;
+
+    return received;
+  }
+
+  it('captures params from the subject the message arrived on, not from the envelope', async () => {
+    // onebun-FB-53: delivered on `test.a.result.1`, with an envelope claiming `test.b.result.999`.
+    const message = await consume('test.*.result.{id}', deliveredOn('test.a.result.1', 'test.b.result.999'));
+
+    expect(message?.pattern).toBe('test.a.result.1');
+    expect(message?.subject).toBe('test.a.result.1');
+    expect(message?.params).toEqual({ id: '1' });
+    // The rest of the envelope is the publisher's to write, and arrives as written.
+    expect(message?.id).toBe('forged-1');
+    expect(message?.metadata).toEqual({ claimedBy: 'b' });
+  });
+
+  it('does not run a handler its subject does not match, whatever the envelope names', async () => {
+    // `test.v{version}` filters the wider `test.*`, so the server hands it `test.x` too.
+    const jsMsg = deliveredOn('test.x', 'test.v2');
+    const message = await consume('test.v{version}', jsMsg);
+
+    expect(message).toBeNull();
+    // Acknowledged as a stray, like any other message the pattern does not match.
+    expect(jsMsg.ack).toHaveBeenCalledTimes(1);
+    expect(jsMsg.term).not.toHaveBeenCalled();
+  });
+
+  it('runs the handler its subject matches, whatever the envelope names', async () => {
+    const message = await consume('test.v{version}', deliveredOn('test.v3', 'test.x'));
+
+    expect(message?.params).toEqual({ version: '3' });
+    expect(message?.pattern).toBe('test.v3');
+  });
+
+  it('delivers a message whose envelope pattern is not a string, matched on its subject', async () => {
+    const jsMsg = makeMockJsMsg({
+      subject: 'test.orders.8',
+      data: new TextEncoder().encode(JSON.stringify({
+        id: 'n-1', pattern: 123, data: {}, timestamp: 1,
+      })),
+    });
+    const message = await consume('test.orders.{id}', jsMsg);
+
+    expect(message?.params).toEqual({ id: '8' });
+    expect(message?.pattern).toBe('test.orders.8');
+  });
+
+  it('matches on the subject when the envelope carries no pattern at all', async () => {
+    const jsMsg = makeMockJsMsg({
+      subject: 'test.orders.7',
+      data: new TextEncoder().encode(JSON.stringify({ data: { n: 1 } })),
+    });
+    const message = await consume('test.orders.{id}', jsMsg);
+
+    expect(message?.params).toEqual({ id: '7' });
+    expect(message?.subject).toBe('test.orders.7');
+  });
+
+  it('reports the stream the server delivered the message from', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', {
+      info: { redelivered: false, deliveryCount: 1, stream: 'TEST_STREAM' },
+    }));
+
+    expect(message?.stream).toBe('TEST_STREAM');
+  });
+
+  it('exposes the wire headers by name, every value in arrival order', async () => {
+    // The driver's own headers object: a Map stand-in has `entries()`, which `MsgHdrs` does not.
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    wire.append('X-Probe', 'a');
+    wire.append('X-Probe', 'b');
+
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(message?.headers?.get('X-Probe')).toEqual(['a', 'b']);
+    expect([...(message?.headers?.keys() ?? [])]).toEqual(['Nats-Msg-Id', 'X-Probe']);
+    // Converted once: every read is the same map.
+    expect(message?.headers).toBe(message?.headers);
+  });
+
+  it('leaves headers undefined on a message that carried none', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic'));
+
+    expect(message?.headers).toBeUndefined();
+  });
+
+  it('converts the headers only when a handler reads them, and only once', async () => {
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    const jsMsg = deliveredOn('test.topic', 'test.topic');
+    let reads = 0;
+    Object.defineProperty(jsMsg, 'headers', {
+      get() {
+        reads += 1;
+
+        return wire;
+      },
+    });
+
+    const message = await consume('test.topic', jsMsg);
+    expect(reads).toBe(0);
+
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(reads).toBe(1);
+  });
+
+  it('carries headers through a spread and Object.assign, as an own property like core NATS', async () => {
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+
+    // Copied before anything read it: the copy triggers the one conversion.
+    const spread = { ...message } as AnyRecord;
+    expect(spread.headers.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(Object.keys(message!)).toContain('headers');
+    expect(Object.assign({}, message).headers).toBe(spread.headers);
+    expect(message?.headers).toBe(spread.headers);
+  });
+
+  const locks: Array<[label: string, lock: (target: object) => unknown]> = [
+    ['frozen', (target) => Object.freeze(target)],
+    ['sealed', (target) => Object.seal(target)],
+  ];
+
+  for (const [label, lock] of locks) {
+    it(`still reads headers on a message ${label} before they were first read, as one map`, async () => {
+      // A guard or an interceptor may freeze the message; core NATS returns its map either way.
+      const wire = natsHeaders();
+      wire.set('Nats-Msg-Id', 'outbox-1');
+      const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+      lock(message!);
+
+      const first = message?.headers;
+
+      expect(first?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+      expect(message?.headers).toBe(first);
+      expect(({ ...message } as AnyRecord).headers).toBe(first);
+    });
+  }
+
+  it('accepts an assignment to headers, as the core-NATS message does', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic')) as AnyRecord;
+    const replacement = new Map([['X-Probe', ['p']]]);
+
+    message.headers = replacement;
+
+    expect(message.headers).toBe(replacement);
+  });
+
+  describe('a message published through publish()', () => {
+    /**
+     * Publishes through the adapter, then consumes exactly what reached the wire. The expectation
+     * is what the envelope-reading loop gave — `pattern` from the envelope's own field, `params`
+     * from matching it — so this pins "unchanged for publish()" rather than restating the rule.
+     */
+    async function roundTrip(subscription: string, topic: string): Promise<{
+      message: Message | null;
+      envelopePattern: string;
+      expectedParams: Record<string, string>;
+    }> {
+      const { adapter, mockJs } = makeConnectedAdapter();
+      await adapter.publish(topic, { n: 1 }, { messageId: 'rt-1' });
+
+      const [subject, payload] = asAny(mockJs.publish).mock.calls[0] as [string, Uint8Array];
+      const envelopePattern = (JSON.parse(new TextDecoder().decode(payload)) as { pattern: string }).pattern;
+      const message = await consume(subscription, makeMockJsMsg({ subject, data: payload }), adapter);
+
+      return {
+        message,
+        envelopePattern,
+        expectedParams: createQueuePatternMatcher(subscription)(envelopePattern).params,
+      };
+    }
+
+    for (const [subscription, topic] of [
+      ['test.orders.{id}', 'test.orders.42'],
+      ['test.{kind}.{id}', 'test.orders.42'],
+      ['test.orders.*', 'test.orders.created'],
+      ['test.#', 'test.orders.42.shipped'],
+      ['test.topic', 'test.topic'],
+    ] as const) {
+      it(`shows the same pattern and params as before for ${topic} on ${subscription}`, async () => {
+        const { message, envelopePattern, expectedParams } = await roundTrip(subscription, topic);
+
+        expect(message?.pattern).toBe(envelopePattern);
+        expect(message?.params).toEqual(expectedParams);
+        expect(message?.subject).toBe(topic);
+      });
+    }
+
+    it('delivers a publish to a non-literal topic as the NATS wildcard subject it was sent on', async () => {
+      // Documented, not endorsed: `{name}` and `#` name no single subject, and `publish()`
+      // translates them through `toNatsSubject()` like any pattern.
+      const named = await roundTrip('test.orders.{id}', 'test.orders.{id}');
+      expect(named.message?.pattern).toBe('test.orders.*');
+      expect(named.message?.params).toEqual({ id: '*' });
+
+      const multi = await roundTrip('test.#', 'test.events.#');
+      expect(multi.message?.pattern).toBe('test.events.>');
+    });
   });
 });

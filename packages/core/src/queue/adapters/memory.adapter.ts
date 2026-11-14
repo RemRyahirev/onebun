@@ -89,6 +89,8 @@ interface DelayedMessage {
 class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The topic passed to `publish()`: an in-process bus has no subject of its own. */
+  readonly subject: string;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -118,6 +120,7 @@ class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.subject = pattern;
     this.params = params;
     this.data = data;
     this.timestamp = Date.now();

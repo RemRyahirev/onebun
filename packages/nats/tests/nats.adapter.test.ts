@@ -361,6 +361,165 @@ describe('NatsQueueAdapter', () => {
     });
   });
 
+  describe('delivery subject', () => {
+    /**
+     * `processMessage` with a frame the server delivered on `subject` whose envelope names
+     * `envelopePattern`. Any client allowed to publish on one subject can write another pattern
+     * into the envelope; the subject is the server's.
+     */
+    async function deliverOn(
+      pattern: string,
+      frame: { subject: string; data: string; headers?: Map<string, string[]> },
+    ): Promise<Message | null> {
+      let received: Message | null = null;
+
+      const entry = {
+        pattern,
+        async handler(message: Message) {
+          received = message;
+        },
+        options: undefined,
+        matcher: createQueuePatternMatcher(pattern),
+        paused: false,
+        ackMode: resolveAckMode(undefined),
+      };
+
+      await asAny(adapter).processMessage(entry, frame);
+
+      return received;
+    }
+
+    function envelope(pattern: string): string {
+      return JSON.stringify({
+        id: 'forged-1', pattern, data: { ok: true }, timestamp: 1, metadata: { claimedBy: 'b' },
+      });
+    }
+
+    it('captures params from the subject the message arrived on, not from the envelope', async () => {
+      // onebun-FB-53: delivered on `app-a.wq.result.1`, the envelope claiming `app-b.wq.result.999`.
+      const message = await deliverOn('*.wq.result.{id}', {
+        subject: 'app-a.wq.result.1',
+        data: envelope('app-b.wq.result.999'),
+      });
+
+      expect(message?.pattern).toBe('app-a.wq.result.1');
+      expect(message?.subject).toBe('app-a.wq.result.1');
+      expect(message?.params).toEqual({ id: '1' });
+      // The rest of the envelope is the publisher's to write, and arrives as written.
+      expect(message?.id).toBe('forged-1');
+      expect(message?.metadata).toEqual({ claimedBy: 'b' });
+    });
+
+    it('does not run a handler its subject does not match, whatever the envelope names', async () => {
+      // `jobs.v{version}` subscribes the wider `jobs.*`, so the server hands it `jobs.x` too.
+      const message = await deliverOn('jobs.v{version}', { subject: 'jobs.x', data: envelope('jobs.v2') });
+
+      expect(message).toBeNull();
+    });
+
+    it('runs the handler its subject matches, whatever the envelope names', async () => {
+      const message = await deliverOn('jobs.v{version}', { subject: 'jobs.v3', data: envelope('jobs.x') });
+
+      expect(message?.params).toEqual({ version: '3' });
+      expect(message?.pattern).toBe('jobs.v3');
+    });
+
+    it('delivers a message whose envelope pattern is not a string, matched on its subject', async () => {
+      const message = await deliverOn('orders.{id}', {
+        subject: 'orders.8',
+        data: JSON.stringify({
+          id: 'n-1', pattern: 123, data: {}, timestamp: 1,
+        }),
+      });
+
+      expect(message?.params).toEqual({ id: '8' });
+      expect(message?.pattern).toBe('orders.8');
+    });
+
+    it('exposes the wire headers and no stream', async () => {
+      const headers = new Map([['X-Probe', ['a', 'b']]]);
+      const message = await deliverOn('orders.created', {
+        subject: 'orders.created',
+        data: envelope('orders.created'),
+        headers,
+      });
+
+      expect(message?.headers?.get('X-Probe')).toEqual(['a', 'b']);
+      // Core NATS has no streams.
+      expect(message?.stream).toBeUndefined();
+    });
+
+    it('leaves headers undefined on a message that carried none', async () => {
+      const message = await deliverOn('orders.created', { subject: 'orders.created', data: envelope('orders.created') });
+
+      expect(message?.headers).toBeUndefined();
+    });
+
+    it('carries headers through a spread, as an own property like JetStream', async () => {
+      const headers = new Map([['X-Probe', ['a']]]);
+      const message = await deliverOn('orders.created', {
+        subject: 'orders.created',
+        data: envelope('orders.created'),
+        headers,
+      });
+
+      expect(({ ...message } as Message).headers).toBe(headers);
+      expect(Object.keys(message!)).toContain('headers');
+    });
+
+    describe('a message published through publish()', () => {
+      /**
+       * Publishes through the adapter, then delivers exactly what reached the client. The
+       * expectation is what the envelope-reading path gave — `pattern` from the envelope's own
+       * field, `params` from matching it — so this pins "unchanged for publish()".
+       */
+      async function roundTrip(subscription: string, topic: string) {
+        const sent: Array<{ subject: string; data: string; headers?: Record<string, string> }> = [];
+        const a = asAny(adapter);
+        a.connected = true;
+        a.client = {
+          publish: mock(async (subject: string, data: string, headers?: Record<string, string>) => {
+            sent.push({ subject, data, headers });
+          }),
+        };
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await adapter.publish(topic, { n: 1 }, { metadata: { headers: { 'X-Probe': 'p' } } });
+
+        const [frame] = sent;
+        const envelopePattern = (JSON.parse(frame.data) as { pattern: string }).pattern;
+        const message = await deliverOn(subscription, {
+          subject: frame.subject,
+          data: frame.data,
+          headers: new Map(Object.entries(frame.headers ?? {}).map(([name, value]) => [name, [value]])),
+        });
+
+        return {
+          message,
+          envelopePattern,
+          expectedParams: createQueuePatternMatcher(subscription)(envelopePattern).params,
+        };
+      }
+
+      for (const [subscription, topic] of [
+        ['orders.{id}', 'orders.42'],
+        ['{kind}.{id}', 'orders.42'],
+        ['orders.*', 'orders.created'],
+        ['orders.#', 'orders.42.shipped'],
+        ['orders.created', 'orders.created'],
+      ] as const) {
+        it(`shows the same pattern and params as before for ${topic} on ${subscription}`, async () => {
+          const { message, envelopePattern, expectedParams } = await roundTrip(subscription, topic);
+
+          expect(message?.pattern).toBe(envelopePattern);
+          expect(message?.params).toEqual(expectedParams);
+          expect(message?.subject).toBe(topic);
+          expect(message?.headers?.get('X-Probe')).toEqual(['p']);
+        });
+      }
+    });
+  });
+
   describe('event handlers', () => {
     it('should register and unregister event handlers', () => {
       // eslint-disable-next-line @typescript-eslint/no-empty-function

@@ -1222,6 +1222,8 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(delivered[0]!.params).toEqual({ id: '123', event: 'created' });
     // "the topic as delivered" — the pattern field is unchanged by the capture.
     expect(delivered[0]!.pattern).toBe('orders.123.created');
+    // "the same value"
+    expect(delivered[0]!.subject).toBe('orders.123.created');
     // "A pattern with no {name} gives params === {} rather than undefined."
     expect(matchQueuePattern('orders.*', 'orders.created').params).toEqual({});
   });
@@ -1273,6 +1275,116 @@ describe('Pattern Syntax — the Redis key glob column', () => {
 
     expect(delivered[0]!.params).toEqual({ id: '123' });
     expect(Object.keys(delivered[0]!.metadata ?? {})).not.toContain('params');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#message-subject
+ */
+describe('Where pattern, params and subject come from (docs/api/queue.md)', () => {
+  /** The documented `ResultConsumer`, recording what it reads instead of logging it. */
+  class ResultConsumer {
+    readonly seen: Array<Record<string, unknown>> = [];
+    readonly refused: Array<string | undefined> = [];
+
+    @Subscribe('*.wq.result.{runId}', { group: 'results' })
+    async onResult(message: Message<{ status: string }>): Promise<void> {
+      const { runId } = message.params;
+      if (!/^\d+$/.test(runId)) {
+        this.refused.push(message.subject);
+        await message.nack(false);
+
+        return;
+      }
+
+      const application = message.subject?.split('.')[0];
+      this.seen.push({
+        subject: message.subject,
+        pattern: message.pattern,
+        runId,
+        stream: message.stream,
+        headers: message.headers,
+        application,
+      });
+    }
+  }
+
+  /** Runs the documented consumer on the in-memory adapter and publishes each topic to it. */
+  async function deliver(...topics: string[]): Promise<ResultConsumer> {
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    for (const topic of topics) {
+      await adapter.publish(topic, { status: 'succeeded' });
+    }
+
+    await service.stop();
+    await adapter.disconnect();
+
+    return consumer;
+  }
+
+  it('refuses a run id the publisher spelled as a wildcard token', async () => {
+    // "a publish to `app-a.wq.result.*` captures `runId === '*'`"
+    const consumer = await deliver('app-a.wq.result.*');
+
+    expect(consumer.refused).toEqual(['app-a.wq.result.*']);
+    expect(consumer.seen).toEqual([]);
+  });
+
+  it('refuses a subject that spells the subscription pattern itself, which captures nothing', async () => {
+    // "matches as a literal and captures nothing, leaving `params.runId` undefined"
+    const consumer = await deliver('*.wq.result.{runId}');
+
+    expect(consumer.refused).toEqual(['*.wq.result.{runId}']);
+    expect(consumer.seen).toEqual([]);
+  });
+
+  it('reads the delivery on the in-memory adapter: the published topic, no stream, no headers', async () => {
+    // The whole chain the docs show — decorator, QueueService, adapter — so a wrapper that
+    // re-built the message and dropped the new fields would fail here.
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    await adapter.publish('app-a.wq.result.1', { status: 'succeeded' });
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen).toHaveLength(1);
+    expect(consumer.seen[0]).toEqual({
+      subject: 'app-a.wq.result.1',
+      pattern: 'app-a.wq.result.1',
+      runId: '1',
+      stream: undefined,
+      headers: undefined,
+      application: 'app-a',
+    });
+  });
+
+  it('captures from the topic itself on the in-memory adapter, whatever the metadata claims', async () => {
+    // "Everything else on the message is the publisher's word" — and none of it moves `params`.
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    await adapter.publish('app-b.wq.result.7', {}, { metadata: { pattern: 'app-a.wq.result.999' } });
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen[0]).toMatchObject({ subject: 'app-b.wq.result.7', runId: '7', application: 'app-b' });
   });
 });
 

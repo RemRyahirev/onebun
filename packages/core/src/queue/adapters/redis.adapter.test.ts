@@ -15,11 +15,22 @@ import {
   mock,
 } from 'bun:test';
 
+import type { Message } from '../types';
+
 import { SharedRedisProvider } from '../../redis/shared-redis';
 import { createRedisContainer, type TestContainer } from '../../testing/containers';
+import { QueueScheduler } from '../scheduler';
 
 
 import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyRecord = Record<string, any>;
+
+/** Reaches the adapter's raw client and key layout, to write what `publish()` never would. */
+function asAny(obj: unknown): AnyRecord {
+  return obj as AnyRecord;
+}
 
 const CONTAINER_TEST_TIMEOUT_MS = 30_000;
 /** Starting and stopping the Redis container takes far longer than a hook's default 5 s. */
@@ -276,6 +287,174 @@ describe('RedisQueueAdapter', () => {
       // requeued message cannot deliver another subscription's values.
       expect(captured).toEqual([{ id: '123' }]);
     }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reports the topic as the subject, with pattern and params unchanged for a published message', async () => {
+      const received: Array<{ subject?: string; pattern: string; params: Record<string, string>; stream?: string }> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push({
+          subject: message.subject, pattern: message.pattern, params: message.params, stream: message.stream,
+        });
+      });
+
+      await adapter.publish('orders.321', { total: 1 });
+      await adapter.publish('orders.654', { total: 2 }, { delay: 50 });
+      await adapter.publish('orders.987', { total: 3 }, { priority: 5 });
+
+      await waitFor(() => received.length === 3);
+
+      // Direct, delayed and priority publishes all reach the list their envelope names, so the
+      // list topic and the envelope agree on every path `publish()` takes.
+      expect(received.map(m => m.subject).sort()).toEqual(['orders.321', 'orders.654', 'orders.987']);
+      for (const message of received) {
+        expect(message.pattern).toBe(message.subject!);
+        expect(message.params).toEqual({ id: message.subject!.split('.')[1] });
+        expect(message.stream).toBeUndefined();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('takes pattern and params from the list a message was claimed from, not from its envelope', async () => {
+      // A writer with access to `orders.1`'s list pushes an envelope naming another topic.
+      const subjects: Array<string | undefined> = [];
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        subjects.push(message.subject);
+        captured.push(message.params);
+
+        if (subjects.length === 1) {
+          throw new Error('retry me');
+        }
+      }, { retry: { attempts: 2, delay: 0 } });
+
+      const raw = asAny(adapter);
+      await raw.client.rpush(raw.keys.queue('orders.1'), JSON.stringify({
+        id: 'forged-1', pattern: 'orders.999', data: {}, timestamp: Date.now(), metadata: {},
+      }));
+      await raw.client.publish(raw.keys.wake, 'orders.1');
+
+      await waitFor(() => subjects.length === 2);
+
+      // The retry goes back onto the same list: the claimed topic is the message's topic from
+      // then on, so the envelope cannot move it onto another one either.
+      expect(subjects).toEqual(['orders.1', 'orders.1']);
+      expect(captured).toEqual([{ id: '1' }, { id: '1' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    describe('a message published with undefined data', () => {
+      // `JSON.stringify` drops `data: undefined`, so these entries carry no `data` key at all —
+      // and they are still the framework's own writes, which every check has to let through.
+
+      /** Collects every delivery and every reported error on `adapter`. */
+      function observe(): { received: Message[]; errors: Error[] } {
+        const received: Message[] = [];
+        const errors: Error[] = [];
+        adapter.on('onError', (error) => {
+          errors.push(error);
+        });
+
+        return { received, errors };
+      }
+
+      it('delivers a direct publish on a literal and on a pattern subscription', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.direct', async (message) => {
+          received.push(message);
+        });
+        await adapter.subscribe('emptyp.*', async (message) => {
+          received.push(message);
+        });
+
+        await adapter.publish('empty.direct', undefined);
+        await adapter.publish('emptyp.direct', undefined);
+        await waitFor(() => received.length === 2);
+
+        expect(received.map(m => m.subject).sort()).toEqual(['empty.direct', 'emptyp.direct']);
+        expect(received.every(m => m.data === undefined && typeof m.id === 'string')).toBe(true);
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('delivers a delayed publish', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.delayed', async (message) => {
+          received.push(message);
+        });
+
+        await adapter.publish('empty.delayed', undefined, { delay: 50 });
+        await waitFor(() => received.length === 1);
+
+        expect(received[0].data).toBeUndefined();
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('delivers what an interval job whose method returns nothing publishes', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.tick', async (message) => {
+          received.push(message);
+        });
+
+        // `runOnStart` defaults to true, so the first tick publishes as soon as the job starts.
+        const scheduler = new QueueScheduler(adapter);
+        scheduler.addIntervalJob('empty-tick', 60_000, 'empty.tick', async () => undefined);
+        scheduler.start();
+
+        try {
+          await waitFor(() => received.length === 1);
+        } finally {
+          scheduler.stop();
+        }
+
+        expect(received[0].data).toBeUndefined();
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+    });
+
+    // A list is a plain key: anything with keyspace access can push onto it. Only what
+    // `publish()` writes may reach a handler; the rest is reported, naming the topic, and the
+    // drain carries on with the next entry.
+    const foreignEntries: Array<[label: string, raw: string]> = [
+      ['an empty object', '{}'],
+      ['an array', '[1]'],
+      ['an object with data but no id or timestamp', '{"data":1}'],
+      ['a number', '42'],
+      ['a string', '"x"'],
+      ['text that is not JSON', 'not json'],
+      ['an envelope whose metadata is not an object', '{"id":"m","timestamp":1,"data":{},"metadata":[]}'],
+      ['an envelope whose attempt is not a number', '{"id":"m","timestamp":1,"data":{},"attempt":"2"}'],
+    ];
+
+    for (const [index, [label, raw]] of foreignEntries.entries()) {
+      for (const subscription of ['literal', 'pattern'] as const) {
+        it(`reports ${label} on a ${subscription} subscription instead of delivering it`, async () => {
+          const topic = `junk.${subscription}.${index}`;
+          const handled: string[] = [];
+          const errors: Error[] = [];
+          adapter.on('onError', (error) => {
+            errors.push(error);
+          });
+
+          await adapter.subscribe(subscription === 'literal' ? topic : `junk.${subscription}.*`, async (message) => {
+            handled.push(message.id);
+          });
+
+          const client = asAny(adapter);
+          await client.client.rpush(client.keys.queue(topic), raw);
+          await client.client.rpush(client.keys.queue(topic), JSON.stringify({
+            id: 'valid-after', pattern: topic, data: {}, timestamp: Date.now(), metadata: {},
+          }));
+          await client.client.publish(client.keys.wake, topic);
+
+          // The valid entry behind the foreign one is the sync point: once it is handled, the
+          // foreign one has been claimed and dealt with.
+          await waitFor(() => handled.length === 1);
+
+          expect(handled).toEqual(['valid-after']);
+          expect(errors).toHaveLength(1);
+          expect(errors[0].message).toContain(`"${topic}"`);
+          expect(errors[0].message).toContain('not handed to any handler');
+        }, CONTAINER_TEST_TIMEOUT_MS);
+      }
+    }
 
     it('captures every parameter of a multi-parameter pattern', async () => {
       // One parameter can be right by coincidence — a regex capturing the wrong segment still

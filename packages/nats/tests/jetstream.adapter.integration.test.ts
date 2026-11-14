@@ -762,6 +762,54 @@ describe('JetStreamQueueAdapter Integration', () => {
     }
   }, CASE_TIMEOUT_MS);
 
+  it('takes pattern, params and stream from the delivery, and an envelope cannot redirect them', async () => {
+    // onebun-FB-53: a client allowed to publish on `forge.a.>` writes an envelope naming
+    // `forge.b.result.999`. The server routes by subject, so only the subscription covering
+    // `forge.a.result.1` receives it, and what it reads must be the subject, not the claim.
+    const js = makeAdapter('ITEST_FORGE', ['forge.>']);
+    await js.connect();
+
+    const wild: Array<Message<unknown>> = [];
+    const onlyB: Array<Message<unknown>> = [];
+    await js.subscribe('forge.*.result.{id}', async (message) => {
+      wild.push(message);
+    }, { group: 'itest-forge-wild' });
+    await js.subscribe('forge.b.result.{id}', async (message) => {
+      onlyB.push(message);
+    }, { group: 'itest-forge-only-b' });
+
+    const envelope = {
+      id: 'forged-1', pattern: 'forge.b.result.999', data: {}, timestamp: Date.now(), metadata: { claimedBy: 'b' },
+    };
+    await asAny(js).js.publish(
+      'forge.a.result.1',
+      new TextEncoder().encode(JSON.stringify(envelope)),
+      { msgID: 'forged-1' },
+    );
+    // Published through the adapter: the values a handler reads are the ones it always read.
+    await js.publish('forge.b.result.2', {}, { messageId: 'honest-2' });
+
+    await pollUntil(() => wild.length === 2 && onlyB.length === 1);
+
+    const forged = wild.find(message => message.id === 'forged-1')!;
+    expect(forged.subject).toBe('forge.a.result.1');
+    expect(forged.pattern).toBe('forge.a.result.1');
+    expect(forged.params).toEqual({ id: '1' });
+    expect(forged.stream).toBe('ITEST_FORGE');
+    expect(forged.headers?.get('Nats-Msg-Id')).toEqual(['forged-1']);
+    // The envelope's own claims still arrive as the publisher wrote them.
+    expect(forged.metadata).toEqual({ claimedBy: 'b' });
+
+    const honest = wild.find(message => message.id === 'honest-2')!;
+    expect(honest.pattern).toBe('forge.b.result.2');
+    expect(honest.subject).toBe('forge.b.result.2');
+    expect(honest.params).toEqual({ id: '2' });
+
+    // The application-B-only subscription saw the honest message and nothing else.
+    expect(onlyB.map(message => message.subject)).toEqual(['forge.b.result.2']);
+    expect(onlyB[0].params).toEqual({ id: '2' });
+  }, CASE_TIMEOUT_MS);
+
   it('counts attempts across real redeliveries', async () => {
     // The server is the only thing that can increment a delivery count, so the 1, 2, 3
     // progression the documented retry recipe branches on needs a real broker to prove.

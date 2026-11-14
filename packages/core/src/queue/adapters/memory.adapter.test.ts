@@ -272,6 +272,71 @@ describe('InMemoryQueueAdapter', () => {
     });
   });
 
+  describe('delivery subject', () => {
+    it('reports the published topic as the subject, the same value as pattern', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.123', { total: 10 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].subject).toBe('orders.123');
+      // Unchanged for a published message: the topic, and what the subscription captured from it.
+      expect(received[0].pattern).toBe('orders.123');
+      expect(received[0].params).toEqual({ id: '123' });
+    });
+
+    it('has no stream and no transport headers', async () => {
+      // An in-process bus has neither; `metadata.headers` is still the publisher's record.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.created', {}, { metadata: { headers: { probe: 'p' } } });
+
+      expect(received[0].stream).toBeUndefined();
+      expect(received[0].headers).toBeUndefined();
+      expect(received[0].metadata.headers).toEqual({ probe: 'p' });
+    });
+
+    it('keeps the subject across retries and for a delayed message', async () => {
+      const fakeTimers = useFakeTimers();
+
+      try {
+        await adapter.connect();
+
+        const subjects: Array<string | undefined> = [];
+        let retried!: () => void;
+        const secondAttempt = new Promise<void>((resolve) => {
+          retried = resolve;
+        });
+        await adapter.subscribe('orders.*', async (message) => {
+          subjects.push(message.subject);
+
+          if (subjects.length === 1) {
+            throw new Error('retry me');
+          }
+          retried();
+        }, { retry: { attempts: 2, delay: 0 } });
+
+        await adapter.publish('orders.late', {}, { delay: 50 });
+        fakeTimers.advanceTime(200);
+        await secondAttempt;
+
+        expect(subjects).toEqual(['orders.late', 'orders.late']);
+      } finally {
+        fakeTimers.restore();
+      }
+    });
+  });
+
   describe('delayed messages', () => {
     let advanceTime: (ms: number) => void;
     let restore: () => void;

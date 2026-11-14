@@ -279,7 +279,7 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - `NackAwareMessage` is deliberately NOT part of the public `Message` interface. Whether a message was nacked is the adapter's bookkeeping — a handler already knows what it called, and widening `Message` would invite handlers to read the flag back and branch on it
 - Because the check sits inside the `try`, a throw skips it entirely: nack-then-throw carries the THROWN error. The synthesised error carries no `cause`, because the handler never raised one
 - On JetStream the auto-ack is additionally gated: `if (acknowledgesAutomatically(entry.options) && !wasNacked(message))`. That `msg.ack()` is on the raw `JsMsg`, not the wrapper, so it bypasses the wrapper's first-call-wins guard — ungated, it would settle a message the handler had just `nak()`ed and cancel the redelivery
-- One delivery emits NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher — it returns before `onMessageReceived`, and no message object is constructed. A payload that fails `JSON.parse` emits `onError` naming the subject, with the parse failure as `cause`. Core NATS cannot `term()` it, so reporting is the only disposition available; JetStream both reports and `term()`s
+- One delivery emits NO event at all on `NatsQueueAdapter`: one whose subject does not match the subscription's matcher — it returns before `onMessageReceived`, and no message object is constructed. A payload that fails `JSON.parse` emits `onError` naming the subject, with the parse failure as `cause`. Core NATS cannot `term()` it, so reporting is the only disposition available; JetStream both reports and `term()`s
 - Trace propagation is two functions in `packages/core/src/queue/trace-metadata.ts`, neither exported from `@onebun/core`. `withTraceMetadata(options)` runs on the publish side at three funnels — `QueueService.publish`, `QueueService.publishBatch`, and `QueueScheduler.runJob`'s own `adapter.publish`, which does not go through the service. It reads `getCurrentTraceContext()` and returns the options unchanged when the caller already set `metadata.traceId` or when there is no ambient trace. The adapters' internal republishes (dead-letter, delayed promotion) are deliberately NOT stamped: they preserve the original message's provenance
 - `publisherTraceContext(metadata)` runs on the delivery side and becomes `inEntrySpan`'s `parent`, so the `queue <pattern>` span is a child of the publisher's rather than a root. It READS the metadata and never writes back: the in-memory adapter hands one metadata object to every subscription on a pattern and again on every retry. Both ids are required — a trace id with no span id names no point to hang from — and malformed ids are discarded by `Tracer.startSpan`, which roots the span instead
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
@@ -419,12 +419,15 @@ export class OrderConsumer extends BaseController {
     message.params.id;      // '123'
     message.params.event;   // 'created'
     message.pattern;        // 'orders.123.created' — the topic as delivered
+    message.subject;        // 'orders.123.created' — the same value
   }
 }
 ```
 
 `{name}` matches exactly one token, like `*`; the difference is that it also names what it
-matched. A pattern with no `{name}` gives `params === {}` rather than `undefined`.
+matched. A pattern with no `{name}` gives `params === {}` rather than `undefined`. The values are
+captured from the subject the message was delivered on, never from anything the publisher wrote
+into the message — see [where `pattern`, `params` and `subject` come from](#message-subject).
 
 The **NATS subject** column applies to the `NatsQueueAdapter` and `JetStreamQueueAdapter`
 only. NATS has no equivalent of a named parameter, so `{name}` widens to `*` on the wire
@@ -456,7 +459,7 @@ otherwise.
 - `toRedisQueueGlob` in `packages/core/src/queue/redis-glob.ts` is the Redis-side sibling, exported from `packages/core/src/queue/index.ts`. Same rule, different output: `{name}` and a trailing `#` both become `*`, and a non-final `#` throws. Its call sites are `RedisQueueAdapter.subscribe` (eager, so a bad pattern throws at the subscribe call) and `scanTopics` (the `SCAN … MATCH` argument)
 - Redis queue keys: queue:q:\<topic\> per topic plus one fixed wake channel — `queue:wake`, whose frames carry the topic name. There is no channel per topic: a pattern subscription cannot know its topics in advance, and Bun's client offers no usable `psubscribe`
 - Pattern backlog keys are resolved with SCAN, never KEYS — the scan runs once per poll interval per pattern subscription, and `KEYS` blocks the server for the whole keyspace walk
-- The captured parameters of a `{name}` pattern are `entry.matcher(topic).params`, and all four adapters put that same object on `Message.params` at the single point where each builds its message — `InMemoryQueueAdapter.deliver`, `RedisQueueAdapter.processMessage`, `NatsQueueAdapter.processMessage` and the `JetStreamQueueAdapter` consume loop. The match is already computed there for the `matched` check, so it costs nothing extra
+- The captured parameters of a `{name}` pattern are `entry.matcher(topic).params`, and all four adapters put that same object on `Message.params` at the single point where each builds its message — `InMemoryQueueAdapter.deliver`, `RedisQueueAdapter.processMessage`, `NatsQueueAdapter.processMessage` and the `JetStreamQueueAdapter` consume loop. The match is already computed there for the `matched` check, so it costs nothing extra. `topic` is the delivery subject on every adapter — `msg.subject` on JetStream, `natsMsg.subject` on core NATS, the claimed list's topic on Redis, the published topic in memory — and never the envelope's `pattern` field (see [message-subject](#message-subject))
 - `params` is deliberately NOT in `MessageMetadata` and NOT in the wire envelope. Three reasons, each independently sufficient: `PublishOptions.metadata` would let a publisher forge it; the Redis retry path copies the envelope verbatim (`{ ...messageData, attempt }`), so a receiver-written key would be persisted and then handed to whichever subscription claims the message next — possibly one with a different pattern; and `InMemoryQueueAdapter.dispatch` builds `fullMetadata` once per publish and aliases it into every matching subscription's message, so two patterns would clobber each other's captures
 - The in-memory adapter is the only one where the match and the construction are in different stack frames, so `deliver()` takes `params` positionally. It self-re-enters on the `nack(true)` requeue and on the retry tail, and each re-entry builds a fresh message — a required parameter is what makes a missed call site a compile error rather than a silent `undefined`
 
@@ -675,7 +678,10 @@ would otherwise resurrect a message in the one mode that promises a single deliv
 ```typescript
 interface Message<T> {
   id: string;              // Unique message ID
-  pattern: string;         // Message pattern/topic — the topic as DELIVERED
+  pattern: string;         // The topic as DELIVERED — the same value as `subject`
+  readonly subject?: string; // The subject the message was delivered on; set by every built-in adapter
+  readonly stream?: string;  // The JetStream stream it was delivered from; undefined elsewhere
+  readonly headers?: ReadonlyMap<string, readonly string[]>; // Wire headers on NATS and JetStream
   params: Record<string, string>; // Values captured by the pattern's {name} parameters; {} when none
   data: T;                 // Message payload
   timestamp: number;       // Unix timestamp in ms
@@ -747,6 +753,113 @@ queue". Publish the payload somewhere yourself if you need to keep it.
 
 The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves
 both `undefined`.
+
+### Where `pattern`, `params` and `subject` come from {#message-subject}
+
+Every adapter reads `subject`, `pattern` and `params` from where the message was **delivered**,
+never from the message body. `publish()` writes a `pattern` field into the JSON envelope it sends,
+and no adapter reads that field on delivery: on NATS and JetStream a client allowed to publish on
+one subject could write any other subject there, and the forged value would pick which handler
+runs and what its `params` say.
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  Subscribe,
+  type Message,
+} from '@onebun/core';
+
+@Controller('/results')
+export class ResultConsumer extends BaseController {
+  // One subscription over every application's results.
+  @Subscribe('*.wq.result.{runId}', { group: 'results' })
+  async onResult(message: Message<{ status: string }>): Promise<void> {
+    // Delivered on `app-a.wq.result.1`, whatever its envelope says:
+    message.subject;      // 'app-a.wq.result.1' — where the message was delivered
+    message.pattern;      // 'app-a.wq.result.1' — the same value
+    message.params.runId; // '1' — captured from the subject
+    message.stream;       // 'RESULTS' on JetStream, undefined on the other adapters
+    message.headers;      // the wire headers on NATS and JetStream, undefined elsewhere
+
+    // The publisher still picks the subject within what it may publish to: a publish to
+    // `app-a.wq.result.*` captures `runId === '*'`. Validate captured values like any input.
+    const { runId } = message.params;
+    if (!/^\d+$/.test(runId)) {
+      await message.nack(false);
+
+      return;
+    }
+
+    // Only a client the broker lets publish under `app-a.` can put a message there.
+    const application = message.subject?.split('.')[0];
+    this.logger.info('run finished', { application, runId });
+  }
+}
+```
+
+| Adapter | `subject` | `stream` | `headers` |
+|---|---|---|---|
+| JetStream | the subject the server delivered the message on | the stream it was delivered from | the wire headers — the `Nats-Msg-Id` a `messageId` adds, and whatever another client sent; `undefined` when there are none |
+| NATS (pub/sub) | the subject the server delivered the message on | `undefined` | the wire headers — every `metadata.headers` entry `publish()` sends, and whatever another client sent; `undefined` when there are none |
+| Redis | the topic whose list the message was claimed from | `undefined` | `undefined` |
+| In-memory | the topic passed to `publish()` | `undefined` | `undefined` |
+
+`pattern` holds the same value as `subject` on every adapter, and `params` is captured from it. For
+a message sent through `publish()` to a literal topic — one without `{name}`, `*` or `#` — both are
+that topic, the value the envelope's `pattern` field carries too. A topic that is not literal names
+no single subject and is not an address to publish to: JetStream sends `{name}` as `*` and `#` as
+`>`, so a handler sees that NATS wildcard subject (`orders.*`, `events.>`) and a `{name}` captures
+`*`; the other adapters deliver the topic exactly as it was written. `subject` is optional in the
+type only so that a hand-built `Message` — a test double, or one from a custom adapter — still
+compiles; every built-in adapter sets it.
+
+What a subject proves depends on the transport. On every adapter it proves where the message was
+delivered, not who sent it:
+
+- **NATS and JetStream** assign it on the server. Where the broker grants each publisher its own
+  subjects — `app-a.>` to one application, `app-b.>` to another — a message delivered on
+  `app-a.wq.result.1` was sent by a client allowed to publish there. Nothing else on the message
+  carries that much. Within its grant the publisher picks the subject freely, wildcard tokens
+  included: a raw publish to `app-a.wq.result.*` reaches `*.wq.result.{runId}` with
+  `params.runId === '*'`.
+- **Redis** has no server-side subject. The list a message waits on is chosen by whoever writes
+  it, and a delayed or priority message is promoted to the list its envelope names, so a Redis
+  subject proves access to the keyspace and no more. A message pushed onto one topic's list with an
+  envelope naming another is handled — retried and dead-lettered too — as a message on the list it
+  was claimed from.
+- **In-memory** delivery never leaves the process; the subject is what that process published.
+
+So validate `params` like any other input before using it. A captured value is whatever token the
+delivered subject has in that position — `*`, `>` or `{runId}` as easily as `1` — and a subject
+spelling the subscription pattern itself token for token (`app-a.wq.result.{runId}` reaching
+`@Subscribe('app-a.wq.result.{runId}')`) matches as a literal and captures nothing, leaving
+`params.runId` undefined.
+
+Everything else on the message is the publisher's word, on every adapter: `id`, `data`,
+`timestamp` and `metadata` — `metadata.headers`, `authorization` and `serviceId` included — arrive
+exactly as written. `headers` is never merged into `metadata.headers`.
+
+A Redis queue list is a plain key that anything with keyspace access can push onto. An entry that
+is not what `publish()` writes — not JSON, not an object, or an object without a string `id` and a
+numeric `timestamp`, or with a `metadata` that is not an object or an `attempt` that is not a
+number — is removed from the list and reported through `onError` with the topic named; no handler
+receives it. `data` may be missing: `publish(topic, undefined)`, and a `@Cron` or `@Interval`
+method that returns nothing, write an entry without it, and the handler receives
+`data === undefined`.
+
+<llm-only>
+
+**Technical details for AI agents — the delivery subject:**
+- JetStream: the consume loop matches `entry.matcher(msg.subject)`; `JetStreamMessage` sets `pattern` and `subject` from `jsMsg.subject` in its constructor, `stream` from `jsMsg.info.stream` (the driver parses the reply subject once and caches it — the same `info` the `redelivered` and `attempt` reads use). `headers` is an OWN enumerable property, so `{ ...message }` and `Object.assign` carry it as they carry core NATS's: the constructor installs it as an accessor from the shared static descriptor `JetStreamMessage.lazyHeaders`, and the first read or write replaces it with a writable data property (`settleHeaders`) holding `toHeaderMap(jsMsg.headers)` (`packages/nats/src/nats-client.ts`) or the assigned value. Nothing reads `jsMsg.headers` — whose driver getter decodes the header block — unless something reads `message.headers`. The field is `declare`d, because a class field would define a data property before the constructor runs. On a message frozen or sealed before the first read the accessor cannot be replaced; `settleHeaders` then keeps the value in the static `WeakMap` `unsettledHeaders`, which the accessor reads, so the read still returns one map. Measured in Bun: the per-instance `defineProperty` costs about 45–50 ns per message
+- Core NATS: `processMessage()` matches `entry.matcher(natsMsg.subject)`; `NatsQueueMessage` takes `pattern`, `subject` and `headers` from the `NatsMessage` frame. `headers` is the frame's own map, which `NatsClient.subscribe()` already built with `toHeaderMap()` — passed by reference, not converted again
+- Redis: `drainTopic()` reads each claimed entry through `parseQueueEnvelope(raw, topic)`, which throws an error naming the topic for invalid JSON, a non-object (array, number, string, null), or an object that lacks a string `id` or a numeric `timestamp`, or whose `metadata` is not an object or `attempt` not a number. It does NOT require a `data` key: `JSON.stringify` drops `data: undefined`, so the framework's own `publish(topic, undefined)` — and every `@Cron`/`@Interval` tick whose method returns nothing — writes an entry without one; the existing catch in `drainTopic()` emits it as `onError` and the drain moves on. The envelope's `pattern` is not checked. It then assigns `messageData.pattern = topic` — the topic of the list `LPOP` just claimed from — before `processMessage()` reads anything. Every reader downstream (the match, `Message.pattern`/`subject`, `requeue()`, `scheduleRetry()`, the wake frame, `dlq.originalPattern`) reads that one field, so a forged envelope cannot move a message onto another list through a retry. On the publish side the field is the routing key: `publish()` pushes to `queue(pattern)`, and the delayed and priority promoters push to `queue(messageData.pattern)`, so for every message `publish()` wrote the claimed topic and the envelope agree
+- In-memory: `InMemoryMessage` sets `subject` to the topic `dispatch()` was called with, the same value as `pattern`
+- The Redis, NATS and JetStream `publish()` write the envelope's `pattern` field (the in-memory adapter has no envelope). Redis needs it to route delayed and priority messages; on NATS and JetStream nothing reads it on delivery. `OneBunEnvelope.pattern` in `jetstream.adapter.ts` documents that
+- JetStream dead-lettering records `dlq.originalPattern: msg.subject` — the delivery subject, through the same `message.pattern` value the handler saw
+- The forged-envelope cases are `delivery subject` in `packages/nats/tests/jetstream.adapter.test.ts` and `packages/nats/tests/nats.adapter.test.ts`, with real-server counterparts in both integration files and the Redis one in `packages/core/src/queue/adapters/redis.adapter.test.ts`. Each unit file also round-trips `publish()` output for literal topics through the receive path and compares against the values the envelope names. A non-literal topic is the one case where they differ, and only on JetStream: `publish()` translates through `toNatsSubject()`, so `publish('orders.{id}')` arrives as `orders.*` with `{ id: '*' }` and `publish('events.#')` as `events.>`; core NATS, Redis and memory publish the topic verbatim
+
+</llm-only>
 
 ## Scheduling Decorators
 
@@ -866,7 +979,7 @@ async handleTraced(message: Message) {}
 ::: danger These guards trust what the publisher sent
 `MessageAuthGuard` passes any message whose `metadata.authorization` is non-empty, and `MessageServiceGuard` compares `metadata.serviceId` against its allow-list. Both fields are written by the publisher and travel with the message. Neither the broker nor the framework authenticates them, so anything able to publish to the subject can set them to whatever it likes — the queue-side twin of the `x-user-roles` hazard described under [RolesGuard](/api/guards#rolesguard).
 
-They earn their keep as a filter — "this consumer only handles messages that claim to come from `payment-service`" — and as a defence-in-depth check behind a broker that already authenticates publishers per subject. They are not an authorization decision on their own. If the sender's identity has to be trusted, sign the payload and verify the signature in a guard of your own.
+They earn their keep as a filter — "this consumer only handles messages that claim to come from `payment-service`" — and as a defence-in-depth check behind a broker that already authenticates publishers per subject. They are not an authorization decision on their own. If the sender's identity has to be trusted, sign the payload and verify the signature in a guard of your own — or, on a NATS broker that grants each publisher its own subjects, check `message.subject`, which the server assigns (see [where `pattern`, `params` and `subject` come from](#message-subject)).
 :::
 
 `MessageTraceGuard` passes a message that carries `metadata.traceId`, which `publish()` fills in
@@ -1193,6 +1306,11 @@ The framework instantiates the adapter with `new Adapter(queue.options)` and use
 
 If your `connect()` can fail after it has opened a connection, close that connection in `connect()`'s own `catch` before rethrowing. A failed `app.start()` calls `disconnect()` as part of its [rollback](./core.md#when-start-fails), but a `disconnect()` that returns early for an adapter that never finished connecting leaves the socket open, and the process never exits. The built-in adapters release it in `connect()`.
 
+A custom adapter sets `Message.subject` to where its transport delivered the message, `pattern` to
+the same value, and `params` to what `createQueuePatternMatcher(subscriptionPattern)` captures from
+it — the rule every built-in adapter follows, described under [where `pattern`, `params` and
+`subject` come from](#message-subject).
+
 ### Connecting to NATS
 
 Both `@onebun/nats` adapters take the same connection options. `servers` is the only required one:
@@ -1312,12 +1430,13 @@ lower-cased nor canonicalised. A lookup such as `metadata.headers['x-probe']` or
 
 A message carrying headers the envelope does not describe — the `Nats-Msg-Id` a JetStream publish
 with `messageId` adds, a name another client repeated — is delivered like any other. Its handler's
-`metadata` is still the envelope's alone: wire headers are not merged into it.
+`metadata` is the envelope's alone: wire headers are not merged into it.
 
-To read the wire headers themselves, subscribe with `NatsClient`, the connection wrapper
-`@onebun/nats` exports. Its `subscribe()` and `request()` hand back a `NatsMessage` whose `headers`
-is a `Map` from each name to all of its values in arrival order, and absent when the message
-carried none.
+A handler reads the wire headers themselves from `message.headers`, on this adapter and on
+`JetStreamQueueAdapter`: a map from each name to all of its values in arrival order, `undefined`
+when the message carried none — see [where `pattern`, `params` and `subject` come
+from](#message-subject). `NatsClient`, the connection wrapper `@onebun/nats` exports, hands back
+the same map as `NatsMessage.headers` from its `subscribe()` and `request()`.
 
 <llm-only>
 
@@ -1326,7 +1445,7 @@ carried none.
 - The connection is typed `any` (the driver is imported dynamically), so the consume loop's subscription is annotated `Subscription` and the request's reply `Msg`. Those annotations are what type-check a header read off a delivered message; `toHeaderMap(headers: MsgHdrs)` makes a call to a method the interface lacks a compile error
 - A throw inside `NatsClient.subscribe()`'s `for await` loop ends the loop for good: every later message on that subscription is lost, and the throw surfaces only as an unhandled rejection. Nothing in the per-message conversion may throw, and `NatsQueueAdapter.processMessage()` catches everything its path can raise for the same reason
 - `values()` builds a fresh array per name, so `NatsMessage.headers` shares nothing with the driver's message. The driver stores and matches names exactly by default, which is why their case survives the wire
-- `NatsQueueAdapter.publish()` writes `metadata.headers` into the JSON envelope and hands the same record to `NatsClient.publish()` as wire headers. `processMessage()` builds `Message.metadata` from the envelope only and never reads `NatsMessage.headers`. `JetStreamQueueAdapter` reads no message headers at all; the only one it causes is the `Nats-Msg-Id` the driver sends for `messageId`
+- `NatsQueueAdapter.publish()` writes `metadata.headers` into the JSON envelope and hands the same record to `NatsClient.publish()` as wire headers. `processMessage()` builds `Message.metadata` from the envelope only, and passes `NatsMessage.headers` through by reference as `Message.headers`. `JetStreamQueueAdapter` converts `JsMsg.headers` with the same `toHeaderMap()`, lazily, in the `JetStreamMessage.headers` getter; the only header its `publish()` causes is the `Nats-Msg-Id` the driver sends for `messageId`
 - The `toHeaderMap` unit cases in `tests/nats-client.test.ts` use the driver's real `headers()` object, because a `Map` stand-in has `entries()` and would hide exactly this defect. The cases over a real server are `message headers` in `tests/nats.adapter.integration.test.ts` and the JetStream-producer / core-observer case in `tests/jetstream.adapter.integration.test.ts`
 
 </llm-only>

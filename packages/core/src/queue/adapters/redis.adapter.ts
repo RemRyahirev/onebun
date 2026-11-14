@@ -90,11 +90,69 @@ export interface RedisQueueOptions {
  */
 interface RedisQueueEnvelope {
   id: string;
+  /**
+   * The topic. It picks the list a delayed or priority message is promoted to; on delivery it
+   * is overwritten with the topic of the list the message was actually claimed from.
+   */
   pattern: string;
   data: unknown;
   timestamp: number;
   metadata?: MessageMetadata;
   attempt?: number;
+}
+
+/**
+ * Reads one entry claimed from `topic`'s list, or throws an error naming the topic.
+ *
+ * A queue list is a plain Redis key, and anything with access to the keyspace can push onto it.
+ * What reaches a handler has to be what `publish()` writes: an object with a string `id` and a
+ * numeric `timestamp`, with `metadata` and `attempt` absent or of their own type. `data` is not
+ * required — `JSON.stringify` drops a `data: undefined`, so `publish(topic, undefined)`, and a
+ * `@Cron` or `@Interval` method that returns nothing, write an entry without the key. The
+ * envelope's `pattern` is not checked either — `drainTopic` replaces it with `topic`. Any other
+ * payload would hand the handler an undefined `id` or `timestamp`, and cannot become an envelope
+ * on a retry either, so it is reported rather than delivered.
+ */
+function parseQueueEnvelope(raw: string, topic: string): RedisQueueEnvelope {
+  let value: unknown;
+
+  try {
+    value = JSON.parse(raw);
+  } catch (cause) {
+    throw foreignQueueEntryError(topic, 'it is not valid JSON', cause);
+  }
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw foreignQueueEntryError(topic, 'it is not a JSON object');
+  }
+
+  const entry = value as Partial<Record<keyof RedisQueueEnvelope, unknown>>;
+  const metadataValid = entry.metadata === undefined
+    || (typeof entry.metadata === 'object' && entry.metadata !== null && !Array.isArray(entry.metadata));
+
+  if (
+    typeof entry.id !== 'string'
+    || typeof entry.timestamp !== 'number'
+    || !metadataValid
+    || (entry.attempt !== undefined && typeof entry.attempt !== 'number')
+  ) {
+    throw foreignQueueEntryError(
+      topic,
+      'it is not a OneBun envelope — an object with a string "id" and a numeric "timestamp", whose '
+      + '"metadata", when present, is an object and whose "attempt", when present, is a number',
+    );
+  }
+
+  return value as RedisQueueEnvelope;
+}
+
+function foreignQueueEntryError(topic: string, reason: string, cause?: unknown): Error {
+  return new Error(
+    `RedisQueueAdapter claimed a message from the queue list of topic "${topic}" that it cannot deliver: ${reason}. `
+    + 'It was removed from the list and not handed to any handler. Publish to this topic with OneBun\'s '
+    + 'publish(), or keep other writers off the adapter\'s queue keys.',
+    cause === undefined ? undefined : { cause },
+  );
 }
 
 interface RedisSubscriptionEntry {
@@ -124,6 +182,8 @@ interface RedisSubscriptionEntry {
 class RedisMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The topic whose list the message was claimed from. */
+  readonly subject: string;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -154,6 +214,7 @@ class RedisMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.subject = pattern;
     this.params = params;
     this.data = data;
     this.timestamp = timestamp;
@@ -640,9 +701,9 @@ export class RedisQueueAdapter implements QueueAdapter {
     const message = new RedisMessage(
       messageData.id,
       messageData.pattern,
-      // What THIS subscription's pattern captured from the delivered topic. The envelope
-      // carries the topic; the values are a function of the subscriber's pattern, so they are
-      // derived here rather than transported.
+      // What THIS subscription's pattern captured from the delivered topic — the claimed list's,
+      // which `drainTopic` wrote into the envelope. The values are a function of the
+      // subscriber's pattern, so they are derived here rather than transported.
       match.params,
       messageData.data,
       messageData.timestamp,
@@ -878,12 +939,19 @@ export class RedisQueueAdapter implements QueueAdapter {
       }
 
       try {
-        // `topic` — the key this LPOP claimed from — is deliberately not passed on. The
-        // envelope's own `pattern` is the authoritative delivered topic: it is what the
-        // publisher wrote, it is what a requeue copies verbatim, and it is what
-        // `processMessage` captures `Message.params` from. Threading `topic` in as well would
-        // create two candidate topics and a way for the captures to come from the wrong one.
-        await this.processMessage(entry, JSON.parse(result));
+        // Throws, naming the topic, for anything `publish()` would not have written; the catch
+        // below reports it. The entry is already claimed, so it is gone from the list either way.
+        const messageData = parseQueueEnvelope(result, topic);
+        // `topic` — the key this LPOP claimed from — is the delivered topic, and it replaces
+        // whatever `pattern` the envelope carries before anything reads it. Every write path of
+        // `publish()` puts a message on the list its envelope names, so for those the two
+        // agree; a message another writer pushed onto this list naming a different topic is
+        // treated as a message on this one. Rewriting the envelope rather than passing `topic`
+        // alongside keeps a single candidate topic: `Message.pattern`, `Message.subject`, the
+        // `params` capture, a requeue, a retry and the dead-letter provenance all read this
+        // one field.
+        messageData.pattern = topic;
+        await this.processMessage(entry, messageData);
       } catch (error) {
         // The message is already claimed at this point, so a handler failure must not stop the
         // drain — the next message is a different message.

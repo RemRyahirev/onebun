@@ -567,6 +567,32 @@ describe('NatsQueueAdapter Integration', () => {
       expect(seen[0].headers!.get('X-Multi')).toEqual(['a', 'b']);
     });
 
+    it('takes pattern and params from the subject, not the envelope, and exposes the wire headers', async () => {
+      // onebun-FB-53: a client allowed to publish on `forge.a.>` writes an envelope naming
+      // `forge.b.result.999`. The server routes by subject, so the handler must read that too.
+      const sender = await connectedClient();
+      const received: Message<unknown>[] = [];
+      await adapter.subscribe('forge.*.result.{id}', async (message) => {
+        received.push(message);
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      const wire = headers();
+      wire.append('X-Multi', 'a');
+      wire.append('X-Multi', 'b');
+      const envelope = {
+        id: 'forged-1', pattern: 'forge.b.result.999', data: {}, timestamp: Date.now(), metadata: {},
+      };
+      sender.getConnection().publish('forge.a.result.1', JSON.stringify(envelope), { headers: wire });
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].subject).toBe('forge.a.result.1');
+      expect(received[0].pattern).toBe('forge.a.result.1');
+      expect(received[0].params).toEqual({ id: '1' });
+      expect(received[0].headers?.get('X-Multi')).toEqual(['a', 'b']);
+      expect(received[0].stream).toBeUndefined();
+    });
+
     it('leaves NatsMessage.headers absent on a message that carried none', async () => {
       const sender = await connectedClient();
       const observer = await connectedClient();

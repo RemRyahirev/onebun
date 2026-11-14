@@ -47,6 +47,10 @@ import { toNatsSubject } from './subject';
 class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The subject the server delivered the message on. */
+  readonly subject: string;
+  /** The frame's own header map, converted once by `NatsClient`; absent when it carried none. */
+  readonly headers?: ReadonlyMap<string, readonly string[]>;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -60,14 +64,16 @@ class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
 
   constructor(
     id: string,
-    pattern: string,
+    natsMsg: NatsMessage,
     params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
   ) {
     this.id = id;
-    this.pattern = pattern;
+    this.pattern = natsMsg.subject;
+    this.subject = natsMsg.subject;
+    this.headers = natsMsg.headers;
     this.params = params;
     this.data = data;
     this.timestamp = timestamp;
@@ -450,15 +456,17 @@ export class NatsQueueAdapter implements QueueAdapter {
     try {
       const messageData = JSON.parse(natsMsg.data);
 
-      // Check if pattern matches
-      const match = entry.matcher(messageData.pattern || natsMsg.subject);
+      // Matched on the subject the server delivered on, never on the envelope's `pattern`: the
+      // envelope is the publisher's to write, and a client allowed to publish on one subject
+      // could otherwise name another there and pick the handler and its captures.
+      const match = entry.matcher(natsMsg.subject);
       if (!match.matched) {
         return;
       }
 
       const message = new NatsQueueMessage(
         messageData.id || this.generateMessageId(),
-        messageData.pattern || natsMsg.subject,
+        natsMsg,
         // `{id}` widened to `*` on the wire, so the broker cannot capture anything — the
         // values come from the in-process match that just narrowed the subject back.
         match.params,
