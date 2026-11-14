@@ -51,6 +51,9 @@ class NotesRepository extends BaseRepository<typeof notes> {
   }
 }
 
+/** Starting and stopping the Postgres container takes far longer than a hook's default 5 s. */
+const CONTAINER_BOOT_MS = 120_000;
+
 let container: TestContainer;
 let service: DrizzleService;
 let repo: NotesRepository;
@@ -75,12 +78,12 @@ beforeAll(async () => {
   await client!`CREATE TABLE notes (id serial PRIMARY KEY, body text NOT NULL, weight integer)`;
 
   repo = new NotesRepository(service);
-});
+}, CONTAINER_BOOT_MS);
 
 afterAll(async () => {
   await service.close();
   await container.stop();
-});
+}, CONTAINER_BOOT_MS);
 
 afterEach(async () => {
   const client = service.getPostgreSQLClient();
