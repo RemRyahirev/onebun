@@ -37,6 +37,7 @@ import {
   createQueuePatternMatcher,
   getLifecycleHandlers,
   getSubscribeMetadata,
+  isLastAttempt,
   resolveAckMode,
 } from '@onebun/core';
 import {
@@ -883,7 +884,7 @@ describe('Error Handling in Handlers (docs/api/queue.md)', () => {
    * Runs the documented handler verbatim against one delivery and reports which branch
    * it took. The recipe is:
    *
-   *   if (message.attempt && message.attempt >= (message.maxAttempts || 3)) nack(false)
+   *   if (isLastAttempt(message.attempt, message.maxAttempts)) nack(false)
    *   else nack(true)
    */
   async function runDocumentedHandler(deliveryCount: number, attempts: number) {
@@ -932,7 +933,7 @@ describe('Error Handling in Handlers (docs/api/queue.md)', () => {
       try {
         throw new Error('processing failed');
       } catch {
-        if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
+        if (isLastAttempt(message.attempt, message.maxAttempts)) {
           await message.nack(false);
         } else {
           await message.nack(true);
@@ -959,6 +960,18 @@ describe('Error Handling in Handlers (docs/api/queue.md)', () => {
 
     expect(jsMsg.term).toHaveBeenCalledTimes(1);
     expect(jsMsg.nak).not.toHaveBeenCalled();
+  });
+
+  it('keeps requeueing on a subscription with no attempts limit', async () => {
+    // `maxAttempts` is -1 there; a bare `attempt >= maxAttempts` would terminate the first failure.
+    for (const attempts of [-1, 0]) {
+      for (const deliveryCount of [1, 50]) {
+        const jsMsg = await runDocumentedHandler(deliveryCount, attempts);
+
+        expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+        expect(jsMsg.term).not.toHaveBeenCalled();
+      }
+    }
   });
 });
 

@@ -175,7 +175,9 @@ export interface JetStreamAdapterOptions extends NatsConnectionOptions {
      * Maximum deliveries of a message; with `deadLetter` configured, the delivery that reaches it
      * is dead-lettered. `-1` (and `0`, which the server stores as `-1`) means unlimited: the
      * server redelivers until the message is acknowledged or terminated, and no delivery is
-     * dead-lettered by count. `retry.attempts`, then `deadLetter.maxRetries`, override it.
+     * dead-lettered by count; `Message.maxAttempts` reports `-1`, and a subscription with no
+     * `retry` waits the default 100 ms between attempts rather than none. `retry.attempts`, then
+     * `deadLetter.maxRetries`, override it.
      */
     maxDeliver?: number;
     /** Maximum pending acknowledgments. `prefetch` on the subscription overrides it. */

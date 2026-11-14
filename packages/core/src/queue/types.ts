@@ -11,8 +11,8 @@
 /**
  * Message acknowledgment mode
  * - 'auto': Message is automatically acknowledged after successful handler execution. A handler
- *   that throws is retried up to `retry.attempts` times (default 1 — one delivery), with
- *   `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
+ *   that throws is retried up to `retry.attempts` times (default 1 — one delivery; `-1` for no
+ *   limit), with `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
  *   fires on every failed attempt. Once the attempts are exhausted the message is dropped on the
  *   memory adapter; the Redis adapter republishes it to `deadLetter.queue` when one is configured
  *   and drops it otherwise; JetStream dead-letters it.
@@ -115,7 +115,11 @@ export interface Message<T = unknown> {
   /** Current attempt number (for retries) */
   attempt?: number;
 
-  /** Maximum attempts allowed */
+  /**
+   * Maximum attempts allowed; `-1` when the subscription sets no limit. Compare it with
+   * `isLastAttempt(attempt, maxAttempts)` — a bare `attempt >= maxAttempts` holds for `-1` on
+   * the first attempt.
+   */
   maxAttempts?: number;
 
   /**
@@ -199,6 +203,8 @@ export interface RetryOptions {
   /**
    * Total deliveries, not extra ones: `attempts: 3` runs the handler at most three times.
    * Defaults to 1 — one delivery and no retry, which is what an unconfigured subscription gets.
+   * `-1` — or any value of 0 or below — means no limit: a failing message is retried until the
+   * handler succeeds, is never dead-lettered by count, and reports `Message.maxAttempts` as `-1`.
    * Honoured by the memory, Redis and JetStream adapters; core NATS tracks no delivery state
    * and ignores it.
    */
@@ -227,6 +233,8 @@ export interface DeadLetterOptions {
    * Deliveries before the message is dead-lettered, used only when `retry.attempts` is absent —
    * the cap resolves as `retry.attempts ?? deadLetter.maxRetries ?? 1` on Redis, and
    * `retry.attempts ?? deadLetter.maxRetries ?? consumerConfig.maxDeliver ?? 3` on JetStream.
+   * A resolved cap of 0 or below means no limit, and no delivery is dead-lettered by count; with
+   * no `retry` set, such a subscription waits the default 100 ms between attempts, never zero.
    */
   maxRetries?: number;
 }

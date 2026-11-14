@@ -40,7 +40,7 @@ interface Message<T> {
   metadata: MessageMetadata;     // headers, auth token, service ID, trace context
   redelivered?: boolean;
   attempt?: number;              // current retry attempt
-  maxAttempts?: number;
+  maxAttempts?: number;          // -1 when the subscription sets no limit
 
   ack(): Promise<void>;          // acknowledge (manual ack mode)
   nack(requeue?: boolean): Promise<void>;  // negative ack; requeue=false (the default) means
@@ -181,12 +181,39 @@ acknowledgement protocol at all. A failing handler still emits `onMessageFailed`
 `deadLetter` is honoured on JetStream. `max_deliver` resolves as `retry.attempts` ->
 `deadLetter.maxRetries` -> `consumerConfig.maxDeliver` -> 3.
 
-On JetStream `-1` (from any of the three) is sent unchanged and means unlimited: the server
-redelivers until acknowledged, and no delivery is dead-lettered by count — only an explicit
-`nack(false)` reaches the dead-letter queue (the handler's own, or the one a message-guard denial
-sends). The backoff has no ceiling, so `'exponential'` keeps doubling the wait. `message.maxAttempts` reports the `-1`, so a handler
-comparing `attempt >= maxAttempts` must check the cap is positive. Memory and Redis raise
-`attempts` below 1 to 1.
+`retry.attempts: -1` means NO LIMIT on the memory, Redis and JetStream adapters alike; `0` and every
+other negative value mean the same (that is how NATS reads `max_deliver`), and so does
+`deadLetter.maxRetries: -1` when `retry.attempts` is absent (and JetStream's
+`consumerConfig.maxDeliver: -1` when the subscription sets neither). A failing message is retried
+until the handler succeeds and no delivery is dead-lettered by count — only an explicit
+`nack(false)` reaches the dead-letter queue (on Redis under `'manual'`; on JetStream also the one a
+message-guard denial sends). The backoff has no ceiling, so `'exponential'` keeps doubling the
+wait. With no `retry` at all an unlimited subscription waits the default `'fixed'` 100 ms, never
+zero; only an explicit `retry.delay: 0` retries without a wait. The rule applies to real numbers:
+an untyped string such as `'0'` or `'-1'` (from env or JSON) resolves to one delivery, and
+`'3'` to 3.
+
+`message.maxAttempts` is `-1` for such a subscription on all three adapters, whichever non-positive
+value set it. A bare `attempt >= maxAttempts` is then true on the first attempt — compare with
+`isLastAttempt(message.attempt, message.maxAttempts)` from `@onebun/core` (the same check every
+adapter makes), which is also false when either field is `undefined`:
+
+```typescript
+if (isLastAttempt(message.attempt, message.maxAttempts)) {
+  await message.nack(false);  // terminal: never redeliver
+} else {
+  await message.nack(true);   // requeue
+}
+```
+
+Per adapter: JetStream sends `max_deliver` as written (the server's "redeliver until acknowledged");
+Redis parks every retry in Redis as for a capped one; memory retries an unlimited subscription in
+the background — `publish()` resolves after the first delivery, each retry waits on its own timer
+even with `delay: 0` (capped at 2^31 - 1 ms, the longest a timer honours), a later publish can be
+delivered before the pending retry (order is not kept), a retry due while the subscription is
+paused waits for `resume()`, and retries stop on `unsubscribe()` or `disconnect()` — including one
+a still-running handler would schedule afterwards. A capped memory retry runs inside the
+`publish()` that delivered the message, so capped subscriptions keep their order.
 
 JetStream routes the terminal delivery to deadLetter.queue and term()s the original — republishing first, terminating only once that succeeded, so a failed republish leaves the message for the server to redeliver rather than losing it.
 

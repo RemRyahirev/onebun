@@ -22,6 +22,8 @@ import { createRedisContainer, type TestContainer } from '../../testing/containe
 import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
 
 const CONTAINER_TEST_TIMEOUT_MS = 30_000;
+/** Starting and stopping the Redis container takes far longer than a hook's default 5 s. */
+const CONTAINER_BOOT_MS = 120_000;
 
 /** Poll until `predicate` holds, so a test never depends on a fixed sleep being long enough. */
 async function waitFor(
@@ -52,12 +54,12 @@ describe('RedisQueueAdapter', () => {
     // so take it over explicitly rather than inheriting whatever an earlier FILE left behind.
     await SharedRedisProvider.reset();
     SharedRedisProvider.configure({ url: redis.url });
-  });
+  }, CONTAINER_BOOT_MS);
 
   afterAll(async () => {
     await SharedRedisProvider.reset();
     await redis.stop();
-  });
+  }, CONTAINER_BOOT_MS);
 
   beforeEach(async () => {
     adapter = createRedisQueueAdapter({
@@ -722,6 +724,112 @@ describe('RedisQueueAdapter', () => {
       const [, keys] = await client.raw('SCAN', '0', 'MATCH', `${prefix}queue:q:*`, 'COUNT', '1000');
 
       expect(keys).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('keeps redelivering under attempts: -1 and never dead-letters by count', async () => {
+      const seen: Array<{ attempt?: number; maxAttempts?: number }> = [];
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.endless', async (message) => {
+        seen.push({ attempt: message.attempt, maxAttempts: message.maxAttempts });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, backoff: 'fixed', delay: 10 }, deadLetter: { queue: 'orders.endless-dead' } });
+
+      await adapter.subscribe('orders.endless-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.endless', { orderId: 21 });
+      // Past the default of 1 and past the `deadLetter.maxRetries` default a cap would fall to.
+      await waitFor(() => seen.length >= 8, 15_000);
+
+      expect(seen.slice(0, 8).map((entry) => entry.attempt)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(seen.every((entry) => entry.maxAttempts === -1)).toBe(true);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reads attempts: 0 and deadLetter.maxRetries: -1 as no limit as well', async () => {
+      let zero = 0;
+      let fromDeadLetter = 0;
+      const reported = new Set<number | undefined>();
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.zero', async (message) => {
+        zero += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 0, delay: 10 }, deadLetter: { queue: 'orders.unlimited-dead' } });
+
+      await adapter.subscribe('orders.maxretries', async (message) => {
+        fromDeadLetter += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.unlimited-dead', maxRetries: -1 } });
+
+      await adapter.subscribe('orders.unlimited-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.zero', { orderId: 1 });
+      await adapter.publish('orders.maxretries', { orderId: 2 });
+      await waitFor(() => zero >= 4 && fromDeadLetter >= 4, 15_000);
+
+      expect([...reported]).toEqual([-1]);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('parks the retry of deadLetter.maxRetries: -1 with no retry for the default delay, never zero', async () => {
+      // A zero wait skips the delayed set and LPUSHes straight back: with no last attempt that is
+      // a message cycling through Redis as fast as it answers.
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      await adapter.subscribe('orders.dl-only', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dl-only-dead', maxRetries: -1 } });
+
+      await adapter.publish('orders.dl-only', { orderId: 8 });
+      await waitFor(() => calls >= 1);
+
+      let parked: string[] = [];
+      await waitFor(async () => {
+        parked = await client.zrangebyscore(delayedKey, '-inf', '+inf');
+
+        return parked.length > 0;
+      });
+      expect(JSON.parse(parked[0]).attempt).toBe(2);
+
+      // Paced by the 100 ms default: a handful of attempts in half a second, not hundreds.
+      await Bun.sleep(500);
+      expect(calls).toBeGreaterThan(1);
+      expect(calls).toBeLessThan(10);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('stops an unlimited retry as soon as the handler succeeds', async () => {
+      let calls = 0;
+      let processed = 0;
+      adapter.on('onMessageProcessed', () => {
+        processed += 1;
+      });
+
+      await adapter.subscribe('orders.recovers', async () => {
+        calls += 1;
+        if (calls < 5) {
+          throw new Error('transient');
+        }
+      }, { retry: { attempts: -1, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.recovers', { orderId: 4 });
+      await waitFor(() => processed > 0, 15_000);
+      await Bun.sleep(400);
+
+      expect(calls).toBe(5);
+      expect(processed).toBe(1);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
     it('reports a dead letter that could not be republished instead of losing it silently', async () => {

@@ -42,7 +42,11 @@ import {
   type QueuePatternMatch,
 } from '../pattern-matcher';
 import { toRedisQueueGlob } from '../redis-glob';
-import { resolveMaxAttempts, retryDelayMs } from '../retry';
+import {
+  isLastAttempt,
+  resolveMaxAttempts,
+  retryDelayMs,
+} from '../retry';
 import { QueueScheduler } from '../scheduler';
 
 // ============================================================================
@@ -714,14 +718,19 @@ export class RedisQueueAdapter implements QueueAdapter {
 
       await message.nack(false);
 
-      if (attempt >= maxAttempts) {
+      // Never true for a subscription with no attempts limit: its message goes back for
+      // another attempt until it succeeds, and reaches `deadLetter.queue` only through a
+      // `nack(false)` under 'manual'.
+      if (isLastAttempt(attempt, maxAttempts)) {
         // Exhausted: the terminal delivery. Route it, or drop it when nothing is configured.
         await this.routeToDeadLetter(entry, messageData, attempt, error as Error);
 
         return;
       }
 
-      await this.scheduleRetry(messageData, attempt + 1, retryDelayMs(entry.options?.retry, attempt));
+      // The cap goes in too: `deadLetter.maxRetries: -1` with no `retry` would otherwise wait 0 ms
+      // and cycle the message through the list as fast as Redis answers.
+      await this.scheduleRetry(messageData, attempt + 1, retryDelayMs(entry.options?.retry, attempt, maxAttempts));
     }
   }
 

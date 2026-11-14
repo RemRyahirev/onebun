@@ -25,6 +25,7 @@ import {
 
 import type { JetStreamAdapterOptions } from '../src/types';
 
+import { isLastAttempt } from '@onebun/core';
 import { useFakeTimers } from '@onebun/core/testing';
 
 
@@ -5035,9 +5036,9 @@ describe("ackMode 'none': the loop acknowledges nothing", () => {
 // Message.attempt / Message.maxAttempts
 //
 // Both fields were declared and never assigned, so the retry recipe the docs
-// ship — `if (message.attempt && message.attempt >= (message.maxAttempts || 3))`
-// — could never take its terminal branch: every failure fell through to
-// nack(true) until max_deliver ran out.
+// ship — `if (isLastAttempt(message.attempt, message.maxAttempts))` — could
+// never take its terminal branch: every failure fell through to nack(true)
+// until max_deliver ran out.
 // ============================================================================
 
 describe('Message.attempt and Message.maxAttempts', () => {
@@ -5091,6 +5092,24 @@ describe('Message.attempt and Message.maxAttempts', () => {
 
     expect(message.attempt).toBe(3);
     expect(message.attempt >= message.maxAttempts).toBe(true);
+  });
+
+  it('reports -1 for a subscription with no attempts limit, whichever value at or below 0 set it', async () => {
+    // One value on every adapter: the memory and Redis adapters resolve the same options to -1.
+    for (const attempts of [-1, 0, -5]) {
+      const { message, cfg } = await deliveredAt(4, { retry: { attempts } });
+
+      expect(message.maxAttempts).toBe(-1);
+      // The wire keeps the value as written; only the message reports the canonical -1.
+      expect(cfg.max_deliver).toBe(attempts);
+      expect(isLastAttempt(message.attempt as number, message.maxAttempts as number)).toBe(false);
+    }
+  });
+
+  it('reports -1 for deadLetter.maxRetries: -1 too', async () => {
+    const { message } = await deliveredAt(2, { deadLetter: { queue: 'dlq.unlimited', maxRetries: -1 } });
+
+    expect(message.maxAttempts).toBe(-1);
   });
 });
 
@@ -5422,12 +5441,16 @@ describe('tryDeleteDurableConsumer', () => {
 
 describe('retry.backoff and retry.delay', () => {
   /** Delivers one message at `deliveryCount`, fails the handler, returns the nak arguments. */
-  async function nakArgsFor(deliveryCount: number, options: AnyRecord = {}): Promise<unknown[]> {
+  async function nakArgsFor(
+    deliveryCount: number,
+    options: AnyRecord = {},
+    overrides: Partial<JetStreamAdapterOptions> = {},
+  ): Promise<unknown[]> {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
       info: { redelivered: deliveryCount > 1, deliveryCount },
     });
-    const { adapter } = makeConnectedAdapter();
+    const { adapter } = makeConnectedAdapter(overrides);
     const consumer = makeMockConsumer([jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
 
@@ -5469,6 +5492,18 @@ describe('retry.backoff and retry.delay', () => {
     // `-NAK` on the wire. Asserting the zero rather than the arity keeps the intent visible.
     expect(await nakArgsFor(1)).toEqual([0]);
     expect(await nakArgsFor(1, { retry: { attempts: 3 } })).toEqual([100]);
+  });
+
+  it('waits the default 100ms for a consumer with no limit and no retry, never a bare NAK', async () => {
+    // A bare NAK is an immediate redelivery; with no last attempt that is a failing message
+    // handed straight back for ever.
+    const dlq = { deadLetter: { queue: 'test.dlq', maxRetries: -1 } };
+
+    expect(await nakArgsFor(1, dlq)).toEqual([100]);
+    expect(await nakArgsFor(7, dlq)).toEqual([100]);
+    expect(await nakArgsFor(3, {}, { consumerConfig: { maxDeliver: -1 } })).toEqual([100]);
+    // An explicit `delay: 0` is the subscription's own choice and is still honoured.
+    expect(await nakArgsFor(3, { retry: { attempts: -1, delay: 0 } })).toEqual([0]);
   });
 
   it('does not touch the consumer config — the ladder is not JetStream backoff', async () => {

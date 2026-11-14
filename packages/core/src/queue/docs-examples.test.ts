@@ -18,6 +18,7 @@ import {
 import type { Interceptor, ResolvedInterceptor } from '../types';
 
 import { UseInterceptors } from '../decorators/decorators';
+import { useFakeTimers } from '../testing/test-utils';
 
 import { acknowledgesAutomatically, tracksDelivery } from './ack-mode';
 import { getMessageInterceptors } from './decorators';
@@ -55,6 +56,7 @@ import {
   createQueuePatternMatcher,
   toRedisQueueGlob,
   resolveMaxAttempts,
+  isLastAttempt,
   retryDelayMs,
   DEFAULT_RETRY_ATTEMPTS,
   DEFAULT_RETRY_DELAY_MS,
@@ -110,8 +112,8 @@ describe('Setup Section Examples (docs/api/queue.md)', () => {
           // process order
           await message.ack();
         } catch {
-          if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
-            await message.ack();
+          if (isLastAttempt(message.attempt, message.maxAttempts)) {
+            await message.nack(false);
           } else {
             await message.nack(true);
           }
@@ -1278,10 +1280,22 @@ describe('Pattern Syntax — the Redis key glob column', () => {
  * @source docs:api/queue.md#error-handling-in-handlers
  */
 describe('Error Handling in Handlers — the documented recipe, executed', () => {
+  /** The recipe's branch, verbatim: `isLastAttempt(message.attempt, message.maxAttempts)`. */
+  async function documentedDisposition(message: Message<unknown>): Promise<'requeue' | 'terminate'> {
+    if (isLastAttempt(message.attempt, message.maxAttempts)) {
+      await message.nack(false);
+
+      return 'terminate';
+    }
+
+    await message.nack(true);
+
+    return 'requeue';
+  }
+
   it('reaches the terminal nack(false) branch once attempt equals maxAttempts', async () => {
-    // The recipe on the page branches on `message.attempt >= (message.maxAttempts || 3)`. With
-    // `attempt` permanently undefined that branch was unreachable on this adapter, so the handler
-    // took `nack(true)` forever. This runs the recipe's shape and asserts it terminates.
+    // With `attempt` permanently undefined that branch was unreachable on this adapter, so the
+    // handler took `nack(true)` forever. This runs the recipe's shape and asserts it terminates.
     const adapter = new InMemoryQueueAdapter();
     await adapter.connect();
 
@@ -1294,13 +1308,7 @@ describe('Error Handling in Handlers — the documented recipe, executed', () =>
       try {
         throw new Error('order processing failed');
       } catch {
-        if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
-          dispositions.push('terminate');
-          await message.nack(false);
-        } else {
-          dispositions.push('requeue');
-          await message.nack(true);
-        }
+        dispositions.push(await documentedDisposition(message));
       }
     }, { ackMode: 'manual', retry: { attempts: 3, backoff: 'exponential', delay: 1 } });
 
@@ -1315,6 +1323,46 @@ describe('Error Handling in Handlers — the documented recipe, executed', () =>
       { attempt: 2, maxAttempts: 3 },
       { attempt: 3, maxAttempts: 3 },
     ]);
+  });
+
+  it('never takes the terminal branch on a subscription with no attempts limit', async () => {
+    // `maxAttempts` is -1 there, and the comparison the recipe used to make by hand —
+    // `attempt >= (maxAttempts || 3)` — was true on the first failure.
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const dispositions: Array<'requeue' | 'terminate'> = [];
+    const reported = new Set<number | undefined>();
+
+    await adapter.subscribe('orders.created', async (message) => {
+      reported.add(message.maxAttempts);
+
+      try {
+        if (dispositions.length < 5) {
+          throw new Error('order processing failed');
+        }
+        await message.ack();
+      } catch {
+        dispositions.push(await documentedDisposition(message));
+      }
+    }, { ackMode: 'manual', retry: { attempts: -1 } });
+
+    await adapter.publish('orders.created', { orderId: 'o-1' });
+    // `nack(true)` redelivers on `setImmediate`, so turns of the event loop are what it waits on.
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await adapter.disconnect();
+
+    expect(dispositions).toEqual(['requeue', 'requeue', 'requeue', 'requeue', 'requeue']);
+    expect([...reported]).toEqual([-1]);
+  });
+
+  it('answers false when nothing tracks delivery', () => {
+    // Core NATS, and every adapter under ackMode 'none', leave both fields undefined.
+    expect(isLastAttempt(undefined, undefined)).toBe(false);
+    expect(isLastAttempt(3, undefined)).toBe(false);
+    expect(isLastAttempt(undefined, 3)).toBe(false);
   });
 });
 
@@ -1334,9 +1382,107 @@ describe('RetryOptions — the documented defaults and formulas', () => {
     expect(resolveMaxAttempts({ attempts: 3 })).toBe(3);
   });
 
-  it('refuses to turn a subscription into one that never fires', () => {
-    expect(resolveMaxAttempts({ attempts: 0 })).toBe(1);
-    expect(resolveMaxAttempts({ attempts: -5 })).toBe(1);
+  it('reads -1, 0 and every other negative value as no limit, resolved to -1', () => {
+    expect(resolveMaxAttempts({ attempts: -1 })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: 0 })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: -5 })).toBe(-1);
+    // `deadLetter.maxRetries` follows the same rule when `retry.attempts` is absent.
+    expect(resolveMaxAttempts(undefined, { queue: 'd', maxRetries: -1 })).toBe(-1);
+    // A non-finite value sets no limit either, and is reported as the same -1.
+    expect(resolveMaxAttempts({ attempts: Number.POSITIVE_INFINITY })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: Number.NaN })).toBe(-1);
+  });
+
+  it('keeps a positive value as a cap, floored but never below one attempt', () => {
+    expect(resolveMaxAttempts({ attempts: 1 })).toBe(1);
+    expect(resolveMaxAttempts({ attempts: 2.7 })).toBe(2);
+    expect(resolveMaxAttempts({ attempts: 0.5 })).toBe(1);
+  });
+
+  it('reads an untyped value — a string from env or JSON — as it always has, never as no limit', () => {
+    // Only a value that really is a number takes the "0 or below is no limit" rule.
+    const untyped = (value: unknown) => ({ attempts: value as number });
+
+    expect(resolveMaxAttempts(untyped('3'))).toBe(3);
+    expect(resolveMaxAttempts(untyped('2.7'))).toBe(2);
+    expect(resolveMaxAttempts(untyped('0'))).toBe(1);
+    expect(resolveMaxAttempts(untyped('-1'))).toBe(1);
+    expect(resolveMaxAttempts(undefined, { queue: 'd', maxRetries: untyped('4').attempts })).toBe(4);
+    // Not a number at all: the default single delivery, not an endless retry.
+    expect(resolveMaxAttempts(untyped('three'))).toBe(1);
+  });
+
+  it('has no last attempt under no limit, so a bare attempt >= maxAttempts is the wrong test', () => {
+    const maxAttempts = resolveMaxAttempts({ attempts: -1 });
+
+    expect(isLastAttempt(1, maxAttempts)).toBe(false);
+    expect(isLastAttempt(1_000, maxAttempts)).toBe(false);
+    // The comparison the page warns about: true on the very first attempt.
+    expect(1 >= maxAttempts).toBe(true);
+
+    expect(isLastAttempt(2, 3)).toBe(false);
+    expect(isLastAttempt(3, 3)).toBe(true);
+  });
+
+  it('retries the documented attempts: -1 subscription every 5 s until the handler succeeds', async () => {
+    // The snippet as written: its options, registered by the decorator, and what they do on a
+    // real adapter.
+    class PaymentCapture {
+      calls = 0;
+
+      @Subscribe('payments.capture', {
+        retry: { attempts: -1, backoff: 'fixed', delay: 5_000 },
+      })
+      async capture(message: Message<{ paymentId: string }>) {
+        this.calls += 1;
+        if (this.calls < 12) {
+          throw new Error(`gateway unavailable for ${message.data.paymentId}`);
+        }
+      }
+    }
+
+    const [subscription] = getSubscribeMetadata(PaymentCapture);
+    expect(subscription.options?.retry).toEqual({ attempts: -1, backoff: 'fixed', delay: 5_000 });
+
+    const timers = useFakeTimers();
+    const adapter = new InMemoryQueueAdapter();
+
+    try {
+      await adapter.connect();
+
+      const consumer = new PaymentCapture();
+      const seen: Array<number | undefined> = [];
+      await adapter.subscribe<{ paymentId: string }>(subscription.pattern, async (message) => {
+        seen.push(message.maxAttempts);
+        await consumer.capture(message);
+      }, subscription.options);
+
+      await adapter.publish('payments.capture', { paymentId: 'p-1' });
+
+      for (let tick = 0; tick < 15; tick += 1) {
+        timers.advanceTime(5_000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      // Eleven failures, the twelfth attempt succeeds, and nothing follows it.
+      expect(consumer.calls).toBe(12);
+      expect(seen.every((maxAttempts) => maxAttempts === -1)).toBe(true);
+    } finally {
+      await adapter.disconnect();
+      timers.restore();
+    }
+  });
+
+  it('waits the default delay for a subscription with no limit and no retry, never zero', () => {
+    // `deadLetter.maxRetries: -1` (or JetStream's `consumerConfig.maxDeliver: -1`) sets no limit
+    // without a `retry`; a zero wait would redeliver as fast as the broker hands it back.
+    const unlimited = resolveMaxAttempts(undefined, { queue: 'd', maxRetries: -1 });
+
+    expect(retryDelayMs(undefined, 1, unlimited)).toBe(DEFAULT_RETRY_DELAY_MS);
+    expect(retryDelayMs(undefined, 40, unlimited)).toBe(DEFAULT_RETRY_DELAY_MS);
+    // A capped subscription without `retry`, and an explicit `delay: 0`, keep their zero wait.
+    expect(retryDelayMs(undefined, 1, 3)).toBe(0);
+    expect(retryDelayMs({ attempts: -1, delay: 0 }, 1, unlimited)).toBe(0);
   });
 
   it('computes each documented backoff formula', () => {

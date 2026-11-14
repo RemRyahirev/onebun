@@ -41,8 +41,10 @@ import {
   createQueuePatternMatcher,
   createQueueScheduler,
   inRootTraceScope,
+  isLastAttempt,
   nackedError,
   resolveAckMode,
+  resolveMaxAttempts,
   retryDelayMs,
   tracksDelivery,
   wasNacked,
@@ -140,7 +142,7 @@ interface ResolvedConsumerConfig {
   /**
    * Sent to the server unchanged. A value of zero or below is no limit — nats-server reads
    * `-1` as "redeliver until acknowledged" and stores `0` as `-1` — so every comparison
-   * against it goes through `isLastDelivery()`, never a bare `>=`.
+   * against it goes through core's `isLastAttempt()`, never a bare `>=`.
    */
   maxDeliver: number;
   consumeBatch: number;
@@ -215,17 +217,6 @@ function redeliveryConfig(resolved: ResolvedConsumerConfig): Partial<ConsumerCon
     max_ack_pending: resolved.maxAckPending,
     max_deliver: resolved.maxDeliver,
   };
-}
-
-/**
- * True when `deliveryCount` is the last delivery `maxDeliver` allows.
- *
- * A `maxDeliver` of zero or below is no limit, exactly as the server reads it, so no delivery
- * is ever the last one. A bare `deliveryCount >= maxDeliver` would hold for `-1` on the very
- * first delivery and dead-letter a message the subscription asked to retry without end.
- */
-function isLastDelivery(deliveryCount: number, maxDeliver: number): boolean {
-  return maxDeliver > 0 && deliveryCount >= maxDeliver;
 }
 
 /**
@@ -688,10 +679,11 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
     this.jsMsg = jsMsg;
     this.redelivered = jsMsg?.info?.redelivered ?? false;
     // Read from the wire in the same place `redelivered` is: the server counts deliveries,
-    // and that count is 1-based, so the documented `attempt >= maxAttempts` comparison
-    // works as written for a positive cap. An unlimited consumer's cap arrives as its own
-    // `max_deliver` (`-1`), against which a bare `>=` holds on every attempt — the adapter's
-    // own check goes through `isLastDelivery()`. The cap is threaded in because only the
+    // and that count is 1-based, so the documented `isLastAttempt(attempt, maxAttempts)`
+    // check works as written. An unlimited consumer's cap arrives as `-1` whatever value at
+    // or below zero its `max_deliver` holds — the value the memory and Redis adapters report
+    // too — and a bare `>=` against it holds on every attempt, which is why the adapter's own
+    // check goes through `isLastAttempt()` as well. The cap is threaded in because only the
     // subscription knows it.
     this.attempt = jsMsg?.info?.deliveryCount;
     this.maxAttempts = maxAttempts;
@@ -2351,6 +2343,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
             failure,
           );
 
+        // Through the resolver the memory and Redis adapters use, so a `max_deliver` of zero or
+        // below — which the server reads as no limit — is reported as the same `-1` they report.
+        const maxAttempts = resolveMaxAttempts({ attempts: entry.maxDeliver });
+
         const message = new JetStreamMessage(
           id,
           messagePattern,
@@ -2362,7 +2358,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           messageData.timestamp || Date.now(),
           metadata,
           msg,
-          entry.maxDeliver,
+          maxAttempts,
           toDeadLetter,
           entry.resolved.tracksDelivery,
         );
@@ -2390,8 +2386,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
             // On the delivery the server would otherwise make the last, park the payload in
             // the dead-letter queue instead of letting max_deliver exhaust it silently. Below
             // that threshold — and on every delivery when max_deliver is unlimited — this is
-            // an ordinary retry.
-            if (toDeadLetter !== undefined && isLastDelivery(msg.info?.deliveryCount ?? 1, entry.resolved.maxDeliver)) {
+            // an ordinary retry. The comparison is core's `isLastAttempt()`, the one the memory
+            // and Redis adapters make, so a `max_deliver` of zero or below never dead-letters.
+            if (toDeadLetter !== undefined && isLastAttempt(msg.info?.deliveryCount ?? 1, entry.resolved.maxDeliver)) {
               await toDeadLetter(error as Error);
             } else {
               // The wait between attempts travels WITH the nak, because the server decides
@@ -2404,10 +2401,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
               // would also cut the handler's acknowledgement window to one second — it is a
               // redelivery timescale, not a pause, and it would silently override `ackTimeout`.
               //
-              // A subscription with no `retry` yields 0, and the client's `nak(millis)` tests
-              // the argument for truthiness: `nak(0)` puts the same bare `-NAK` on the wire
-              // that `nak()` does, so the unconfigured path is unchanged byte for byte.
-              msg.nak(retryDelayMs(entry.options?.retry, msg.info?.deliveryCount ?? 1));
+              // A capped subscription with no `retry` yields 0, and the client's `nak(millis)`
+              // tests the argument for truthiness: `nak(0)` puts the same bare `-NAK` on the wire
+              // that `nak()` does, so the unconfigured path is unchanged byte for byte. One with
+              // no limit — `deadLetter.maxRetries` or `consumerConfig.maxDeliver` of zero or
+              // below — takes the default `retry` wait instead, or the server would hand a
+              // failing message straight back for ever.
+              msg.nak(retryDelayMs(entry.options?.retry, msg.info?.deliveryCount ?? 1, maxAttempts));
             }
           }
 
