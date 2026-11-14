@@ -1078,11 +1078,18 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const releases = entries.map(entry => this.releaseSubscription(entry));
     await awaitBounded(Promise.allSettled(releases), RELEASE_TIMEOUT_MS);
 
-    await this.client.disconnect();
-    this.connected = false;
-    this.js = null;
-    this.jsm = null;
-    this.jsmPending = null;
+    // Reset whether or not the client's disconnect rejects: the client has released its
+    // connection either way, and the rejection only reports a drain or close that failed. Left
+    // flagged as connected, the adapter would turn the next `connect()` into a no-op and let
+    // publish and subscribe through to a JetStream context bound to a closed connection.
+    try {
+      await this.client.disconnect();
+    } finally {
+      this.connected = false;
+      this.js = null;
+      this.jsm = null;
+      this.jsmPending = null;
+    }
   }
 
   isConnected(): boolean {

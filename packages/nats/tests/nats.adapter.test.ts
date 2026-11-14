@@ -10,6 +10,7 @@ import {
   it,
   expect,
   beforeEach,
+  mock,
 } from 'bun:test';
 
 import type {
@@ -51,6 +52,82 @@ describe('NatsQueueAdapter', () => {
   describe('lifecycle', () => {
     it('should not be connected initially', () => {
       expect(adapter.isConnected()).toBe(false);
+    });
+
+    /**
+     * The real `NatsClient` with only the driver connection substituted on it: the driver is
+     * resolved through a module-level dynamic import, and `mock.module` is banned in this repo.
+     * The double models what `@nats-io/nats-core` does — a drain that succeeds ends by closing,
+     * one that fails leaves the connection open.
+     */
+    function connectWith(drain: () => Promise<void>) {
+      const state = { closed: false };
+      let markClosed!: () => void;
+      const closed = new Promise<void>((resolve) => {
+        markClosed = () => {
+          state.closed = true;
+          resolve();
+        };
+      });
+      const nc = {
+        drain: mock(async () => {
+          await drain();
+          markClosed();
+        }),
+        close: mock(async () => {
+          markClosed();
+        }),
+        isClosed: mock(() => state.closed),
+        closed: mock(() => closed),
+      };
+      const unsubscribe = mock(() => undefined);
+      const a = asAny(adapter);
+      a.client.nc = nc;
+      a.connected = true;
+      a.subscriptions = [{ pattern: 'orders.*', handle: { unsubscribe } }];
+
+      return { nc, state, unsubscribe };
+    }
+
+    it('disconnect() on a healthy connection drains, closes and resolves', async () => {
+      const { nc, state, unsubscribe } = connectWith(() => Promise.resolve());
+      expect(adapter.isConnected()).toBe(true);
+
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(nc.drain).toHaveBeenCalledTimes(1);
+      expect(state.closed).toBe(true);
+      expect(adapter.isConnected()).toBe(false);
+    });
+
+    it('disconnect() during an outage closes the connection, resets its state and rethrows the drain error', async () => {
+      const drainError = new Error('connection disconnected');
+      const { nc, state } = connectWith(() => Promise.reject(drainError));
+
+      await expect(adapter.disconnect()).rejects.toBe(drainError);
+
+      expect(nc.close).toHaveBeenCalledTimes(1);
+      expect(state.closed).toBe(true);
+      expect(asAny(adapter).connected).toBe(false);
+      expect(asAny(adapter).client.getConnection()).toBeNull();
+      expect(adapter.isConnected()).toBe(false);
+    });
+
+    it('disconnect() resets its own state when the client disconnect rejects', async () => {
+      connectWith(() => Promise.resolve());
+      const failure = new Error('connection disconnected');
+      const a = asAny(adapter);
+      a.client.disconnect = mock(() => Promise.reject(failure));
+      a.client.isConnected = mock(() => true);
+
+      await expect(adapter.disconnect()).rejects.toBe(failure);
+
+      // The client double still answers `isConnected() === true`, so a false here can only
+      // come from the adapter's own flag.
+      expect(adapter.isConnected()).toBe(false);
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+      expect(a.client.disconnect).toHaveBeenCalledTimes(1);
     });
   });
 

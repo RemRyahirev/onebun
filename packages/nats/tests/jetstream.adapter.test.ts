@@ -710,6 +710,116 @@ describe('JetStreamQueueAdapter', () => {
 
       expect(a.subscriptions).toHaveLength(0);
     });
+
+    it('disconnect() resets its own state and rethrows when the client disconnect rejects', async () => {
+      const { adapter: connectedAdapter } = makeConnectedAdapter();
+      const a = asAny(connectedAdapter);
+      const failure = new Error('connection disconnected');
+      a.client.disconnect = mock(() => Promise.reject(failure));
+      a.jsmPending = Promise.resolve(a.jsm);
+
+      await expect(connectedAdapter.disconnect()).rejects.toBe(failure);
+
+      // The client double still answers `isConnected() === true`, so a false here can only
+      // come from the adapter's own flag.
+      expect(connectedAdapter.isConnected()).toBe(false);
+      expect(a.connected).toBe(false);
+      expect(a.js).toBeNull();
+      expect(a.jsm).toBeNull();
+      expect(a.jsmPending).toBeNull();
+    });
+
+    it('disconnect() after a rejected disconnect is a no-op', async () => {
+      const { adapter: connectedAdapter } = makeConnectedAdapter();
+      const a = asAny(connectedAdapter);
+      a.client.disconnect = mock(() => Promise.reject(new Error('connection disconnected')));
+      await connectedAdapter.disconnect().catch(() => undefined);
+
+      await expect(connectedAdapter.disconnect()).resolves.toBeUndefined();
+
+      expect(a.client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('disconnect() during an outage closes the driver connection even though the drain rejects', async () => {
+      // The real NatsClient this time, with only the driver connection substituted: what the
+      // driver does when `disconnect()` lands while it is reconnecting is reject the drain on
+      // the next reconnect attempt and leave the connection open.
+      const outageAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
+      });
+      activeAdapters.push(outageAdapter);
+      const a = asAny(outageAdapter);
+      const drainError = new Error('connection disconnected');
+      let closed = false;
+      const closedSignal = makeDeferred();
+      const nc = {
+        drain: mock(() => Promise.reject(drainError)),
+        close: mock(async () => {
+          closed = true;
+          closedSignal.resolve();
+        }),
+        isClosed: mock(() => closed),
+        closed: mock(() => closedSignal.promise),
+      };
+      a.client.nc = nc;
+      a.connected = true;
+      a.js = {};
+      a.jsm = {};
+      expect(outageAdapter.isConnected()).toBe(true);
+
+      await expect(outageAdapter.disconnect()).rejects.toBe(drainError);
+
+      expect(nc.close).toHaveBeenCalledTimes(1);
+      expect(closed).toBe(true);
+      expect(a.client.getConnection()).toBeNull();
+      expect(a.client.isConnected()).toBe(false);
+      expect(outageAdapter.isConnected()).toBe(false);
+      expect(a.js).toBeNull();
+      expect(a.jsm).toBeNull();
+    });
+
+    it('disconnect() settles when the driver gives up reconnecting while the drain is pending', async () => {
+      // nats-core closes the connection itself once `maxReconnectAttempts` is spent, and never
+      // settles a drain whose flush was still waiting: only another reconnect attempt would have.
+      const givingUpAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
+      });
+      activeAdapters.push(givingUpAdapter);
+      const a = asAny(givingUpAdapter);
+      const gaveUp = new Error('connection refused');
+      let closed = false;
+      let closeWith!: (reason: Error) => void;
+      const closedSignal = new Promise<Error>((resolve) => {
+        closeWith = (reason) => {
+          closed = true;
+          resolve(reason);
+        };
+      });
+      const nc = {
+        drain: mock(() => new Promise<void>(() => undefined)),
+        close: mock(() => Promise.resolve()),
+        isClosed: mock(() => closed),
+        closed: mock(() => closedSignal),
+      };
+      a.client.nc = nc;
+      a.connected = true;
+      a.js = {};
+      a.jsm = {};
+
+      const disconnecting = givingUpAdapter.disconnect();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(Bun.peek.status(disconnecting)).toBe('pending');
+
+      closeWith(gaveUp);
+
+      await expect(disconnecting).rejects.toBe(gaveUp);
+      expect(a.client.getConnection()).toBeNull();
+      expect(a.connected).toBe(false);
+      expect(givingUpAdapter.isConnected()).toBe(false);
+      await expect(givingUpAdapter.disconnect()).resolves.toBeUndefined();
+    });
   });
 
   describe('feature support', () => {

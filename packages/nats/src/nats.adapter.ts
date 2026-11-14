@@ -262,8 +262,14 @@ export class NatsQueueAdapter implements QueueAdapter {
     }
     this.subscriptions = [];
 
-    await this.client.disconnect();
-    this.connected = false;
+    // Reset whether or not the client's disconnect rejects: the client has released its
+    // connection either way, and the rejection only reports a drain or close that failed. Left
+    // flagged as connected, the adapter would turn the next `connect()` into a no-op.
+    try {
+      await this.client.disconnect();
+    } finally {
+      this.connected = false;
+    }
   }
 
   isConnected(): boolean {
