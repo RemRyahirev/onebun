@@ -1205,18 +1205,21 @@ export function getControllerGuards(target: Function): (Function | Guard)[] {
 /**
  * Read the method-level `@UseGuards` list for a handler, walking the prototype chain.
  *
- * `@Controller` wraps the decorated class in a subclass, so `WrappedController.prototype` is a
- * DIFFERENT object from the prototype the method decorator wrote to, and the metadata polyfill
- * is a `WeakMap` keyed on the exact object with no prototype walking. A queue consumer read by
- * class — which is how `QueueService.registerService` receives it — therefore finds nothing
- * unless the chain is walked. HTTP does not need this: route registration reads the prototype
- * it was handed directly.
+ * HTTP route registration, WebSocket gateway registration and queue consumer registration all
+ * resolve method guards through this function, once, when the handler is registered. The walk
+ * covers two cases. `@Controller` wraps the decorated class in a subclass, so
+ * `WrappedController.prototype` is a DIFFERENT object from the prototype the method decorator
+ * wrote to, and the metadata polyfill is a `WeakMap` keyed on the exact object with no prototype
+ * walking. And a handler that overrides a base method carries the base method's `@UseGuards` list
+ * as well as its own: a guard written on the base method guards every override, on every
+ * transport.
  *
  * Base entries come first, matching how class-level and method-level lists already merge.
+ * Deduplicated by identity, so a guard named on both the base method and the override runs once.
  *
  * @param target - Class holding the handler
  * @param propertyKey - Handler method name
- * @returns Guards declared with `@UseGuards` on that method
+ * @returns Guards declared with `@UseGuards` on that method and on every method it overrides
  * @see docs:api/guards.md
  */
 export function getMethodGuards(target: Function, propertyKey: string | symbol): (Function | Guard)[] {
@@ -1255,6 +1258,10 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  *   supports one and raises `onMessageFailed` either way. It is never silently dropped
  *
  * Execution order: middleware → class guards → method guards → handler
+ *
+ * A method-level list also guards every method that overrides it in a subclass, on all three
+ * transports: the base method's guards run first, then the override's own, and a guard named on
+ * both runs once.
  *
  * @see docs:api/guards.md
  * @see docs:api/decorators.md

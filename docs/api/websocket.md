@@ -623,6 +623,8 @@ Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissio
 
 Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically.
 
+`@UseWsGuards` is read from the method that declares the handler, so an overriding method does not inherit it from the base method; only a `@UseGuards` on the base method carries over to the override — see [Guards — On an overriding method](/api/guards#on-an-overriding-method).
+
 ## Interceptors
 
 `@UseInterceptors()` works on WebSocket gateways and individual message handlers — same decorator as HTTP. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.

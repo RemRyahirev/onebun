@@ -27,7 +27,11 @@ import type { Server, ServerWebSocket } from 'bun';
 import type { SyncLogger } from '@onebun/logger';
 
 import { awaitBounded } from '../await-bounded';
-import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
+import {
+  getControllerGuards,
+  getControllerInterceptors,
+  getMethodGuards,
+} from '../decorators/decorators';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
 import { inheritRequestContext, requestContextStore } from '../request-context';
@@ -273,7 +277,13 @@ export class WsHandler {
       // application at startup instead of throwing once per delivered message.
       let declared = declaredHandlerGuards.get(handler);
       if (!declared) {
-        declared = handler.guards ?? [];
+        // `@UseGuards` method guards are collected up the prototype chain, as queue
+        // registration does: a handler that overrides a guarded base method runs the base
+        // method's guards first, then its own list (`@UseGuards`, then `@UseWsGuards`).
+        declared = [...new Set([
+          ...(getMethodGuards(gatewayClass, handler.handler) as (Function | WsGuard)[]),
+          ...(handler.guards ?? []),
+        ])];
         declaredHandlerGuards.set(handler, declared);
       }
 

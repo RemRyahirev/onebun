@@ -46,6 +46,7 @@ import {
   getControllerInterceptors,
   getControllerMetadata,
   getControllerMiddleware,
+  getMethodGuards,
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
@@ -2230,7 +2231,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // be constructed with `new guard()` on every request, so a guard extending
           // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
-          const routeGuards = route.guards ?? [];
+          // Method guards are collected up the prototype chain, as queue registration does:
+          // a route that overrides a guarded base method runs the base method's guards first,
+          // then its own. `route.guards` is the declaring method's own list, already included
+          // by the walk; it stays in the merge so a list set on the route entry is kept.
+          const routeGuards = [...getMethodGuards(controllerClass, route.handler), ...(route.guards ?? [])];
           // Deduplicated by identity, as WebSocket already did. A guard named on both the
           // controller and one of its routes used to run twice per request: doubled database or
           // cache work, doubled denial lines in the log, and a decision that is only idempotent

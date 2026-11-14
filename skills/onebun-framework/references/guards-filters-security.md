@@ -100,6 +100,20 @@ first. **Every guard merge deduplicates by identity**, on all three transports: 
 class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once,
 so a guard that logs, counts or calls out does it once per invocation, at whatever levels it is named.
 
+**A method-level `@UseGuards` on a base method guards every override of it**, on an HTTP route,
+every WebSocket gateway handler type (`@OnMessage`, `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom`,
+`@OnLeaveRoom`) and a queue consumer alike. Order: class guards, then the base method's guards,
+then the override's own; a guard named on both the base method and the override runs once. The
+override adds guards, it cannot drop an inherited one. Only `@UseGuards` carries over —
+`@UseWsGuards`, `@UseMessageGuards` and `@UseInterceptors` are read from the method that declares
+the handler, so an override does not inherit those.
+
+A denial on a WebSocket lifecycle handler is silent to the client: only `@OnMessage` answers with
+a `FORBIDDEN` error frame. A denied `@OnConnect` leaves the socket open without running the handler
+or sending its reply; a denied `@OnDisconnect` skips the cleanup written in it (the framework still
+unregisters the client); `@OnJoinRoom`/`@OnLeaveRoom` run after the framework has already changed
+the room, so a guard there gates the handler, not the room change.
+
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved
 once, at handler registration. But `this.config` is a `NotInitializedConfig` stub unless the

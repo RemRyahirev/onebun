@@ -16,14 +16,15 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 2. Implement `Guard` (any transport) or `HttpGuard` / `WsGuard` / `MessageGuard` (one transport), class-based, for DI
 3. Use built-in `AuthGuard`, `RolesGuard` (HTTP), `WsAuthGuard` & friends (WebSocket), `MessageAuthGuard` & friends (queue)
 
-**ONE decorator, three transports.** `@UseGuards` works on HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe` consumers, class-level and method-level. One decorator covers all three transports — each level (class, method) has one metadata key that every transport reads — so a guarded WebSocket or queue handler is enforced exactly as a guarded route is. Guards and interceptors differ only in inheritance: method-level `@UseGuards` on a `@Subscribe` handler guards it (queue registration collects method guards up the prototype chain with `getMethodGuards`), while a method-level `@UseInterceptors` on a `@Subscribe` handler wraps it the same way it wraps an HTTP route, read from the method that declares the handler, so an overriding method does not inherit the base method's list
+**ONE decorator, three transports.** `@UseGuards` works on HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe` consumers, class-level and method-level. One decorator covers all three transports — each level (class, method) has one metadata key that every transport reads — so a guarded WebSocket or queue handler is enforced exactly as a guarded route is. Guards and interceptors differ only in inheritance by an overriding method, and the rule is the same on every transport: a method-level `@UseGuards` on a base method guards every method that overrides it (HTTP route, WebSocket gateway and queue consumer registration all collect method guards up the prototype chain with `getMethodGuards`, base method first), while a method-level `@UseInterceptors` is read from the method that declares the handler, so an overriding method does not inherit the base method's interceptor list
 
 **Applying guards:**
 - `@UseGuards(MyGuard)` on a controller/gateway/consumer class — applies to every route, message handler and subscription on it, but NOT to `@Cron`/`@Interval`/`@Timeout` methods: those are producers and are never guarded (nor intercepted), silently
 - `@UseGuards(MyGuard)` on a method — applies to that handler only
 - Both can be combined; class guards run first, then method guards
+- A method-level `@UseGuards` on a base method guards every override of that method in a subclass, on all three transports and on every WebSocket gateway handler type (`@OnMessage`, `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom`, `@OnLeaveRoom`): class guards, then the base method's guards, then the override's own. An override cannot drop an inherited method guard. Only `@UseGuards` carries over: `@UseWsGuards` and `@UseMessageGuards` are read from the method that declares the handler
 - `@UseWsGuards` (WebSocket) and `@UseMessageGuards` (queue) are the narrower spelling for a guard that only makes sense on one transport; guards from both decorators are merged, shared `@UseGuards` first, and deduplicated by identity — a guard written under both decorators runs once
-- **Deduplication is by identity, at every level and on every transport.** On a `@Subscribe` consumer method-level guards are collected up the prototype chain and deduplicated on the way (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited and re-declared on an override runs once; an HTTP route or a WebSocket handler reads only the list on the method that declares it, so an override of a guarded base method must repeat `@UseGuards`; the merge of the class-level list with the method-level list is deduplicated too, so the same guard named at BOTH levels runs once per request or message — a guard that hits a database does that work once, and a denial is logged once
+- **Deduplication is by identity, at every level and on every transport.** Method-level guards are collected up the prototype chain and deduplicated on the way (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited from a base method and re-declared on the override runs once; the merge of the class-level list with the method-level list is deduplicated too, so the same guard named at BOTH levels runs once per request or message — a guard that hits a database does that work once, and a denial is logged once
 - Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@OnMessage`/`@Subscribe` behaves identically. The same holds for `@UseInterceptors` and `@UseFilters`
 - Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
 - **The guard class must carry a decorator for constructor DI to work at all** — `@Service()` is the conventional one. TypeScript only emits the `design:paramtypes` metadata the DI reads for a class that has at least one decorator; an undecorated guard class with constructor parameters receives `undefined` for each and throws inside `canActivate`. This applies on HTTP too, and to an undecorated subclass of a decorated guard: it never receives the base's types (startup warns `<Guard> declares a constructor with parameters, but no types were emitted ...`)
@@ -36,7 +37,7 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 | Transport | What the caller sees | Is the work lost? |
 |---|---|---|
 | HTTP | `{ success: false, error: 'Forbidden', code: 403, details: {} }`, HTTP 403 (200 with `httpEnvelope`) | n/a |
-| WebSocket | an `error` frame: `{ event: 'error', data: { code: 'FORBIDDEN', event, message } }`, carrying the ack id if the client sent one. **The socket stays open** | n/a |
+| WebSocket | `@OnMessage`: an `error` frame: `{ event: 'error', data: { code: 'FORBIDDEN', event, message } }`, carrying the ack id if the client sent one. `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom`, `@OnLeaveRoom`: no frame, the handler just does not run — a denied `@OnDisconnect` skips the cleanup written in it, and a denied `@OnJoinRoom`/`@OnLeaveRoom` does not undo the room change, which the framework makes before the handler. **The socket stays open** | n/a |
 | Queue | `message.nack(false)` — no redelivery. Dead-letters on adapters with a DLQ, and the adapter raises `onMessageFailed` (never `onMessageProcessed`) on all of them | no: reported, not silently dropped |
 
 **If a guard THROWS:** on HTTP the error goes through the route's exception filters, so `throw new HttpException(401, 'Token expired')` produces that status and message. On WebSocket and queue there is no filter chain to carry it, so a throw is treated as a DENIAL (fail closed) and logged at `error` with the guard class name, the handler and the message id.
@@ -216,6 +217,33 @@ class AdminController extends ProtectedController {
 
 Base guards run before the subclass's own, matching the controller-then-route order. Routes declared on the base are not mounted under the subclass — see [Controllers — Extending a Base Controller](/api/controllers#extending-a-base-controller).
 
+### On an overriding method
+
+A method-level guard on a base method guards every method that overrides it in a subclass. The override adds its own guards to the inherited ones; it cannot drop them.
+
+```typescript
+import { AuthGuard, BaseController, Controller, Delete, Param, RolesGuard, UseGuards } from '@onebun/core';
+
+class AccountHandlers extends BaseController {
+  @UseGuards(AuthGuard)
+  remove(id: string) {
+    return { removed: id };
+  }
+}
+
+@Controller('/accounts')
+class AdminAccountController extends AccountHandlers {
+  @UseGuards(new RolesGuard(['admin']))
+  @Delete('/:id')
+  override remove(@Param('id') id: string) {
+    // reached only after AuthGuard (from the base method), then RolesGuard
+    return { removed: id };
+  }
+}
+```
+
+The order is class guards, then the base method's guards, then the override's own. Base method guards come first for the same reason base class guards do: the override specialises the base method, so its own checks run after the base ones, and a denial by an inherited guard stops the call before the override's guards run. A guard named on both the base method and the override runs once. The rule is the same on an HTTP route, every WebSocket gateway handler — `@OnMessage`, `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom` and `@OnLeaveRoom` — and a queue `@Subscribe` consumer, and it is resolved once, when the handler is registered. On the WebSocket lifecycle handlers a denial sends no error frame: a denied `@OnConnect` leaves the connection open without running the handler or sending its reply, and a denied `@OnDisconnect` does not run, so cleanup written in it is skipped (see [What denial does on each transport](#what-denial-does-on-each-transport)). A guard on a base method that a lifecycle handler overrides applies there too. It covers `@UseGuards` only: the transport-specific `@UseWsGuards` and `@UseMessageGuards`, and `@UseInterceptors`, are read from the method that declares the handler.
+
 ### Combining controller + route guards
 
 Guards from both levels are merged and run sequentially — controller guards first, then route guards.
@@ -238,7 +266,7 @@ The two lists are merged controller-first and deduplicated by identity: naming t
 
 ## One Decorator, Three Transports
 
-`@UseGuards` is the same decorator on an HTTP route, a WebSocket `@OnMessage` handler and a queue `@Subscribe` consumer, at class level and at method level on all three. `@UseInterceptors` works at class level and at method level on all three as well. An overriding method does not inherit the base method's interceptor list on any transport; method guards are inherited by an override only on a `@Subscribe` consumer, where queue registration collects them up the prototype chain — an HTTP route or a WebSocket handler that overrides a guarded base method must repeat `@UseGuards` (see [Queue handler](/api/interceptors#queue-handler)).
+`@UseGuards` is the same decorator on an HTTP route, a WebSocket `@OnMessage` handler and a queue `@Subscribe` consumer, at class level and at method level on all three. `@UseInterceptors` works at class level and at method level on all three as well. The two differ for an overriding method, the same way on every transport: a method-level `@UseGuards` on a base method guards every override of it (see [On an overriding method](#on-an-overriding-method)), while an overriding method does not inherit the base method's interceptor list (see [Queue handler](/api/interceptors#queue-handler)).
 
 ```typescript
 @Controller('/orders')
@@ -309,8 +337,10 @@ The composites are the exception — `MessageAllGuards`, `MessageAnyGuard`, `WsA
 | Transport | Response | Message/connection |
 |---|---|---|
 | **HTTP** | `{ success: false, error: 'Forbidden', code: 403, details: {} }` with status 403 — status 200 under `httpEnvelope` | — |
-| **WebSocket** | an `error` frame: `{ event: 'error', data: { code: 'FORBIDDEN', event, message } }`, carrying the client's ack id when it sent one | **the socket stays open.** One denied message must not tear down a connection multiplexing others |
+| **WebSocket** | `@OnMessage`: an `error` frame: `{ event: 'error', data: { code: 'FORBIDDEN', event, message } }`, carrying the client's ack id when it sent one. `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom`, `@OnLeaveRoom`: no frame — the handler does not run | **the socket stays open.** One denied message must not tear down a connection multiplexing others |
 | **Queue** | `message.nack(false)` — explicitly no redelivery | dead-lettered where the adapter has a DLQ; `onMessageFailed` is raised on every adapter, `onMessageProcessed` never. The message is reported, not silently swallowed |
+
+The WebSocket lifecycle handlers have no message to answer, so a denial there is silent to the client. A denied `@OnConnect` leaves the connection open, with neither the handler nor its reply. A denied `@OnDisconnect` does not run, so cleanup written in it is skipped; the framework still unregisters the client and removes it from storage. `@OnJoinRoom` and `@OnLeaveRoom` run after the framework has already added the client to the room or removed it, so a guard there decides whether the handler runs, not whether the room changes.
 
 Queue denial does not requeue on purpose: an authorization decision is deterministic, so redelivery would deny the same message forever. `requeue: false` terminates it server-side on JetStream, routes it to the dead-letter queue on Redis when `deadLetter` is configured, and drops it on the in-memory adapter — and in all three cases `onMessageFailed` fires, so a denial is visible to metrics instead of looking like a success.
 

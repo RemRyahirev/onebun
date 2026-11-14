@@ -323,6 +323,46 @@ class AdminCombinedController extends BaseController {
 }
 
 // ============================================================================
+// docs:api/guards.md#on-an-overriding-method
+// ============================================================================
+
+class BaseMethodAuthGuard extends AuthGuard {
+  override canActivate(ctx: ExecutionContext): boolean {
+    guardTrace.push('base-method:auth');
+
+    return super.canActivate(ctx);
+  }
+}
+
+class OverrideRolesGuard extends RolesGuard {
+  override canActivate(ctx: ExecutionContext): boolean {
+    guardTrace.push('override:roles');
+
+    return super.canActivate(ctx);
+  }
+}
+
+class AccountHandlers extends BaseController {
+  @UseGuards(BaseMethodAuthGuard)
+  remove(id: string) {
+    handlerHits.push('account-handlers:remove');
+
+    return { removed: id };
+  }
+}
+
+@Controller('/accounts')
+class AdminAccountController extends AccountHandlers {
+  @UseGuards(new OverrideRolesGuard(['admin']))
+  @Delete('/:id')
+  override remove(@Param('id') id: string) {
+    handlerHits.push('accounts:remove');
+
+    return { removed: id };
+  }
+}
+
+// ============================================================================
 // docs:api/guards.md#guard-response
 // ============================================================================
 
@@ -386,6 +426,7 @@ class RolesOnlyController extends BaseController {
     ProtectedController,
     ResourceController,
     AdminCombinedController,
+    AdminAccountController,
     GuardResponseController,
     RolesOnlyController,
   ],
@@ -698,6 +739,40 @@ describe('docs/api/guards.md', () => {
       expect(both.body).toEqual({ success: true, result: { deleted: '7' } });
       expect(both.trace).toEqual(['controller:auth', 'route:roles']);
       expect(both.hits).toEqual(['admin:deleteUser']);
+    });
+  });
+
+  describe('On an overriding method', () => {
+    /**
+     * @source docs:api/guards.md#on-an-overriding-method
+     */
+    it('should guard the override with the base method guard first, then its own', async () => {
+      // Anonymous: the guard inherited from the base method denies and short-circuits, so the
+      // override's own guard never runs — which is only possible if the base guard runs first.
+      const anonymous = await call('/accounts/7', { method: 'DELETE' });
+
+      expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(anonymous.trace).toEqual(['base-method:auth']);
+      expect(anonymous.hits).toEqual([]);
+
+      // Token but no role: the inherited guard passes, then the override's guard denies.
+      const token = { authorization: 'Bearer any-token' };
+      const tokenOnly = await call('/accounts/7', { method: 'DELETE', headers: token });
+
+      expect(tokenOnly.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(tokenOnly.trace).toEqual(['base-method:auth', 'override:roles']);
+      expect(tokenOnly.hits).toEqual([]);
+
+      const both = await call('/accounts/7', {
+        method: 'DELETE',
+        headers: { ...token, ...headersOf(['x-user-roles', 'admin']) },
+      });
+
+      expect(both.status).toBe(HttpStatusCode.OK);
+      expect(both.body).toEqual({ success: true, result: { removed: '7' } });
+      expect(both.trace).toEqual(['base-method:auth', 'override:roles']);
+      // The override is the handler; the base method body is not called.
+      expect(both.hits).toEqual(['accounts:remove']);
     });
   });
 
