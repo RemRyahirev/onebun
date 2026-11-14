@@ -450,7 +450,12 @@ describe('DrizzleService.transaction() on PostgreSQL', () => {
     expect(result).toBe('pg-result');
     expect(calls.length).toBe(1);
     expect(seen).toBeInstanceOf(UniversalTransactionClient);
-    expect(seen!.getRawTransaction()).toBe(rawTx as never);
+    // drizzle's transaction as PROTOTYPE, with only `transaction()` redefined on top (it refuses
+    // a savepoint config it would drop), so everything else resolves to the real handle.
+    const handed = seen!.getRawTransaction() as unknown as { marker: string };
+    expect(Object.getPrototypeOf(handed)).toBe(rawTx);
+    expect(handed.marker).toBe('pg-tx');
+    expect(Object.keys(rawTx)).toEqual(['marker', 'transaction']);
   });
 
   test('hands out the database routed, so a repository joins the transaction it is inside', () => {

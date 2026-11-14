@@ -44,8 +44,18 @@ import {
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,
 } from './builders';
-import { AmbientTransaction, createTransactionAwareDatabase } from './builders/ambient-transaction';
-import { createGatedDatabase, SQLiteTransactionGate } from './builders/transaction-gate';
+import {
+  AmbientTransaction,
+  createGuardedTransaction,
+  createTransactionAwareDatabase,
+  findTransactionOptionsMismatch,
+  type TransactionOptionsMismatch,
+} from './builders/ambient-transaction';
+import {
+  createGatedDatabase,
+  DrizzleTransactionError,
+  SQLiteTransactionGate,
+} from './builders/transaction-gate';
 import { applyBunSqlJsonEncodingFix } from './pg-json-encoding';
 import {
   type DatabaseConnectionOptions,
@@ -56,13 +66,17 @@ import {
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
   type PostgreSQLPoolOptions,
+  type PostgreSQLTransactionOptions,
   type SQLiteConnectionOptions,
 } from './types';
 
 /**
- * Thrown by `transaction()` on SQLite when the single connection cannot serve the request:
- * a nested transaction, or a query issued outside the transaction client from inside the
- * callback. Re-exported here because that is where it is raised.
+ * Thrown when a transaction cannot be carried out as asked, on either dialect: on SQLite a
+ * nested `transaction()`, a synchronous query from a concurrent caller while a transaction holds
+ * the single connection, or `transaction()` given options; on PostgreSQL a nested transaction —
+ * `transaction()` or drizzle's own `transaction(fn, config)` — asking for settings the outermost
+ * one does not run under; on both an unknown option or value. `code` says which. Re-exported here
+ * because the service is where most of them are raised.
  *
  * @see docs:api/drizzle.md
  */
@@ -571,6 +585,91 @@ function assertSafeIdentifier(value: string, option: string): void {
       + 'identifier — letters, digits, underscores and $, not starting with a digit.',
     );
   }
+}
+
+/**
+ * Every value each transaction option accepts.
+ *
+ * Checked at run time as well as by the type, because drizzle writes these words into the
+ * `SET TRANSACTION` statement as raw SQL, and options also arrive from untyped places — a JSON
+ * config, an environment variable, a cast.
+ */
+const TRANSACTION_OPTION_VALUES: {
+  readonly [K in keyof Required<PostgreSQLTransactionOptions>]: ReadonlyArray<PostgreSQLTransactionOptions[K]>;
+} = {
+  isolationLevel: ['read committed', 'repeatable read', 'serializable'],
+  accessMode: ['read write', 'read only'],
+};
+
+const TRANSACTION_OPTION_KEYS = Object.keys(TRANSACTION_OPTION_VALUES) as Array<keyof PostgreSQLTransactionOptions>;
+
+/**
+ * Validate `transaction()` options, keeping only the ones that are set.
+ *
+ * `null` when none is: `undefined`, `{}` and `{ isolationLevel: undefined }` all mean "no
+ * options" and leave the transaction exactly as it is without them.
+ */
+function resolveTransactionOptions(
+  options: PostgreSQLTransactionOptions | undefined,
+): PostgreSQLTransactionOptions | null {
+  if (options === undefined || options === null) {
+    return null;
+  }
+
+  if (typeof options !== 'object') {
+    throw new DrizzleTransactionError(
+      'TRANSACTION_OPTIONS_INVALID',
+      `transaction() options must be an object, got ${typeof options}.`,
+    );
+  }
+
+  const unknownKey = Object.keys(options)
+    .find(key => !(TRANSACTION_OPTION_KEYS as string[]).includes(key));
+  if (unknownKey !== undefined) {
+    throw new DrizzleTransactionError(
+      'TRANSACTION_OPTIONS_INVALID',
+      `Unknown transaction() option '${unknownKey}'. The options are ${TRANSACTION_OPTION_KEYS.join(' and ')}.`,
+    );
+  }
+
+  const resolved: Record<string, string> = {};
+  for (const key of TRANSACTION_OPTION_KEYS) {
+    const value: unknown = options[key];
+    if (value === undefined) {
+      continue;
+    }
+
+    const accepted: ReadonlyArray<unknown> = TRANSACTION_OPTION_VALUES[key];
+    if (!accepted.includes(value)) {
+      throw new DrizzleTransactionError(
+        'TRANSACTION_OPTIONS_INVALID',
+        `Invalid transaction() ${key} ${JSON.stringify(value)}: expected one of `
+        + `${accepted.map(item => `'${String(item)}'`).join(', ')}.`,
+      );
+    }
+
+    resolved[key] = value as string;
+  }
+
+  return Object.keys(resolved).length === 0 ? null : resolved as PostgreSQLTransactionOptions;
+}
+
+/** Why a nested `transaction()` cannot run under the settings it asked for. */
+const nestedOptionsMismatchMessage = ({ asked, held }: TransactionOptionsMismatch): string =>
+  `A nested transaction() asked for ${asked}, inside a transaction opened with ${held}. `
+  + 'A nested transaction() is a SAVEPOINT of the enclosing one and runs under its settings: '
+  + 'PostgreSQL fixes them before the first statement of a transaction. Pass the options to the '
+  + 'outermost transaction() instead, or call the nested one without them.';
+
+/** Why `transaction()` with options cannot run on SQLite. */
+function sqliteOptionsMessage(requested: PostgreSQLTransactionOptions): string {
+  const given = TRANSACTION_OPTION_KEYS.filter(key => key in requested);
+  const settings = given.length === 1
+    ? `${given[0]}, which is a PostgreSQL transaction setting`
+    : `${given.join(' and ')}, which are PostgreSQL transaction settings`;
+
+  return `transaction() was given ${settings}. SQLite has no per-transaction equivalent — its `
+    + 'transactions are serializable — so call transaction() without options on SQLite.';
 }
 
 /**
@@ -1802,6 +1901,15 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    *   every other query is queued behind it (see {@link SQLiteTransactionGate}) rather than
    *   silently enrolled in it and rolled back with it.
    *
+   * `options` sets the isolation level and access mode of the transaction — PostgreSQL only.
+   * They are issued as `SET TRANSACTION` before the callback runs, so every statement in it
+   * runs under them, the ones from repositories and other services included. A nested call is
+   * a SAVEPOINT and runs under the settings of the outermost transaction: it may repeat them or
+   * pass none, and anything else is refused before its callback runs. The same holds for
+   * drizzle's own `transaction(fn, config)` reached inside the callback, through `getDatabase()`
+   * or `tx.getRawTransaction()`: drizzle's savepoint would drop the config, so a config that asks
+   * for different settings is refused instead.
+   *
    * @example
    * ```typescript
    * await db.transaction(async (tx) => {
@@ -1809,16 +1917,28 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    *   await tx.insert(usersTable).values({ name: 'John' });
    *   await tx.update(usersTable).set({ name: 'Jane' }).where(eq(usersTable.id, 1));
    * });
+   *
+   * // PostgreSQL: one snapshot for every read, and no writes
+   * await db.transaction(async () => {
+   *   // ...
+   * }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
    * ```
    *
-   * @throws DrizzleTransactionError on SQLite when called from inside another transaction
-   * callback, which the single connection cannot serve.
+   * @throws DrizzleTransactionError before the callback runs: on SQLite when called from inside
+   * another transaction callback, which the single connection cannot serve, or when given
+   * options (`SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED`); on PostgreSQL when a nested call asks
+   * for settings the enclosing transaction does not run under
+   * (`POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH`); on either when an option or its value is not
+   * one `transaction()` accepts (`TRANSACTION_OPTIONS_INVALID`).
    *
    * @see docs:api/drizzle.md
    */
   async transaction<R>(
     callback: (tx: UniversalTransactionClient) => Promise<R>,
+    options?: PostgreSQLTransactionOptions,
   ): Promise<R> {
+    const requested = resolveTransactionOptions(options);
+
     await this.waitForInit();
 
     if (!this.db || !this.initialized) {
@@ -1826,25 +1946,65 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     }
 
     if (this.dbType === DatabaseType.SQLITE) {
+      if (requested !== null) {
+        // Refused before the gate is taken, so it does not wait for a transaction in flight.
+        throw new DrizzleTransactionError('SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED', sqliteOptionsMessage(requested));
+      }
+
       return await this.runSQLiteTransaction(callback);
     }
 
     // A transaction opened from inside a transaction is a SAVEPOINT on the connection
     // already held, not a second one from the pool — the latter can block on a row its own
     // outer transaction holds, which is a deadlock with itself.
+    const enclosing = this.pgAmbient.activeTransaction();
+    if (enclosing !== null) {
+      // A savepoint cannot change the settings, and drizzle's savepoint ignores them: refused,
+      // so the callback never runs under settings other than the ones it asked for.
+      const mismatch = findTransactionOptionsMismatch(requested, enclosing.options);
+      if (mismatch !== null) {
+        throw new DrizzleTransactionError('POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH', nestedOptionsMismatchMessage(mismatch));
+      }
+
+      // No config is passed on: the settings were matched above, and a savepoint takes none.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return await (enclosing.database as any).transaction(async (rawTx: DatabaseInstance) =>
+        await this.runPostgreSQLCallback(rawTx, enclosing.options, callback));
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const root = (this.pgAmbient.activeDatabase() ?? this.db) as any;
+    const root = this.db as any;
+    const run = async (rawTx: DatabaseInstance): Promise<R> =>
+      await this.runPostgreSQLCallback(rawTx, requested ?? {}, callback);
 
-    return await root.transaction(async (rawTx: DatabaseInstance) => {
-      const wrappedTx = new UniversalTransactionClient(rawTx);
+    // drizzle issues the config as `SET TRANSACTION` right after BEGIN, before `run`.
+    return requested === null
+      ? await root.transaction(run)
+      : await root.transaction(run, requested);
+  }
 
-      // Everything called from inside the callback — a repository, a service query, another
-      // service — is issued on this transaction rather than on a second pooled connection.
-      return await this.pgAmbient.runInContext(
-        rawTx as object,
-        async () => await callback(wrappedTx),
-      );
-    });
+  /**
+   * Run a PostgreSQL transaction callback on `rawTx`.
+   *
+   * Everything called from inside the callback — a repository, a service query, another
+   * service — is issued on this transaction rather than on a second pooled connection, and a
+   * nested `transaction()` finds the settings it has to match. The client handed out and
+   * routed onto is the guarded one, so drizzle's own `transaction(fn, config)` reached from
+   * inside the callback is held to the same settings.
+   */
+  private async runPostgreSQLCallback<R>(
+    rawTx: DatabaseInstance,
+    options: Readonly<PostgreSQLTransactionOptions>,
+    callback: (tx: UniversalTransactionClient) => Promise<R>,
+  ): Promise<R> {
+    const guardedTx = createGuardedTransaction(rawTx, options);
+    const wrappedTx = new UniversalTransactionClient(guardedTx);
+
+    return await this.pgAmbient.runInContext(
+      guardedTx,
+      options,
+      async () => await callback(wrappedTx),
+    );
   }
 
   /**

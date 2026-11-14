@@ -15,7 +15,10 @@ export type {
   DrizzleModuleOptions,
   IRepository,
   MigrationOptions,
+  PostgreSQLAccessMode,
   PostgreSQLConnectionOptions,
+  PostgreSQLIsolationLevel,
+  PostgreSQLTransactionOptions,
   SQLiteConnectionOptions,
 } from './types';
 
