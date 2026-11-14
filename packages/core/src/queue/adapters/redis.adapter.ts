@@ -41,6 +41,7 @@ import {
   isQueuePattern,
   type QueuePatternMatch,
 } from '../pattern-matcher';
+import { QueuePublishError, type QueuePublishFailureReason } from '../publish-error';
 import { toRedisQueueGlob } from '../redis-glob';
 import {
   isLastAttempt,
@@ -59,6 +60,134 @@ const MAX_POLL_INTERVAL_MS = 1000;
 
 /** Doublings applied before the ceiling takes over; bounds the exponent, not the delay. */
 const MAX_POLL_BACKOFF_DOUBLINGS = 6;
+
+const NOT_CONNECTED_MESSAGE = 'RedisQueueAdapter not connected. Call connect() first.';
+
+/** Bun's code for an error reply. Redis executes nothing of a command it answers with an error. */
+const REDIS_SERVER_ERROR_CODE = 'ERR_REDIS_SERVER_ERROR';
+
+/**
+ * Error replies — named by their first word, the reply's code — that mean the server cannot take a
+ * write right now, not that it refused this one: a replica (`READONLY`, what a failover leaves the
+ * old primary as), a script running past `busy-reply-threshold` (`BUSY`), a dataset still loading
+ * (`LOADING`), a replica cut off from its primary (`MASTERDOWN`), a slot being migrated
+ * (`TRYAGAIN`), a cluster without its slots covered (`CLUSTERDOWN`), too few replicas for
+ * `min-replicas-to-write` (`NOREPLICAS`), snapshots failing under `stop-writes-on-bgsave-error`
+ * (`MISCONF`). The same publish succeeds once that passes. Compared as a whole word: `BUSYKEY` and
+ * `BUSYGROUP` are refusals of their own.
+ */
+const REDIS_CANNOT_WRITE_NOW = new Set([
+  'READONLY',
+  'BUSY',
+  'LOADING',
+  'MASTERDOWN',
+  'TRYAGAIN',
+  'CLUSTERDOWN',
+  'NOREPLICAS',
+  'MISCONF',
+]);
+
+/** Bun's code for every connection-level failure of a command — sent or not. */
+const REDIS_CONNECTION_CLOSED_CODE = 'ERR_REDIS_CONNECTION_CLOSED';
+
+/**
+ * The `ERR_REDIS_CONNECTION_CLOSED` messages Bun gives a command that never left the process,
+ * measured against a live server: `Connection has failed` when the client had already given up
+ * reconnecting before the command was issued, `Max reconnection attempts reached` when the command
+ * waited in the offline queue and the client gave up then. A command in flight when the connection
+ * dropped gets `Connection closed` under the same code, and may have been executed — so only these
+ * two messages make the code mean "not sent".
+ *
+ * The second one is safe only by circumstance. Bun (1.4.2, `valkey.rs`) rejects the commands in
+ * flight with `Max reconnection attempts reached` as well, so it would hide a sent command — except
+ * that the retry counter resets once a connection completes its `HELLO`, and the limit stays at 20
+ * because OneBun's `RedisClientOptions` does not pass `maxRetries` through. The message is therefore
+ * reached only after 20 dials in a row that all failed, when no connection existed for anything to
+ * be in flight on. A `maxRetries` option, or a Bun that stops resetting the counter, breaks this.
+ */
+const REDIS_NOT_SENT_MESSAGES = new Set(['Connection has failed', 'Max reconnection attempts reached']);
+
+/** How OneBun's `RedisClient` refuses a command when it holds no connection, before sending anything. */
+const CLIENT_NOT_CONNECTED_PREFIX = 'Redis client not connected';
+
+/**
+ * What a failed Redis write was, in the detail a message needs:
+ * - `refused` — an error reply about this command (`WRONGTYPE`, `NOPERM`, `OOM`, …): `'rejected'`;
+ * - `cannotWriteNow` — an error reply from a server that cannot take writes at the moment: `'unavailable'`;
+ * - `notSent` — the client had no connection to send it on: `'unavailable'`;
+ * - `unknown` — anything else, the command in flight when the connection dropped among them.
+ */
+type RedisPublishFailureKind = 'refused' | 'cannotWriteNow' | 'notSent' | 'unknown';
+
+const REASON_OF_KIND: Record<RedisPublishFailureKind, QueuePublishFailureReason> = {
+  refused: 'rejected',
+  cannotWriteNow: 'unavailable',
+  notSent: 'unavailable',
+  unknown: 'unknown',
+};
+
+/**
+ * What a failed Redis write means for the message.
+ *
+ * Every mapping is to what the driver proves; an error it does not recognise is `'unknown'`, never
+ * `'unavailable'`, which promises that nothing was stored.
+ */
+function classifyRedisPublishFailure(cause: unknown): RedisPublishFailureKind {
+  if (typeof cause !== 'object' || cause === null) {
+    return 'unknown';
+  }
+
+  const { code, message } = cause as { code?: unknown; message?: unknown };
+
+  if (code === REDIS_SERVER_ERROR_CODE) {
+    const replyCode = typeof message === 'string' ? message.split(' ', 1)[0] : '';
+
+    return REDIS_CANNOT_WRITE_NOW.has(replyCode) ? 'cannotWriteNow' : 'refused';
+  }
+  if (typeof message !== 'string') {
+    return 'unknown';
+  }
+  if (code === REDIS_CONNECTION_CLOSED_CODE) {
+    return REDIS_NOT_SENT_MESSAGES.has(message) ? 'notSent' : 'unknown';
+  }
+  if (code === undefined && message.startsWith(CLIENT_NOT_CONNECTED_PREFIX)) {
+    return 'notSent';
+  }
+
+  return 'unknown';
+}
+
+/** The `QueuePublishError` for a write to `key` that Redis did not complete. */
+function redisPublishError(pattern: string, key: string, cause: unknown): QueuePublishError {
+  const kind = classifyRedisPublishFailure(cause);
+  // Without its trailing period, so a sentence can follow it: Redis ends many replies with one.
+  const detail = (cause instanceof Error ? cause.message : String(cause)).replace(/\.+$/, '');
+  const attempted = `Failed to publish "${pattern}" to Redis key "${key}"`;
+  let explanation: string;
+
+  switch (kind) {
+    case 'refused':
+      explanation = `Redis refused it — ${detail}. Nothing was stored, so repeating the publish cannot store the `
+        + 'message twice; a repeat succeeds only once that cause has changed.';
+      break;
+    case 'cannotWriteNow':
+      explanation = `Redis cannot take writes right now — ${detail}. Nothing was stored, so repeating the publish `
+        + 'cannot store the message twice, and a repeat can succeed once that passes.';
+      break;
+    case 'notSent':
+      explanation = `the client has no connection to Redis (${detail}). Nothing was sent, so repeating the publish `
+        + 'cannot store the message twice.';
+      break;
+    default:
+      explanation = `${detail}. The command may have reached Redis before the connection failed, so the message `
+        + 'may or may not have been stored, and repeating the publish can store it twice.';
+  }
+
+  return new QueuePublishError(
+    `${attempted}: ${explanation} The driver's error is attached as the cause of this error.`,
+    { reason: REASON_OF_KIND[kind], pattern, cause },
+  );
+}
 
 // ============================================================================
 // Types
@@ -469,9 +598,29 @@ export class RedisQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Store a message for the subscriptions matching `pattern`.
+   *
+   * Resolves once Redis stored it. A normal message is then announced on the wake channel; a
+   * failed announcement does not fail the publish — the message is stored, and a subscriber that
+   * missed the wake finds it on its next poll — and is reported as `onError` instead.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when the adapter or its client is not connected,
+   *   the client gave up reconnecting before the command was sent, or Redis cannot take writes right
+   *   now (`READONLY`, `BUSY`, `LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, `NOREPLICAS`,
+   *   `MISCONF`); `'rejected'` for
+   *   any other error reply (`WRONGTYPE`, `OOM`, `NOPERM`, …); `'unknown'` when the connection
+   *   closed while the command was in flight, or for any error the adapter does not recognise. The
+   *   driver's error is the `cause`.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected || !this.client) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
+    const client = this.client;
     const messageId = options?.messageId ?? this.generateMessageId();
     const timestamp = Date.now();
 
@@ -485,20 +634,49 @@ export class RedisQueueAdapter implements QueueAdapter {
 
     const serialized = JSON.stringify(messageData);
 
-    if (options?.delay && options.delay > 0) {
-      // Delayed message - use sorted set
-      const score = timestamp + options.delay;
-      await this.client!.zadd(this.keys.delayed, score, serialized);
-    } else if (options?.priority && options.priority > 0) {
-      // Priority message - use sorted set with negative priority (higher = more important)
-      await this.client!.zadd(this.keys.priority, -options.priority, serialized);
-    } else {
-      // Normal message - push to list and publish to channel
-      await this.client!.rpush(this.keys.queue(pattern), serialized);
-      await this.client!.publish(this.keys.wake, pattern);
+    try {
+      if (options?.delay && options.delay > 0) {
+        // Delayed message - use sorted set
+        await client.zadd(this.keys.delayed, timestamp + options.delay, serialized);
+
+        return messageId;
+      }
+
+      if (options?.priority && options.priority > 0) {
+        // Priority message - use sorted set with negative priority (higher = more important)
+        await client.zadd(this.keys.priority, -options.priority, serialized);
+
+        return messageId;
+      }
+
+      // Normal message - push to list, then ring the wake channel
+      await client.rpush(this.keys.queue(pattern), serialized);
+    } catch (cause) {
+      throw redisPublishError(pattern, `${client.keyPrefix}${this.publishKey(pattern, options)}`, cause);
+    }
+
+    // Stored from here on. Failing the publish at this point would tell the caller it did not happen, and a
+    // repeat would store the message twice — while the poll loop delivers it without the wake.
+    try {
+      await client.publish(this.keys.wake, pattern);
+    } catch (cause) {
+      this.emit('onError', new Error(
+        `RedisQueueAdapter stored a message for "${pattern}" but could not announce it on the wake channel; `
+        + 'subscribers receive it on their next poll instead. The publish itself succeeded.',
+        { cause },
+      ));
     }
 
     return messageId;
+  }
+
+  /** The key `publish()` writes a message with these options to, without the client's prefix. */
+  private publishKey(pattern: string, options?: PublishOptions): string {
+    if (options?.delay && options.delay > 0) {
+      return this.keys.delayed;
+    }
+
+    return options?.priority && options.priority > 0 ? this.keys.priority : this.keys.queue(pattern);
   }
 
   async publishBatch<T>(
@@ -645,7 +823,7 @@ export class RedisQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected || !this.client) {
-      throw new Error('RedisQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 

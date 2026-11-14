@@ -584,12 +584,17 @@ export interface QueueAdapter {
   /**
    * Publish a message to a pattern
    * @returns Message ID
+   * @throws {QueuePublishError} When the publish did not complete, with a `reason` saying whether
+   *   anything was sent and whether repeating it is safe. A custom adapter throws the same class,
+   *   and reports a failure it cannot classify as `'unknown'`.
    */
   publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string>;
 
   /**
    * Publish multiple messages in a batch
    * @returns Array of message IDs
+   * @throws {QueuePublishError} For the first message whose publish failed, as `publish()` does;
+   *   the messages published before it stay published.
    */
   publishBatch<T>(
     messages: Array<{ pattern: string; data: T; options?: PublishOptions }>

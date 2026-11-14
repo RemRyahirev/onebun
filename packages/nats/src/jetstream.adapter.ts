@@ -43,6 +43,7 @@ import {
   inRootTraceScope,
   isLastAttempt,
   nackedError,
+  QueuePublishError,
   resolveAckMode,
   resolveMaxAttempts,
   retryDelayMs,
@@ -63,6 +64,7 @@ import {
   type StampMetadata,
 } from './config-stamp';
 import { NatsClient, toHeaderMap } from './nats-client';
+import { natsPublishError } from './publish-failure';
 import { toNatsSubject, widensOnTranslation } from './subject';
 import {
   natsSubjectCovers,
@@ -91,6 +93,7 @@ const RELEASE_TIMEOUT_MS = 5_000;
  * prevent the duplicate it exists to prevent.
  */
 const HANDLER_DRAIN_TIMEOUT_MS = 30_000;
+const NOT_CONNECTED_MESSAGE = 'JetStreamQueueAdapter not connected. Call connect() first.';
 /**
  * nats-server's rejection of a consumer on a workqueue stream whose `deliver_policy` is not `all`.
  * Neither this code nor the next is named by the client's `JetStreamApiCodes`.
@@ -404,12 +407,16 @@ function workQueueNotUniqueRemedy(
   return `${rule} No subscription in this application overlaps ${subscriber}, so the other consumer lives elsewhere — most often a durable an earlier deployment left behind when its group was renamed or its pattern changed, otherwise another service consuming the same subject. List them with nats consumer ls ${streamName}. Remove a stale OneBun durable with deleteDurableConsumer(oldPattern, oldGroup) on this adapter, or nats consumer rm ${streamName} <consumer>. On a workqueue that loses no tasks: unacknowledged messages stay in the stream, and the consumer OneBun creates next, with deliver_policy all, receives them.`;
 }
 
+/**
+ * `cause` is the `QueuePublishError` the republish threw, whose message names what went wrong —
+ * repeated here so the reader does not have to open the cause to learn it.
+ */
 function deadLetterRepublishError(queue: string, pattern: string, cause: unknown): Error {
   return new Error(
     `Failed to republish a message from "${pattern}" to the dead-letter queue "${queue}". `
     + 'The original was NOT terminated — the server will redeliver it or exhaust max_deliver normally, '
     + 'because losing the payload is the one outcome a dead-letter queue exists to prevent. '
-    + 'The most common cause is that no stream binds the dead-letter subject.',
+    + `The republish failed with: ${describeCause(cause)}`,
     { cause },
   );
 }
@@ -484,8 +491,8 @@ function cycleMessage(
  *
  * The server's rejection names a consumer and a stream and nothing else, which leaves the reader
  * to work out which subscription that was. This states the OneBun pattern, the subject it
- * translated to, the stream it resolved to and every declaration — the shape
- * `publishFailureMessage` already established.
+ * translated to, the stream it resolved to and every declaration — the shape a failed publish's
+ * message has too.
  *
  * Note what this can NOT catch: nats-server accepts a `filter_subject` unrelated to the stream's
  * subjects, so a mis-bound subscription never reaches here at all. This message covers the
@@ -539,13 +546,6 @@ function updateFailureMessage(
 }
 
 /**
- * The server answers a publish to an unbound subject with `jetstream is not enabled`, which
- * names neither the subject nor the streams and sends operators looking for a disabled
- * JetStream. This states what was actually attempted and what this application declares.
- * The original rejection is preserved as `cause` rather than interpolated, so the misleading
- * text never reappears inside the replacement message.
- */
-/**
  * `"NAME" (subject, subject)` for each stream, in declaration order.
  *
  * An empty declaration set is a sentence, not an empty string: every caller interpolates this
@@ -592,8 +592,17 @@ function ambiguousStreamMessage(
   return `"${pattern}" (as NATS subject "${natsSubject}") is claimed by more than one declared stream: ${describeDeclarations(candidates)} — each ${relation} it. Refusing to guess which: the durable consumer name is derived from the group and the pattern and does not include the stream, so resolving differently on a later boot would create the same durable on another stream and orphan the first along with its delivery position. Streams also differ in retention, limits and storage, so the choice is not neutral. Narrow the declarations until exactly one binds this subject.`;
 }
 
-function publishFailureMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
-  return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${describeDeclarations(streams)}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
+/**
+ * What to check when no stream answered for a published subject, appended to that failure only.
+ *
+ * The server answers such a publish with `jetstream is not enabled`, which names neither the subject
+ * nor the streams and sends operators looking for a disabled JetStream — and it gives the same answer
+ * while the stream that binds the subject has no leader. `natsPublishError` rewords that answer and
+ * names both causes; this adds what the application declares. A failure with any other cause — a
+ * timeout, a closed connection, a stream limit — never mentions stream binding.
+ */
+function unboundSubjectAdvice(streams: ResolvedStream[]): string {
+  return `This application declares ${describeDeclarations(streams)}. If it persists, check that a stream on this server binds the subject — the producer and the consumer must declare identical stream definitions — and, on a cluster, that the stream has a leader.`;
 }
 
 function streamNarrowingMessage(streamName: string, dropped: string[], configured: string[]): string {
@@ -1183,8 +1192,22 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message to the subject `pattern` translates to.
+   *
+   * @throws {QueuePublishError} When the publish did not complete: `'unavailable'` when the adapter
+   *   is not connected, the connection is closed or draining, or JetStream cannot take writes right
+   *   now (API error 10008); `'rejected'` when the server answered without storing it (no stream
+   *   answered for the subject — none binds it, or it has no leader yet —, a stream limit, a publish
+   *   permission) or the client refused to send it (`max_payload`); `'unknown'` when no
+   *   acknowledgement came back. The driver's error is the `cause`.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     // `||`, not `??`: an empty string is not an id. It must fall back to a generated one
     // AND leave deduplication off, so both halves agree on what "absent" means.
@@ -1199,10 +1222,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       metadata: options?.metadata ?? {},
     };
 
-    const encoder = new TextEncoder();
-
     // Named parameters and `#` have no wire form; this is the only translation.
     const natsSubject = toNatsSubject(pattern);
+    // Serialised outside the `try` below, so a payload `JSON.stringify` refuses throws its own
+    // TypeError instead of being reported as a publish whose outcome is unknown.
+    const payload = new TextEncoder().encode(JSON.stringify(messageData));
 
     // No pre-flight check against the locally declared streams: a subject may legitimately
     // be bound by a stream this application never declares. Only the broker knows, so the
@@ -1213,9 +1237,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const publishOptions = options?.messageId ? { msgID: options.messageId } : undefined;
 
     try {
-      await this.js!.publish(natsSubject, encoder.encode(JSON.stringify(messageData)), publishOptions);
+      await this.js!.publish(natsSubject, payload, publishOptions);
     } catch (cause) {
-      throw new Error(publishFailureMessage(pattern, natsSubject, this.resolvedStreams), { cause });
+      throw natsPublishError(pattern, `JetStream subject "${natsSubject}"`, cause, {
+        noResponders: unboundSubjectAdvice(this.resolvedStreams),
+      });
     }
 
     return messageId;
@@ -1388,7 +1414,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('JetStreamQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 

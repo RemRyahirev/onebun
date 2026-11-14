@@ -81,6 +81,13 @@ export {
   DEFAULT_RETRY_DELAY_MS,
 } from './retry';
 
+// The error every adapter's publish path throws
+export {
+  QueuePublishError,
+  type QueuePublishErrorOptions,
+  type QueuePublishFailureReason,
+} from './publish-error';
+
 // Acknowledgment semantics
 export {
   resolveAckMode,

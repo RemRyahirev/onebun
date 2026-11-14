@@ -12,6 +12,10 @@ import type {
   Subscription,
 } from '@nats-io/transport-node';
 
+import { QueuePublishError } from '@onebun/core';
+
+import { natsPublishError } from './publish-failure';
+
 const DEFAULT_TIMEOUT = 5_000; // 5 seconds
 
 /**
@@ -280,25 +284,46 @@ export class NatsClient {
   }
 
   /**
-   * Publish a message
+   * Publish a message on core NATS.
+   *
+   * Fire-and-forget: core NATS has no acknowledgement, so a resolved call means the client accepted
+   * the message, not that anyone received it. A message published while the client is reconnecting
+   * resolves and can be lost without an error — the driver discards what it buffered at each
+   * connection attempt. A server that denies the publish reports it asynchronously, not here.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when there is no connection or it is closed or
+   *   draining, `'rejected'` when the client refuses to send — a subject or header it cannot carry,
+   *   a payload above the server's `max_payload`. `pattern` is the subject; the driver's error is the
+   *   `cause`.
+   *
+   * @see docs:api/queue.md
    */
   async publish(subject: string, data: string, headers?: Record<string, string>): Promise<void> {
     if (!this.nc) {
-      throw new Error('Not connected to NATS');
+      throw new QueuePublishError(
+        `Not connected to NATS, so nothing was published to "${subject}". Call connect() first.`,
+        { reason: 'unavailable', pattern: subject },
+      );
     }
 
     const nats = await getNatsModule();
     const encoder = new TextEncoder();
 
-    let natsHeaders;
-    if (headers) {
-      natsHeaders = nats.headers();
-      for (const [key, value] of Object.entries(headers)) {
-        natsHeaders.set(key, value);
+    // Headers are built inside the `try`: the driver refuses a header name it cannot carry and a
+    // value with CR or LF, and that refusal is a publish the client would not send, like a subject.
+    try {
+      let natsHeaders;
+      if (headers) {
+        natsHeaders = nats.headers();
+        for (const [key, value] of Object.entries(headers)) {
+          natsHeaders.set(key, value);
+        }
       }
-    }
 
-    this.nc.publish(subject, encoder.encode(data), { headers: natsHeaders });
+      this.nc.publish(subject, encoder.encode(data), { headers: natsHeaders });
+    } catch (cause) {
+      throw natsPublishError(subject, `NATS subject "${subject}"`, cause);
+    }
   }
 
   /**

@@ -13,7 +13,8 @@
  */
 
 import * as realJetStream from '@nats-io/jetstream';
-import { headers as natsHeaders } from '@nats-io/transport-node';
+import { jserrors } from '@nats-io/jetstream/internal';
+import { errors as natsErrors, headers as natsHeaders } from '@nats-io/transport-node';
 import {
   describe,
   it,
@@ -26,8 +27,12 @@ import {
 
 import type { JetStreamAdapterOptions } from '../src/types';
 
-import type { Message } from '@onebun/core';
-import { createQueuePatternMatcher, isLastAttempt } from '@onebun/core';
+import type { Message, QueuePublishFailureReason } from '@onebun/core';
+import {
+  createQueuePatternMatcher,
+  isLastAttempt,
+  QueuePublishError,
+} from '@onebun/core';
 import { useFakeTimers } from '@onebun/core/testing';
 
 
@@ -92,6 +97,18 @@ function makeApiError(code: number, message: string): AnyRecord {
   err.code = code;
 
   return err;
+}
+
+/**
+ * What `js.publish()` rejects with when no stream binds `subject`, built the way the client builds
+ * it: the server's no-responders answer, wrapped in a `RequestError`, wrapped in
+ * `JetStreamNotEnabled` with the text "jetstream is not enabled".
+ */
+function noStreamBindsRejection(subject: string): Error {
+  const noResponders = new natsErrors.NoRespondersError(subject);
+  const request = new natsErrors.RequestError(noResponders.message, { cause: noResponders });
+
+  return new jserrors.JetStreamNotEnabled('jetstream is not enabled', { cause: request });
 }
 
 // ============================================================================
@@ -2549,9 +2566,12 @@ describe('ensureConsumer: replicas creating the same consumer at once', () => {
 // ============================================================================
 
 describe('publish() failure reporting', () => {
-  /** The rejection a real broker sends for a subject no stream binds. */
+  /**
+   * The rejection a real broker produces for a subject no stream binds: the client turns the
+   * server's no-responders answer into `JetStreamNotEnabled`, with the request error under it.
+   */
   function jetStreamNotEnabled(): Error {
-    return new Error('jetstream is not enabled');
+    return noStreamBindsRejection('orders.created');
   }
 
   it('names the OneBun pattern and the NATS subject', async () => {
@@ -2622,6 +2642,65 @@ describe('publish() failure reporting', () => {
     }
 
     expect(thrown!.cause).toBe(original);
+  });
+
+  // One per reason, each with the rejection the driver produces for it (provoked on a live server
+  // in publish-failure.integration.test.ts).
+  const rejections: Array<[string, () => Error, QueuePublishFailureReason, string]> = [
+    ['no stream binds the subject', jetStreamNotEnabled, 'rejected', 'no stream on the broker binds that subject'],
+    [
+      'a stream limit',
+      () => new realJetStream.JetStreamApiError({ err_code: 10077, code: 503, description: 'maximum messages exceeded' }),
+      'rejected',
+      'JetStream API error 10077, "maximum messages exceeded"',
+    ],
+    ['a closed connection', () => new natsErrors.ClosedConnectionError(), 'unavailable', 'the connection to NATS is closed'],
+    ['an acknowledgement timeout', () => new natsErrors.TimeoutError(), 'unknown', 'no acknowledgement arrived in time'],
+  ];
+
+  for (const [label, rejection, reason, wording] of rejections) {
+    it(`throws a QueuePublishError "${reason}" for ${label}, naming that cause`, async () => {
+      const { adapter, mockJs } = makeConnectedAdapter();
+      const original = rejection();
+      mockJs.publish = mock(() => Promise.reject(original));
+
+      const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+      expect(thrown).toBeInstanceOf(QueuePublishError);
+      const error = thrown as QueuePublishError;
+      expect(error.reason).toBe(reason);
+      expect(error.safeToRepeat).toBe(reason !== 'unknown');
+      expect(error.pattern).toBe('orders.created');
+      expect(error.cause).toBe(original);
+      expect(error.message).toContain(wording);
+    });
+  }
+
+  it('mentions stream declarations only when no stream binds the subject', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter();
+    mockJs.publish = mock(() => Promise.reject(new natsErrors.TimeoutError()));
+
+    const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+    expect((thrown as Error).message).not.toContain('This application declares');
+    expect((thrown as Error).message).not.toContain('most common cause');
+  });
+
+  it('throws a QueuePublishError "unavailable" before connect(), without reaching the driver', async () => {
+    const adapter = new JetStreamQueueAdapter({ servers: 'nats://localhost:4222', streams: [] });
+
+    const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(QueuePublishError);
+    expect((thrown as QueuePublishError).reason).toBe('unavailable');
+    expect((thrown as Error).message).toContain('JetStreamQueueAdapter not connected');
+  });
+
+  it('throws a payload JSON cannot serialise as its own TypeError, before anything is sent', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter();
+
+    await expect(adapter.publish('orders.created', { amount: BigInt(1) })).rejects.toBeInstanceOf(TypeError);
+    expect(mockJs.publish).not.toHaveBeenCalled();
   });
 
   it('does not pre-flight against the locally declared streams', async () => {
@@ -3452,7 +3531,7 @@ describe('publish-only adapter', () => {
 
   it('reports a failed publish as declaring no streams at all', async () => {
     const { adapter, mockJs } = makeConnectedAdapter({ streams: [] });
-    mockJs.publish = mock(() => Promise.reject(new Error('jetstream is not enabled')));
+    mockJs.publish = mock(() => Promise.reject(noStreamBindsRejection('events.created')));
 
     let thrown: Error | undefined;
     try {

@@ -13,6 +13,7 @@ import {
   expect,
   beforeEach,
   afterEach,
+  spyOn,
 } from 'bun:test';
 
 import type { Interceptor, ResolvedInterceptor } from '../types';
@@ -67,8 +68,11 @@ import {
   getTimeoutMetadata,
   getLifecycleHandlers,
   hasQueueDecorators,
+  QueuePublishError,
   QueueScheduler,
   QueueService,
+  type PublishOptions,
+  type QueuePublishFailureReason,
 } from './index';
 
 /**
@@ -1060,6 +1064,163 @@ describe('Publishing Messages (docs/api/queue.md)', () => {
 
     await queueService.stop();
     await adapter.disconnect();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#publish-errors
+ */
+describe('Handling a failed publish (docs/api/queue.md)', () => {
+  // The snippet, verbatim.
+  /**
+   * Publishes `orders.created`, repeating a failed attempt while a repeat cannot store the message
+   * twice — at most `attempts` times. What happens once they run out is the caller's decision.
+   */
+  async function publishOrderCreated(queue: QueueService, orderId: string, attempts = 3): Promise<string> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        // With a messageId, JetStream drops a repeat that arrives inside the stream's duplicate window.
+        return await queue.publish('orders.created', { orderId }, { messageId: `order-created-${orderId}` });
+      } catch (error) {
+        // 'unavailable' and 'rejected' stored nothing. 'unknown' may have stored it, so it goes back to
+        // the caller — who can still repeat it with the same messageId on JetStream.
+        const repeatable = error instanceof QueuePublishError && error.safeToRepeat;
+
+        if (!repeatable || attempt >= attempts) {
+          throw error;
+        }
+
+        await Bun.sleep(attempt * 100);
+      }
+    }
+  }
+
+  /**
+   * A custom adapter's publish path, throwing what the page tells a custom adapter to throw: each
+   * call takes the next outcome off `failures`, and publishes for real once they run out.
+   */
+  class ScriptedAdapter extends InMemoryQueueAdapter {
+    calls = 0;
+
+    constructor(private readonly failures: unknown[]) {
+      super();
+    }
+
+    override async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
+      this.calls += 1;
+      const failure = this.failures.shift();
+      if (failure !== undefined) {
+        throw failure;
+      }
+
+      return await super.publish(pattern, data, options);
+    }
+  }
+
+  async function serviceOver(adapter: InMemoryQueueAdapter): Promise<QueueService> {
+    const queueService = new QueueService({ adapter: 'memory' });
+    await queueService.initialize(adapter);
+
+    return queueService;
+  }
+
+  const failure = (reason: QueuePublishFailureReason): QueuePublishError =>
+    new QueuePublishError(`failed: ${reason}`, { reason, pattern: 'orders.created' });
+
+  it('publishes with the messageId on the first attempt', async () => {
+    const adapter = new ScriptedAdapter([]);
+    const queueService = await serviceOver(adapter);
+
+    expect(await publishOrderCreated(queueService, '42')).toBe('order-created-42');
+    expect(adapter.calls).toBe(1);
+
+    await queueService.stop();
+  });
+
+  /** The snippet's waits, recorded instead of slept: they are real `Bun.sleep` calls. */
+  function recordWaits(): { waits: number[]; restore: () => void } {
+    const waits: number[] = [];
+    const sleep = spyOn(Bun, 'sleep').mockImplementation(async (ms: number | Date) => {
+      waits.push(Number(ms));
+    });
+
+    return { waits, restore: () => sleep.mockRestore() };
+  }
+
+  it('repeats an "unavailable" and a "rejected" publish — both stored nothing — until it succeeds', async () => {
+    const adapter = new ScriptedAdapter([failure('unavailable'), failure('rejected')]);
+    const queueService = await serviceOver(adapter);
+    const { waits, restore } = recordWaits();
+
+    try {
+      expect(await publishOrderCreated(queueService, '42')).toBe('order-created-42');
+    } finally {
+      restore();
+    }
+    expect(adapter.calls).toBe(3);
+    expect(waits).toEqual([100, 200]);
+
+    await queueService.stop();
+  });
+
+  it('gives a "rejected" publish back once the attempts run out', async () => {
+    const last = failure('rejected');
+    const adapter = new ScriptedAdapter([failure('rejected'), failure('rejected'), last]);
+    const queueService = await serviceOver(adapter);
+    const { waits, restore } = recordWaits();
+
+    try {
+      await expect(publishOrderCreated(queueService, '42')).rejects.toBe(last);
+    } finally {
+      restore();
+    }
+    expect(adapter.calls).toBe(3);
+    expect(waits).toEqual([100, 200]);
+  });
+
+  it('hands an "unknown" publish straight back: it may be stored', async () => {
+    const unknown = failure('unknown');
+    const adapter = new ScriptedAdapter([unknown]);
+    const queueService = await serviceOver(adapter);
+
+    expect(unknown.safeToRepeat).toBe(false);
+    await expect(publishOrderCreated(queueService, '42')).rejects.toBe(unknown);
+    expect(adapter.calls).toBe(1);
+  });
+
+  it('reports a disconnected adapter as "unavailable", and its name survives a second copy of the class', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    const queueService = await serviceOver(adapter);
+    await adapter.disconnect();
+
+    const thrown = await queueService.publish('orders.created', {}).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(QueuePublishError);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as QueuePublishError).reason).toBe('unavailable');
+    expect((thrown as QueuePublishError).safeToRepeat).toBe(true);
+    // The fallback the page gives for an application that loads two copies of @onebun/core.
+    expect((thrown as Error).name).toBe('QueuePublishError');
+  });
+
+  it('keeps the original error as cause, and the pattern it was published to', () => {
+    const driverError = new Error('timeout');
+    const error = new QueuePublishError('no acknowledgement', {
+      reason: 'unknown',
+      pattern: 'orders.created',
+      cause: driverError,
+    });
+
+    expect(error.cause).toBe(driverError);
+    expect(error.pattern).toBe('orders.created');
+  });
+
+  it('rethrows anything that is not a QueuePublishError, without repeating it', async () => {
+    const adapter = new ScriptedAdapter([new TypeError('Do not know how to serialize a BigInt')]);
+    const queueService = await serviceOver(adapter);
+
+    await expect(publishOrderCreated(queueService, '42')).rejects.toBeInstanceOf(TypeError);
+    expect(adapter.calls).toBe(1);
   });
 });
 

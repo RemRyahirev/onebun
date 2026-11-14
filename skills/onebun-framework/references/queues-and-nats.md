@@ -413,6 +413,47 @@ const dynamicJobs = queueService.getJobs().filter(j => !j.declarative);
 }
 ```
 
+### A failed publish: `QueuePublishError`
+
+Every built-in adapter's `publish()` (memory, Redis, NATS, JetStream) throws `QueuePublishError` from
+`@onebun/core` when the publish did not complete; `QueueService.publish()`/`publishBatch()` pass it through,
+and the DI-injected `QueueService` throws it (`'unavailable'`) for a publish after the application stopped.
+It extends `Error`, keeps the driver's error as `cause`, and its message names the real cause. Branch on
+`reason`/`safeToRepeat` — never on the message text or on driver classes (`@nats-io/*` is not an application
+dependency). With two `@onebun/core` copies loaded, `instanceof` fails: check `error.name === 'QueuePublishError'`.
+
+| `reason` | Stored? | `safeToRepeat` | Meaning |
+|---|---|---|---|
+| `'unavailable'` | no | `true` | the broker could not take it: not connected, connection closed/draining, client gave up before sending, or the broker cannot take writes right now (Redis `READONLY`/`BUSY`/`LOADING`/`MASTERDOWN`/`TRYAGAIN`/`CLUSTERDOWN`/`NOREPLICAS`/`MISCONF`, JetStream API 10008). Can succeed while the client is connected or reconnecting; once the client gave up reconnecting, every publish stays `'unavailable'` until the application restarts |
+| `'rejected'` | no | `true` | the broker answered and did not store it, or the client refused before sending (`max_payload`, a subject or header it cannot carry). May be a configuration error (no stream binds the subject, a stream limit, a publish permission, `WRONGTYPE`/`NOPERM`/`OOM`) — or a condition that passes: an R3 stream without a leader during a cluster election answers exactly like a missing stream for a few seconds. Never "give up for good" by reason alone |
+| `'unknown'` | maybe | `false` | sent (or buffered) and no answer: ack timeout, connection lost mid-flight, reply inbox denied, any unrecognised error. Repeat only with a `messageId` (JetStream dedups inside the stream's duplicate window) or an idempotent consumer |
+
+```typescript
+import { QueuePublishError } from '@onebun/core';
+
+for (let attempt = 1; ; attempt += 1) {
+  try {
+    await queue.publish('orders.created', order, { messageId: `order-created-${order.id}` });
+    break;
+  } catch (error) {
+    // Bounded: a 'rejected' that is a configuration error fails every repeat.
+    if (!(error instanceof QueuePublishError && error.safeToRepeat) || attempt >= 3) throw error;
+    await Bun.sleep(attempt * 100);
+  }
+}
+```
+
+Per adapter: memory throws only `'unavailable'` (handler errors go to queue events, never to `publish()`).
+Redis resolves once the message is stored — a failed wake announcement after `RPUSH` is an `onError`, not a
+throw. Core NATS is fire-and-forget: a publish made while the client reconnects resolves and can be LOST
+without an error (the driver discards its buffer at every dial), and a server-side permission denial is not
+reported by `publish()`; it throws `'unavailable'`/`'rejected'` only. JetStream waits up to 5 s for the ack: a
+publish made while the client reconnects surfaces as `'unknown'` after that wait (a stream without a leader is an
+immediate `'rejected'`, a client that gave up reconnecting an immediate `'unavailable'`). A `JSON.stringify` failure and an untranslatable JetStream
+pattern are call mistakes and throw their own error; everything the driver refuses is a `QueuePublishError`. A
+custom adapter throws `new QueuePublishError(message, { reason, pattern, cause })` and reports anything it
+cannot classify as `'unknown'`, never `'unavailable'`.
+
 ## Message Guards
 
 **Reach for `@UseGuards` — it is ONE decorator across all three transports** (HTTP routes, WebSocket

@@ -13,6 +13,7 @@ import {
 import type { Message } from '../types';
 
 import { useFakeTimers } from '../../testing/test-utils';
+import { QueuePublishError } from '../publish-error';
 
 import { InMemoryQueueAdapter, createInMemoryQueueAdapter } from './memory.adapter';
 
@@ -1374,6 +1375,36 @@ describe('InMemoryQueueAdapter', () => {
   describe('error handling', () => {
     it('should throw when publishing without connecting', async () => {
       await expect(adapter.publish('test', { data: 'test' })).rejects.toThrow();
+    });
+
+    it('throws a QueuePublishError "unavailable" for a publish before connect()', async () => {
+      const error = await adapter.publish('orders.created', { id: 1 }).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+      const publishError = error as QueuePublishError;
+      expect(publishError.reason).toBe('unavailable');
+      expect(publishError.safeToRepeat).toBe(true);
+      expect(publishError.pattern).toBe('orders.created');
+      expect(publishError.message).toContain('InMemoryQueueAdapter not connected');
+    });
+
+    it('throws the same after disconnect()', async () => {
+      await adapter.connect();
+      await adapter.disconnect();
+
+      const error = await adapter.publish('orders.created', { id: 1 }).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+      expect((error as QueuePublishError).reason).toBe('unavailable');
+    });
+
+    it('does not throw a handler\'s failure from publish()', async () => {
+      await adapter.connect();
+      await adapter.subscribe('orders.created', async () => {
+        throw new Error('handler failed');
+      });
+
+      await expect(adapter.publish('orders.created', { id: 1 })).resolves.toBeString();
     });
 
     it('should throw when subscribing without connecting', async () => {

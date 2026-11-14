@@ -17,8 +17,10 @@ import {
 
 import type { Message } from '../types';
 
+import { RedisClient } from '../../redis/redis-client';
 import { SharedRedisProvider } from '../../redis/shared-redis';
 import { createRedisContainer, type TestContainer } from '../../testing/containers';
+import { QueuePublishError } from '../publish-error';
 import { QueueScheduler } from '../scheduler';
 
 
@@ -172,11 +174,214 @@ describe('RedisQueueAdapter', () => {
 
     it('should throw when publishing while disconnected', async () => {
       await adapter.disconnect();
-      
+
       await expect(
         adapter.publish('test:topic', { data: 1 }),
       ).rejects.toThrow('not connected');
     });
+  });
+
+  // Every failure provoked on the real server; the driver's error must be the cause, untouched.
+  describe('a failed publish', () => {
+    /** A connection of the test's own, for the commands that set a case up. */
+    let admin: RedisClient;
+
+    beforeAll(async () => {
+      admin = new RedisClient({ url: redis.url });
+      await admin.connect();
+    }, CONTAINER_BOOT_MS);
+
+    afterAll(async () => {
+      await admin.disconnect();
+    }, CONTAINER_BOOT_MS);
+
+    /** The rejection of `publish()`, which every case here expects to be a QueuePublishError. */
+    async function publishFailure(
+      target: RedisQueueAdapter,
+      pattern: string,
+      options?: { delay?: number },
+    ): Promise<QueuePublishError> {
+      const error = await target.publish(pattern, { n: 1 }, options).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+
+      return error as QueuePublishError;
+    }
+
+    /** An adapter on a connection of its own, so killing or closing it disturbs no other case. */
+    async function ownAdapter(url: string = redis.url): Promise<RedisQueueAdapter> {
+      const own = new RedisQueueAdapter({ useSharedClient: false, url, keyPrefix: `pf:${Date.now()}:` });
+      await own.connect();
+
+      return own;
+    }
+
+    it('is "unavailable" before connect(), and safe to repeat', async () => {
+      const error = await publishFailure(adapter, 'pf.before');
+
+      expect(error.reason).toBe('unavailable');
+      expect(error.safeToRepeat).toBe(true);
+      expect(error.pattern).toBe('pf.before');
+      expect(error.message).toContain('RedisQueueAdapter not connected');
+    });
+
+    it('is "rejected" when Redis answers with an error reply, and names the key and the reply', async () => {
+      await adapter.connect();
+      const raw = asAny(adapter);
+      // Someone else's string where the topic's list belongs: RPUSH answers WRONGTYPE.
+      await raw.client.set(raw.keys.queue('pf.wrongtype'), 'not a list');
+
+      const error = await publishFailure(adapter, 'pf.wrongtype');
+
+      expect(error.reason).toBe('rejected');
+      expect(error.safeToRepeat).toBe(true);
+      expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_SERVER_ERROR');
+      expect(error.message).toContain('WRONGTYPE');
+      expect(error.message).toContain(raw.keys.queue('pf.wrongtype'));
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    describe('under an ACL user without ZADD and PUBLISH', () => {
+      const user = `pf-${Date.now()}`;
+      let limited: RedisQueueAdapter;
+
+      beforeAll(async () => {
+        await admin.raw('ACL', 'SETUSER', user, 'on', '>pw', '~*', '&*', '+@all', '-zadd', '-publish');
+      }, CONTAINER_BOOT_MS);
+
+      beforeEach(async () => {
+        limited = await ownAdapter(redis.url.replace('redis://', `redis://${user}:pw@`));
+      });
+
+      afterEach(async () => {
+        await limited.disconnect();
+      });
+
+      it('is "rejected" when the write itself is denied (NOPERM on the delayed set)', async () => {
+        const error = await publishFailure(limited, 'pf.denied', { delay: 60_000 });
+
+        expect(error.reason).toBe('rejected');
+        expect(error.message).toContain('NOPERM');
+        expect(error.message).toContain(asAny(limited).keys.delayed);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('resolves once the message is stored, and reports a failed wake as onError instead', async () => {
+        const errors: Error[] = [];
+        limited.on('onError', (error) => errors.push(error));
+
+        const id = await limited.publish('pf.nowake', { n: 1 });
+
+        expect(id).toBeString();
+        const raw = asAny(limited);
+        expect(await raw.client.raw('LLEN', raw.keys.queue('pf.nowake'))).toBe(1);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].message).toContain('could not announce it on the wake channel');
+        expect(String((errors[0].cause as Error).message)).toContain('NOPERM');
+      }, CONTAINER_TEST_TIMEOUT_MS);
+    });
+
+    it('is "unavailable" while the server is a replica (READONLY), and the same publish succeeds once promoted', async () => {
+      const own = await ownAdapter();
+      // What a failover does to the old primary.
+      await admin.raw('REPLICAOF', '127.0.0.1', '1');
+
+      let error: QueuePublishError;
+      try {
+        error = await publishFailure(own, 'pf.readonly');
+      } finally {
+        await admin.raw('REPLICAOF', 'NO', 'ONE');
+      }
+
+      try {
+        expect(error.reason).toBe('unavailable');
+        expect(error.safeToRepeat).toBe(true);
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_SERVER_ERROR');
+        expect(error.message).toContain('READONLY');
+        expect(error.message).toContain('cannot take writes right now');
+        expect(error.message).not.toContain('..');
+        await expect(own.publish('pf.readonly', { n: 1 })).resolves.toBeString();
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" while a script runs past busy-reply-threshold (BUSY), and succeeds after SCRIPT KILL', async () => {
+      const own = await ownAdapter();
+      const scriptRunner = new RedisClient({ url: redis.url });
+      await scriptRunner.connect();
+      await admin.raw('CONFIG', 'SET', 'busy-reply-threshold', '100');
+
+      // Never settles until killed; its rejection then is the expected end of the script.
+      const script = scriptRunner.raw('EVAL', 'while true do end', '0').catch((killed: unknown) => killed);
+      let error: QueuePublishError;
+      try {
+        await waitFor(async () => await admin.raw('PING').then(() => false, (busy: Error) => busy.message.startsWith('BUSY')));
+        error = await publishFailure(own, 'pf.busy');
+      } finally {
+        await admin.raw('SCRIPT', 'KILL').catch(() => undefined);
+        await script;
+        await admin.raw('CONFIG', 'SET', 'busy-reply-threshold', '5000');
+        await scriptRunner.disconnect();
+      }
+
+      try {
+        expect(error.reason).toBe('unavailable');
+        expect(error.message).toContain('BUSY');
+        await expect(own.publish('pf.busy', { n: 1 })).resolves.toBeString();
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unknown" when the connection drops while the command is in flight', async () => {
+      const own = await ownAdapter();
+      const clientId = String(await asAny(own).client.raw('CLIENT', 'ID'));
+
+      // Writes wait while paused, so the RPUSH reaches the server and stays unanswered; then its
+      // connection is killed under it.
+      await admin.raw('CLIENT', 'PAUSE', '10000', 'WRITE');
+      try {
+        const pending = publishFailure(own, 'pf.inflight');
+        await waitFor(async () => String(await admin.raw('CLIENT', 'LIST', 'ID', clientId)).includes('cmd=rpush'));
+        await admin.raw('CLIENT', 'KILL', 'ID', clientId);
+
+        const error = await pending;
+
+        expect(error.reason).toBe('unknown');
+        expect(error.safeToRepeat).toBe(false);
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_CONNECTION_CLOSED');
+        expect(error.message).toContain('may or may not have been stored');
+      } finally {
+        await admin.raw('CLIENT', 'UNPAUSE');
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" when the driver connection is closed for good before the command', async () => {
+      const own = await ownAdapter();
+      // What the client is left in once it gives up reconnecting: every command fails unsent.
+      asAny(own).client.getClient().close();
+
+      try {
+        const error = await publishFailure(own, 'pf.closed');
+
+        expect(error.reason).toBe('unavailable');
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_CONNECTION_CLOSED');
+        expect(error.message).toContain('Nothing was sent');
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" when the client it holds was disconnected underneath it', async () => {
+      const own = await ownAdapter();
+      await asAny(own).client.disconnect();
+
+      const error = await publishFailure(own, 'pf.released');
+
+      expect(error.reason).toBe('unavailable');
+      expect((error.cause as Error).message).toContain('Redis client not connected');
+      await own.disconnect();
+    }, CONTAINER_TEST_TIMEOUT_MS);
   });
 
   describe('end-to-end against a real Redis', () => {
@@ -1095,7 +1300,10 @@ describe('RedisQueueAdapter', () => {
         const reported = errors.find((e) => e.message.includes('dead letter'))!;
         expect(reported.message).toContain('orders.dlq-broken');
         expect(reported.message).toContain('orders.dlq-broken-dead');
-        expect((reported.cause as Error).message).toBe('RPUSH exploded');
+        // The republish went through publish(), so its failure arrives as the QueuePublishError
+        // publish() throws, with the write's own error under it.
+        expect(reported.cause).toBeInstanceOf(QueuePublishError);
+        expect(((reported.cause as Error).cause as Error).message).toBe('RPUSH exploded');
       } finally {
         client.rpush = originalRpush;
       }
@@ -1145,5 +1353,72 @@ describe('RedisQueueAdapter', () => {
         SharedRedisProvider.createClient = originalCreateClient;
       }
     });
+  });
+});
+
+// Every error reply code the adapter decides on, without a server: the reply is shaped the way Bun
+// rejects a command Redis answered with an error. READONLY and BUSY are provoked for real above.
+describe('RedisQueueAdapter error reply classification', () => {
+  /** An adapter whose RPUSH is answered with `reply`, as Bun reports an error reply. */
+  function answeredWith(reply: string): RedisQueueAdapter {
+    const target = new RedisQueueAdapter({ useSharedClient: false, url: 'redis://unused' });
+    const replyError = Object.assign(new Error(reply), { name: 'RedisError', code: 'ERR_REDIS_SERVER_ERROR' });
+    asAny(target).connected = true;
+    asAny(target).client = {
+      keyPrefix: '',
+      rpush: () => Promise.reject(replyError),
+    };
+
+    return target;
+  }
+
+  async function reasonFor(reply: string): Promise<string> {
+    const error = await answeredWith(reply).publish('orders.created', { n: 1 }).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(QueuePublishError);
+
+    return (error as QueuePublishError).reason;
+  }
+
+  const cannotWriteNow = [
+    'READONLY You can\'t write against a read only replica.',
+    'BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.',
+    'LOADING Redis is loading the dataset in memory',
+    'MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to \'no\'.',
+    'TRYAGAIN Multiple keys request during rehashing of slot',
+    'CLUSTERDOWN The cluster is down',
+    'NOREPLICAS Not enough good replicas to write.',
+    'MISCONF Redis is configured to save RDB snapshots, but it\'s currently unable to persist to disk.',
+  ];
+
+  for (const reply of cannotWriteNow) {
+    it(`reports "${reply.split(' ', 1)[0]}" as "unavailable"`, async () => {
+      expect(await reasonFor(reply)).toBe('unavailable');
+    });
+  }
+
+  const refusals = [
+    'WRONGTYPE Operation against a key holding the wrong kind of value',
+    'NOPERM User limited has no permissions to run the \'rpush\' command',
+    'OOM command not allowed when used memory > \'maxmemory\'.',
+    // Whole-word match: these start with BUSY and are refusals of their own.
+    'BUSYKEY Target key name already exists.',
+    'BUSYGROUP Consumer Group name already exists',
+    'ERR wrong number of arguments for \'rpush\' command',
+  ];
+
+  for (const reply of refusals) {
+    it(`reports "${reply.split(' ', 1)[0]}" as "rejected"`, async () => {
+      expect(await reasonFor(reply)).toBe('rejected');
+    });
+  }
+
+  it('does not double the period a reply ends with', async () => {
+    const error = await answeredWith('NOREPLICAS Not enough good replicas to write.')
+      .publish('orders.created', { n: 1 })
+      .catch((thrown: unknown) => thrown as Error);
+
+    expect((error as Error).message).toContain('NOREPLICAS Not enough good replicas to write. Nothing was stored');
+    expect((error as Error).message).not.toContain('..');
   });
 });

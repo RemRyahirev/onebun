@@ -27,6 +27,7 @@ import {
   createQueueScheduler,
   inRootTraceScope,
   nackedError,
+  QueuePublishError,
   resolveAckMode,
   wasNacked,
   type NackAwareMessage,
@@ -39,6 +40,8 @@ import {
   type NatsSubscriptionHandle,
 } from './nats-client';
 import { toNatsSubject } from './subject';
+
+const NOT_CONNECTED_MESSAGE = 'NatsQueueAdapter not connected. Call connect() first.';
 
 // ============================================================================
 // NATS Message Implementation
@@ -286,8 +289,24 @@ export class NatsQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message on core NATS.
+   *
+   * Fire-and-forget: a resolved call means the client accepted the message, not that a subscriber
+   * received it. A message published while the client is reconnecting resolves and can be lost
+   * without an error.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when the adapter is not connected or the connection
+   *   is closed or draining, `'rejected'` when the client refuses to send — a subject or a
+   *   `metadata.headers` entry it cannot carry, a payload above the server's `max_payload`. The
+   *   driver's error is the `cause`.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     const messageId = options?.messageId ?? this.generateMessageId();
     const timestamp = Date.now();
@@ -420,7 +439,7 @@ export class NatsQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('NatsQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 

@@ -1740,11 +1740,13 @@ A subscription without a `group` is ephemeral. It is named after a freshly gener
 
 The reconciliation stamp lives in JetStream consumer metadata, which requires nats-server 2.10 or newer.
 
-**Publishing requires a bound subject.** JetStream stores a message only if some stream on the broker binds its subject, and the server's own rejection for an unbound subject is `jetstream is not enabled` — which names neither the subject nor the streams, and sends operators looking for a JetStream that is disabled when it is not. The adapter re-reports it with the context the server omits, keeping the original rejection as the error's `cause`:
+**Publishing requires a bound subject.** JetStream stores a message only if some stream on the broker binds its subject, and the server's own rejection for an unbound subject is `jetstream is not enabled` — which names neither the subject nor the streams, and sends operators looking for a JetStream that is disabled when it is not. The server gives the same answer while the stream that binds the subject has no leader, as during a cluster election; that passes within seconds. The adapter throws a [`QueuePublishError`](#publish-errors) with `reason: 'rejected'` that names both causes and what this application declares, keeping the driver's rejection as the error's `cause`:
 
 ```
-Failed to publish OneBun pattern "orders.created" to JetStream subject "orders.created". The most common cause is that no stream on the broker binds that subject. This application declares "EVENTS" (events.>). ...
+Failed to publish OneBun pattern "orders.created" to JetStream subject "orders.created": no JetStream stream answered for that subject. Either no stream on the broker binds that subject, or the server runs without JetStream — a configuration error: every repeat fails the same way until it is fixed. Or the stream that binds it has no leader at the moment, as during a cluster election — that passes within seconds, and a repeat then succeeds. Nothing was stored, ... This application declares "EVENTS" (events.>). ...
 ```
+
+Only that failure mentions stream binding. A timeout, a closed connection or a stream limit is named as itself — see [Handling a failed publish](#publish-errors).
 
 There is no pre-flight check against the `streams` this application declares. A subject may legitimately be bound by a stream some other service owns, so the publish is always attempted and only the broker decides.
 
@@ -2130,6 +2132,97 @@ streams: [
 ```
 
 It is sent only when you declare it, on both the create and the update path, so a window an operator set out of band is never reset by a deploy.
+
+### Handling a failed publish {#publish-errors}
+
+A publish that does not complete throws `QueuePublishError`, exported from `@onebun/core`. Every built-in adapter throws it — memory, Redis, NATS and JetStream — and `QueueService.publish()` and `publishBatch()` pass it through unchanged. It extends `Error`, so code that only catches `Error` keeps working. Its message names the cause that actually happened, and the driver's own error is kept as `cause`.
+
+What a caller decides on is `reason`:
+
+| `reason` | What happened | Was the message stored? | Repeat the publish? |
+|---|---|---|---|
+| `'unavailable'` | The broker could not take the publish: the adapter is not connected, the connection is closed or draining, the client gave up reaching the broker before the message left the process, or the broker refused because it cannot take writes right now — a Redis replica (`READONLY`), a script running long (`BUSY`), `LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, `NOREPLICAS`, `MISCONF`, JetStream API error 10008 | No | Safe. It can succeed while the client is still connected or reconnecting, once the broker takes writes again; once the client has given up reconnecting, every publish fails as `'unavailable'` until the application is restarted |
+| `'rejected'` | The broker answered and did not store the message, or the client refused before sending on a limit the broker announced (`max_payload`) or a subject or header it cannot carry. The cause may be a configuration error — no JetStream stream binds the subject, a stream limit, a publish permission, a Redis `WRONGTYPE`, `NOPERM` or `OOM` — or a condition that passes, such as a JetStream stream without a leader for a few seconds during a cluster election, which the server answers exactly like a missing stream | No | Safe — whether it can succeed depends on the cause the message names |
+| `'unknown'` | The publish left the process, or may still leave it, and no answer came back: an acknowledgement timeout, a connection lost while it was in flight, an acknowledgement the connection is not allowed to receive | Maybe | Only if a duplicate is acceptable, or with a `messageId` the broker deduplicates |
+
+`safeToRepeat` answers the duplicate question on its own: `true` when the failed attempt certainly stored nothing (`'unavailable'`, `'rejected'`), `false` for `'unknown'`. How often to repeat, and when to stop, is the caller's policy: a `'rejected'` publish can be a configuration error that fails every repeat, or a cluster election that is over in seconds, and the message says which causes are possible. `pattern` is the pattern `publish()` was called with. A failure an adapter cannot classify is reported as `'unknown'`, never as `'unavailable'` — `'unavailable'` is a promise that nothing was stored.
+
+```typescript
+import { QueuePublishError, type QueueService } from '@onebun/core';
+
+/**
+ * Publishes `orders.created`, repeating a failed attempt while a repeat cannot store the message
+ * twice — at most `attempts` times. What happens once they run out is the caller's decision.
+ */
+async function publishOrderCreated(queue: QueueService, orderId: string, attempts = 3): Promise<string> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      // With a messageId, JetStream drops a repeat that arrives inside the stream's duplicate window.
+      return await queue.publish('orders.created', { orderId }, { messageId: `order-created-${orderId}` });
+    } catch (error) {
+      // 'unavailable' and 'rejected' stored nothing. 'unknown' may have stored it, so it goes back to
+      // the caller — who can still repeat it with the same messageId on JetStream.
+      const repeatable = error instanceof QueuePublishError && error.safeToRepeat;
+
+      if (!repeatable || attempt >= attempts) {
+        throw error;
+      }
+
+      await Bun.sleep(attempt * 100);
+    }
+  }
+}
+```
+
+Deduplication is what makes an `'unknown'` publish safe to repeat, and only JetStream has it — see [`messageId` and deduplication](#queueservice) above. On the memory, Redis and core-NATS adapters a repeat after `'unknown'` can deliver the message twice, so make its handler idempotent or accept the duplicate.
+
+`instanceof QueuePublishError` holds while the application loads one copy of `@onebun/core`, which its peer dependency arranges. Where a second copy can be loaded — two incompatible versions installed side by side — check `error.name === 'QueuePublishError'` instead: every instance carries it.
+
+What each adapter reports:
+
+- **InMemoryQueueAdapter** — `'unavailable'` before `connect()` or after `disconnect()`, and nothing else: a handler's failure is reported through the [queue events](#lifecycle-decorators), never thrown from `publish()`.
+- **RedisQueueAdapter** — `'unavailable'` when the adapter or its client holds no connection, the client gave up reconnecting before the command was sent, or Redis cannot take writes right now (`READONLY`, `BUSY`, `LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, `NOREPLICAS`, `MISCONF`); `'rejected'` for any other error reply (`WRONGTYPE`, `OOM`, `NOPERM`, …), with the key in the message; `'unknown'` when the connection closed while the command was in flight. A normal publish resolves once the message is on its list: if the wake-up announcement after it fails, the publish still resolves, subscribers find the message on their next poll, and the failure is reported as `onError`.
+- **NatsQueueAdapter** — core NATS is fire-and-forget, so a resolved publish means the client accepted the message, not that anyone received it. A message published while the client is reconnecting resolves and can be lost without an error: the driver discards what it buffered at each connection attempt. A permission the server denies is reported asynchronously, not by `publish()`. What it does throw: `'unavailable'` before `connect()` or once the connection is closed or draining, `'rejected'` for a payload above `max_payload`, or a subject or `metadata.headers` entry the client cannot carry.
+- **JetStreamQueueAdapter** — every reason. A publish waits for the stream's acknowledgement, up to the JetStream timeout of 5 seconds. A publish made while the client reconnects runs out as `'unknown'`: it is usually dropped at the next connection attempt, but a slow or frozen server can store a message whose acknowledgement never arrives, and the client cannot tell the two apart. A connection the server does not allow to receive acknowledgements — its reply inbox denied — fails every publish as `'unknown'` while the messages are stored.
+
+Through the `QueueService` that dependency injection provides, a publish after the application has stopped throws `'unavailable'` with a message saying the queue has stopped. A publish while the queue is still starting is held and sent once it is up. A publish on an application whose queue was never enabled throws a plain `Error` that explains how to enable it — a configuration error, not a publish outcome.
+
+A payload `JSON.stringify` cannot serialize, and on JetStream a pattern that has no subject form, are mistakes in the call rather than publish outcomes: they throw their own error before anything is attempted. Everything the driver refuses — a subject or a header it cannot carry included — is a `QueuePublishError`. `publishBatch()` publishes one message at a time and throws the first `QueuePublishError`; the messages published before it stay published.
+
+A [custom adapter](#custom-adapter-nats-jetstream) throws the same class from its `publish()`: `new QueuePublishError(message, { reason, pattern, cause })`.
+
+<llm-only>
+
+**Technical details for AI agents — QueuePublishError:**
+- Defined in `packages/core/src/queue/publish-error.ts`, exported from `@onebun/core` with the types `QueuePublishFailureReason` and `QueuePublishErrorOptions`. Constructor `(message, { reason, pattern, cause? })`; `name`, `reason`, `pattern` and `safeToRepeat` (`reason !== 'unknown'`) are own properties; `cause` is set only when the options carry one. No `Symbol.hasInstance` brand: the documented fallback across two `@onebun/core` copies is `error.name === 'QueuePublishError'`
+- The not-connected check in each adapter's `publish()` is an inline `if (!this.connected)` that throws `QueuePublishError` with `reason: 'unavailable'` and the adapter's existing text (`<Adapter> not connected. Call connect() first.`); `ensureConnected()` still throws a plain `Error` for `subscribe()` and the rest. The success path gains no allocation and no await: the driver call sits in a `try` whose `catch` builds the error
+- `QueueServiceProxy.publish()`/`publishBatch()` (the DI-injected `QueueService`) throw `QueuePublishError` `'unavailable'` with `QUEUE_STOPPED_ERROR_MESSAGE` in the `'stopped'` phase (pattern of the first batch entry); the never-enabled phase keeps its plain `Error`
+- Coverage legend for the rows below — LIVE: provoked on a real server in the named test file; DRIVER: unit test that throws the driver's own error class, no server; PROBE: observed on a real server by a one-off probe script, not in the suite
+- NATS classification is `classifyNatsPublishFailure()` in `packages/nats/src/publish-failure.ts` (package-internal), shared by `NatsClient.publish()` and `JetStreamQueueAdapter.publish()`. It reads the `name` of every error on the `cause` chain (bounded to 8 links), not `instanceof`. LIVE rows are in `packages/nats/tests/publish-failure.integration.test.ts` unless noted:
+  - `JetStreamNotEnabled` ← `RequestError` ← `NoResponders` → `rejected` — no stream binds the subject: LIVE. The same chain while an R3 stream has no leader (3-node cluster, leader SIGKILLed: 43 publishes over ~4.3 s, then the same publish succeeded): PROBE. The message names both causes, never repeats "jetstream is not enabled", and only this kind appends the stream declarations (`unboundSubjectAdvice()`)
+  - `JetStreamApiError` 10077 "maximum messages exceeded" (max_msgs + discard new) and 10054 "message size exceeds maximum allowed" (max_msg_size) → `rejected`: LIVE. `JetStreamNotEnabled` with API code 10039 as cause → `rejected`: DRIVER. Any other API code → `rejected`, code quoted
+  - `JetStreamApiError` 10008 (nats-server `JSClusterNotAvailErr`, "JetStream system temporarily unavailable"; `JETSTREAM_UNAVAILABLE_CODES`) → `unavailable`: DRIVER only, not provoked
+  - `RequestError` ← `PermissionViolationError` with `operation === 'publish'` → `rejected`: LIVE (publish deny in the server config, stream stays empty)
+  - `RequestError` ← `PermissionViolationError` with any other operation — the client fails every pending request when the server denies the reply-inbox SUBSCRIPTION, while the PUB is allowed → `unknown`: LIVE (`subscribe: { deny: ["_INBOX.>"] }`, the message is found stored)
+  - `InvalidArgumentError` "'payload' max_payload size exceeded" → `rejected`: LIVE on both adapters. `InvalidArgumentError` for a header name or a CR/LF value → `rejected`: LIVE on `NatsQueueAdapter` (`metadata.headers`), DRIVER-built headers in `tests/nats-client.test.ts`. `NatsClient.publish()` builds headers inside the classifying `try`
+  - `InvalidSubjectError` → `rejected`: LIVE on `NatsQueueAdapter` (subject with spaces)
+  - `ClosedConnectionError` (driver gave up reconnecting, or closed) → `unavailable`: LIVE on both adapters
+  - `DrainingConnectionError` → `unavailable`: LIVE on both adapters (publish right after `nc.drain()`)
+  - `TimeoutError` → `unknown`: LIVE (server frozen with SIGSTOP; after SIGCONT the message is in the stream). The same error for a publish made while the client reconnects: PROBE — nats-core's `prepare()` calls `resetOutbound()` at every dial, so such a publish is usually dropped
+  - `RequestError` ← `RequestError("connection closed")` (connection closed while the publish waited) → `unknown`: LIVE
+  - anything else → `unknown`: DRIVER (plain `Error`, non-error values)
+- Core NATS `nc.publish()` during a reconnect resolves and the message is lost when the next dial resets the outbound buffer (PROBE: server `in_msgs` 0 after reconnect, subscriber received nothing); a publish permission denial on core NATS is an async status only (PROBE)
+- Redis classification is `classifyRedisPublishFailure()` in `packages/core/src/queue/adapters/redis.adapter.ts`; LIVE rows are in `packages/core/src/queue/adapters/redis.adapter.test.ts`:
+  - `code: 'ERR_REDIS_SERVER_ERROR'` whose first word is in `REDIS_CANNOT_WRITE_NOW` → `unavailable`: `READONLY` (after `REPLICAOF`) and `BUSY` (script past `busy-reply-threshold`) LIVE, each followed by the same publish succeeding after `REPLICAOF NO ONE` / `SCRIPT KILL`; `LOADING`, `MASTERDOWN`, `TRYAGAIN`, `CLUSTERDOWN`, `NOREPLICAS`, `MISCONF` by the same rule, not provoked (DRIVER-shaped doubles in the same file cover the whole-word match). Whole-word match: `BUSYKEY`/`BUSYGROUP` stay refusals
+  - any other `ERR_REDIS_SERVER_ERROR` → `rejected` (Redis executes nothing of a command it answers with an error): `WRONGTYPE` on RPUSH and `NOPERM` on ZADD LIVE, `OOM` PROBE
+  - `ERR_REDIS_CONNECTION_CLOSED` "Connection has failed" → `unavailable`: LIVE (driver client `close()`d)
+  - `ERR_REDIS_CONNECTION_CLOSED` "Max reconnection attempts reached" → `unavailable`: PROBE only (~34 s of dials). Safe only because Bun resets the retry counter after `HELLO` and OneBun does not pass `maxRetries` (20), so nothing can be in flight when it fires — see the comment on `REDIS_NOT_SENT_MESSAGES`
+  - `ERR_REDIS_CONNECTION_CLOSED` with any other message ("Connection closed", a command in flight) → `unknown`: LIVE (`CLIENT PAUSE WRITE` + `CLIENT KILL ID`)
+  - OneBun's `RedisClient` "Redis client not connected" (no `code`) → `unavailable`: LIVE; anything else → `unknown`
+- `RedisQueueAdapter.publish()` wraps only the write (`ZADD` for `delay`/`priority`, `RPUSH` otherwise) in the classifying `try`. The wake `PUBLISH` after a successful `RPUSH` is in its own `try`: a failure emits `onError` and the call resolves with the id, because the message is stored and the poll loop delivers it (LIVE: ACL user without `PUBLISH`)
+- The JetStream adapter serialises the envelope before the `try`, so a `JSON.stringify` `TypeError` is thrown as itself; `toNatsSubject()` likewise throws its own error for an untranslatable pattern. `deadLetterRepublishError()` interpolates the republish's `QueuePublishError` message instead of guessing at a cause
+
+</llm-only>
 
 
 ## Dynamic Job Management

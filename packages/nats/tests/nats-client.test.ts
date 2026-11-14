@@ -15,6 +15,8 @@ import {
   mock,
 } from 'bun:test';
 
+import { QueuePublishError } from '@onebun/core';
+
 import {
   NatsClient,
   createNatsClient,
@@ -360,6 +362,70 @@ describe('NatsClient', () => {
   describe('error handling', () => {
     it('should throw when publishing without connecting', async () => {
       await expect(client.publish('test', 'data')).rejects.toThrow('Not connected to NATS');
+    });
+
+    it('throws a QueuePublishError "unavailable" for a publish without a connection', async () => {
+      const thrown = await client.publish('orders.created', 'data').catch((error: unknown) => error);
+
+      expect(thrown).toBeInstanceOf(QueuePublishError);
+      expect((thrown as QueuePublishError).reason).toBe('unavailable');
+      expect((thrown as QueuePublishError).pattern).toBe('orders.created');
+    });
+
+    it('throws a QueuePublishError "rejected" with the driver\'s error when the payload exceeds max_payload', async () => {
+      await withFakeServer(async (servers) => {
+        const real = new NatsClient({ servers });
+        await real.connect();
+
+        try {
+          // The fake server announces max_payload 1 MiB, as nats-server does by default.
+          const thrown = await real.publish('orders.created', 'x'.repeat(1_100_000)).catch((error: unknown) => error);
+
+          expect(thrown).toBeInstanceOf(QueuePublishError);
+          const error = thrown as QueuePublishError;
+          expect(error.reason).toBe('rejected');
+          expect(error.cause).toBeInstanceOf(errors.InvalidArgumentError);
+          expect(error.message).toContain('max_payload');
+        } finally {
+          await real.disconnect();
+        }
+      });
+    });
+
+    it('throws a QueuePublishError "rejected" for a header the driver refuses, and sends nothing', async () => {
+      const publish = mock(() => undefined);
+      asAny(client).nc = { publish };
+
+      // Header names as an application writes them, which are not identifiers.
+      const badName = await client.publish('orders.created', 'data', Object.fromEntries([['bad name', 'x']]))
+        .catch((error: unknown) => error);
+      const badValue = await client.publish('orders.created', 'data', Object.fromEntries([['X-Ok', 'a\r\nb']]))
+        .catch((error: unknown) => error);
+
+      for (const thrown of [badName, badValue]) {
+        expect(thrown).toBeInstanceOf(QueuePublishError);
+        expect((thrown as QueuePublishError).reason).toBe('rejected');
+        expect((thrown as Error).cause).toBeInstanceOf(errors.InvalidArgumentError);
+      }
+      expect(publish).not.toHaveBeenCalled();
+      asAny(client).nc = null;
+    });
+
+    it('throws a QueuePublishError "unavailable" with the driver\'s error once the connection is closed', async () => {
+      await withFakeServer(async (servers) => {
+        const real = new NatsClient({ servers });
+        await real.connect();
+        // What the driver leaves behind once it gives up reconnecting: a closed connection.
+        await real.getConnection().close();
+
+        const thrown = await real.publish('orders.created', 'data').catch((error: unknown) => error);
+
+        expect(thrown).toBeInstanceOf(QueuePublishError);
+        const error = thrown as QueuePublishError;
+        expect(error.reason).toBe('unavailable');
+        expect(error.cause).toBeInstanceOf(errors.ClosedConnectionError);
+        await real.disconnect().catch(() => undefined);
+      });
     });
 
     it('should throw when subscribing without connecting', async () => {

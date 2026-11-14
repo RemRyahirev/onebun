@@ -27,6 +27,7 @@ import {
   type NackAwareMessage,
 } from '../ack-mode';
 import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
+import { QueuePublishError } from '../publish-error';
 import {
   isLastAttempt,
   resolveMaxAttempts,
@@ -35,6 +36,8 @@ import {
   UNLIMITED_ATTEMPTS,
 } from '../retry';
 import { QueueScheduler } from '../scheduler';
+
+const NOT_CONNECTED_MESSAGE = 'InMemoryQueueAdapter not connected. Call connect() first.';
 
 // ============================================================================
 // Types
@@ -295,8 +298,20 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message to every matching subscription in this process.
+   *
+   * A handler's failure is reported through the queue events, never thrown from here.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when the adapter is not connected — the only way an
+   *   in-process publish fails.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     const messageId = options?.messageId ?? this.generateMessageId();
 
@@ -438,7 +453,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('InMemoryQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 

@@ -18,7 +18,11 @@ import type {
   MessageHandler,
   SubscribeOptions,
 } from '@onebun/core';
-import { createQueuePatternMatcher, resolveAckMode } from '@onebun/core';
+import {
+  createQueuePatternMatcher,
+  QueuePublishError,
+  resolveAckMode,
+} from '@onebun/core';
 
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
 
@@ -162,6 +166,14 @@ describe('NatsQueueAdapter', () => {
       await expect(adapter.publish('test', { data: 'test' })).rejects.toThrow(
         'NatsQueueAdapter not connected',
       );
+    });
+
+    it('throws a QueuePublishError "unavailable" for a publish before connect()', async () => {
+      const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+      expect(thrown).toBeInstanceOf(QueuePublishError);
+      expect((thrown as QueuePublishError).reason).toBe('unavailable');
+      expect((thrown as QueuePublishError).safeToRepeat).toBe(true);
     });
 
     it('should throw when subscribing without connecting', async () => {

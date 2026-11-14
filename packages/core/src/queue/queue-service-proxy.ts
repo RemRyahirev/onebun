@@ -19,6 +19,8 @@ import type {
   UpdateJobOptions,
 } from './types';
 
+import { QueuePublishError } from './publish-error';
+
 /**
  * Where the queue is in the application's life, as the application reports it.
  *
@@ -150,14 +152,33 @@ export class QueueServiceProxy {
     return this.requireDelegate().getScheduler();
   }
 
+  /**
+   * Publish through the real `QueueService`, hold the message while the queue starts, or refuse.
+   *
+   * @throws {QueuePublishError} `'unavailable'` once the queue has stopped — the application is
+   *   shutting down and nothing was sent — and whatever the adapter throws while it runs. A queue
+   *   that was never enabled is a configuration error, and throws a plain `Error` saying how to
+   *   enable it.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
     if (this.phase === 'starting') {
       return this.holdUntilReady(pattern, data, options);
+    }
+    if (this.phase === 'stopped') {
+      throw new QueuePublishError(QUEUE_STOPPED_MESSAGE, { reason: 'unavailable', pattern });
     }
 
     return await this.requireDelegate().publish(pattern, data, options);
   }
 
+  /**
+   * `publish()` for several messages, with the same refusal once the queue has stopped; the error
+   * names the first message's pattern.
+   *
+   * @see docs:api/queue.md
+   */
   async publishBatch<T>(
     messages: Array<{ pattern: string; data: T; options?: PublishOptions }>,
   ): Promise<string[]> {
@@ -165,6 +186,9 @@ export class QueueServiceProxy {
       return messages.map(
         (message) => this.holdUntilReady(message.pattern, message.data, message.options),
       );
+    }
+    if (this.phase === 'stopped') {
+      throw new QueuePublishError(QUEUE_STOPPED_MESSAGE, { reason: 'unavailable', pattern: messages[0]?.pattern ?? '' });
     }
 
     return await this.requireDelegate().publishBatch(messages);
