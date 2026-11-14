@@ -9,8 +9,15 @@
  * Provides helper functions to extract types and metadata from Drizzle table schemas
  */
 
-import type { PgTable } from 'drizzle-orm/pg-core';
-import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import {
+  type Column,
+  getTableColumns,
+  getTableName as drizzleGetTableName,
+  is,
+  Table,
+} from 'drizzle-orm';
+import { PgTable } from 'drizzle-orm/pg-core';
+import { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
 /**
  * Extract Select type from a Drizzle table schema
@@ -46,6 +53,7 @@ export type InsertType<TTable extends PgTable<any> | SQLiteTable<any>> =
  * Get table name from a Drizzle table schema
  * @param table - Drizzle table schema
  * @returns Table name as string
+ * @throws Error when the value is not a drizzle table
  * @example
  * ```typescript
  * const users = pgTable('users', { ... });
@@ -55,20 +63,11 @@ export type InsertType<TTable extends PgTable<any> | SQLiteTable<any>> =
 export function getTableName<TTable extends PgTable<any> | SQLiteTable<any>>(
   table: TTable,
 ): string {
-  // Try to get table name from drizzle internal structure
-  // Drizzle stores table name in the table object
-  const tableDef = (table as any)._;
-  if (tableDef && typeof tableDef.name === 'string') {
-    return tableDef.name;
+  if (!is(table, Table)) {
+    throw new Error('Unable to extract table name from Drizzle table schema');
   }
-  
-  // Alternative: try to get from table directly
-  const tableName = (table as any).name;
-  if (typeof tableName === 'string') {
-    return tableName;
-  }
-  
-  throw new Error('Unable to extract table name from Drizzle table schema');
+
+  return drizzleGetTableName(table);
 }
 
 /**
@@ -87,9 +86,20 @@ export function getTableName<TTable extends PgTable<any> | SQLiteTable<any>>(
 export function getPrimaryKeyColumn<TTable extends PgTable<any> | SQLiteTable<any>>(
   table: TTable,
 ): string | null {
-  // Drizzle stores columns directly on the table object (not in tableDef.columns)
-  // Check each property on the table to find the primary key column
   const tableObj = table as any;
+
+  // Real drizzle tables: read the columns through drizzle's own accessor
+  if (is(table, Table)) {
+    for (const [key, column] of Object.entries<Column>(getTableColumns(table))) {
+      if (column.primary) {
+        return column.name || key;
+      }
+    }
+
+    return null;
+  }
+
+  // Plain objects shaped like a table: columns sit directly on the object
   
   // Iterate through table properties to find columns
   for (const key in tableObj) {
@@ -132,7 +142,13 @@ export function getPrimaryKeyColumn<TTable extends PgTable<any> | SQLiteTable<an
 export function isPgTable(
   table: PgTable<any> | SQLiteTable<any>,
 ): table is PgTable<any> {
-  // Check if table has PostgreSQL-specific properties
+  if (is(table, PgTable)) {
+    return true;
+  }
+  if (is(table, SQLiteTable)) {
+    return false;
+  }
+  // Plain objects shaped like a table
   const tableDef = (table as any)._;
 
   return tableDef?.dialect === 'pg' || !tableDef?.dialect;
@@ -144,6 +160,12 @@ export function isPgTable(
 export function isSQLiteTable(
   table: PgTable<any> | SQLiteTable<any>,
 ): table is SQLiteTable<any> {
+  if (is(table, SQLiteTable)) {
+    return true;
+  }
+  if (is(table, PgTable)) {
+    return false;
+  }
   const tableDef = (table as any)._;
 
   return tableDef?.dialect === 'sqlite';

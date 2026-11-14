@@ -8,12 +8,14 @@ import {
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
+import { pgTable, text as pgText } from '../src/pg';
 import {
   getTableName,
   getPrimaryKeyColumn,
   isSQLiteTable,
   isPgTable,
 } from '../src/schema-utils';
+import { sqliteTable, text as sqliteText } from '../src/sqlite';
 
 // Helpers to create mock table objects that exercise schema-utils code paths
 // (schema-utils reads from ._/. directly, not drizzle Symbols)
@@ -21,33 +23,16 @@ function makeMockTableWithUnderscoreName(name: string, dialect?: string): PgTabl
   return { _: { name, dialect } } as unknown as PgTable<any>;
 }
 
-function makeMockTableWithDirectName(name: string): PgTable<any> {
-  return { name } as unknown as PgTable<any>;
-}
-
 function makeMockTableNoName(): PgTable<any> {
   return {} as unknown as PgTable<any>;
 }
 
 describe('getTableName', () => {
-  test('should return name from _.name property', () => {
-    const table = makeMockTableWithUnderscoreName('users');
-    expect(getTableName(table)).toBe('users');
-  });
-
-  test('should return name from direct .name property when _.name is absent', () => {
-    const table = makeMockTableWithDirectName('products');
-    expect(getTableName(table)).toBe('products');
-  });
-
-  test('should throw when neither _.name nor .name is available', () => {
-    const table = makeMockTableNoName();
-    expect(() => getTableName(table)).toThrow('Unable to extract table name from Drizzle table schema');
-  });
-
-  test('should throw when _.name is not a string', () => {
-    const table = { _: { name: 42 } } as unknown as PgTable<any>;
-    expect(() => getTableName(table)).toThrow('Unable to extract table name from Drizzle table schema');
+  test('should throw when the value is not a drizzle table', () => {
+    expect(() => getTableName(makeMockTableNoName())).toThrow('Unable to extract table name from Drizzle table schema');
+    expect(() => getTableName(makeMockTableWithUnderscoreName('users'))).toThrow(
+      'Unable to extract table name from Drizzle table schema',
+    );
   });
 });
 
@@ -169,5 +154,46 @@ describe('isPgTable', () => {
   test('should return true when _ is missing entirely (defaults to pg)', () => {
     const table = makeMockTableNoName();
     expect(isPgTable(table)).toBe(true);
+  });
+});
+
+describe('schema utilities on real drizzle-orm tables', () => {
+  const pgUsers = pgTable('users', { id: pgText('id').primaryKey() });
+  const sqliteUsers = sqliteTable('accounts', { id: sqliteText('id').primaryKey() });
+
+  test('getTableName returns the SQL name of a real pgTable', () => {
+    expect(getTableName(pgUsers)).toBe('users');
+  });
+
+  test('getTableName returns the SQL name of a real sqliteTable', () => {
+    expect(getTableName(sqliteUsers)).toBe('accounts');
+  });
+
+  test('getTableName ignores a column keyed "_"', () => {
+    const odd = pgTable('odd', { _: pgText('_name_col') });
+    expect(getTableName(odd)).toBe('odd');
+    const oddSqlite = sqliteTable('odd_sqlite', { _: sqliteText('_name_col') });
+    expect(getTableName(oddSqlite)).toBe('odd_sqlite');
+  });
+
+  test('getTableName ignores a column keyed "name"', () => {
+    const named = pgTable('named', { name: pgText('full_name') });
+    expect(getTableName(named)).toBe('named');
+    const namedSqlite = sqliteTable('named_sqlite', { name: sqliteText('full_name') });
+    expect(getTableName(namedSqlite)).toBe('named_sqlite');
+  });
+
+  test('getPrimaryKeyColumn finds the key of real tables, including a column keyed "_"', () => {
+    expect(getPrimaryKeyColumn(pgUsers)).toBe('id');
+    expect(getPrimaryKeyColumn(sqliteUsers)).toBe('id');
+    const odd = pgTable('odd_pk', { _: pgText('_pk').primaryKey(), other: pgText('other') });
+    expect(getPrimaryKeyColumn(odd)).toBe('_pk');
+  });
+
+  test('isPgTable / isSQLiteTable tell real tables apart', () => {
+    expect(isPgTable(pgUsers)).toBe(true);
+    expect(isSQLiteTable(pgUsers)).toBe(false);
+    expect(isPgTable(sqliteUsers)).toBe(false);
+    expect(isSQLiteTable(sqliteUsers)).toBe(true);
   });
 });
