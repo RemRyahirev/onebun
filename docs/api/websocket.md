@@ -550,7 +550,7 @@ When the move happens, the connection arrives on the new gateway in no room: eve
 before the move is left in the same step as the move — storage, `client.rooms` and pub/sub
 subscriptions alike — and a server-side `joinRoom()` still writing at that moment is taken back,
 also when it runs on another instance sharing Redis storage. Rooms joined under one gateway's
-`@OnJoinRoom` guards, or under none, never reach another gateway's rooms. On a move between
+guards, or under none, never reach another gateway's rooms. On a move between
 gateways without a hook, joins still waiting on the first gateway's guards are cancelled and
 answered with a `FORBIDDEN` error frame. Rooms the client needs on the new gateway it joins again
 there, under that gateway's guards; a join made while the move is still removing the old rooms
@@ -774,7 +774,7 @@ Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessag
 
 ### Room joins and leaves
 
-A guard on `@OnJoinRoom` decides whether the client joins. It runs before the room changes, so a client it denies is not added to the room at all — not in storage, not subscribed, not in `client.rooms` — receives none of the room's broadcasts, and gets the `FORBIDDEN` error frame a denied `@OnMessage` gets.
+A guard decides whether the client joins a room. It runs before the room changes, so a client it denies is not added to the room at all — not in storage, not subscribed, not in `client.rooms` — receives none of the room's broadcasts, and gets the `FORBIDDEN` error frame a denied `@OnMessage` gets. A join asks the guards of the `@OnJoinRoom` handlers whose pattern matches the room, and the gateway-level guards — `@UseGuards` on the gateway class or on a class it extends — on every join, whether or not a handler matches.
 
 ```typescript
 @WebSocketGateway({
@@ -797,12 +797,44 @@ export class LoungeGateway extends BaseWebSocketGateway {
 }
 ```
 
+Gateway-level guards also decide the rooms no handler declares — a room the server fills itself, such as one per user. A guard that decides by room reads it from `getRoomName()`. A class-level guard is asked before `@OnLeaveRoom` handlers as well: a denial there skips the handler body, and the leave itself still happens.
+
+```typescript
+// `user:<id>` rooms are filled by the server alone. `getRoomName()` is the room the join would
+// add the client to, however the client spelled it; on a message handler it is undefined.
+const noUserRoomJoins = createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:'));
+
+@WebSocketGateway({
+  path: '/inbox',
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    return user ? { userId: user.id, permissions: user.permissions } : null;
+  },
+})
+// Asked on every client join of this gateway, and before each of its handlers.
+@UseGuards(WsAuthGuard, noUserRoomJoins)
+export class InboxGateway extends BaseWebSocketGateway {
+  @OnConnect()
+  async handleConnect(@Client() client: WsClientData) {
+    // A server-side join asks no guard: only the server puts a client in its `user:<id>` room.
+    await this.joinRoom(client.id, `user:${client.auth?.userId}`);
+  }
+
+  @OnJoinRoom('thread:{threadId}')
+  handleThreadJoin(@RoomName() room: string) {
+    return { event: 'thread:joined', data: { room } };
+  }
+}
+```
+
 The rules behind it:
 
-- The guards come from every `@OnJoinRoom` handler whose pattern matches the room, gateway-level guards included, and are asked in declaration order. One denial keeps the client out and none of those handlers runs. When all allow, the client joins, then the handlers run — no guard is asked twice.
+- The guards come from every `@OnJoinRoom` handler whose pattern matches the room, and are asked in declaration order. A handler's list starts with the gateway-level guards, so with several matching handlers they are asked once per handler, each time with that handler's context. One denial keeps the client out and none of those handlers runs. When all allow, the client joins, then the handlers run — no guard is asked again for them.
+- A room no `@OnJoinRoom` handler matches is decided by the gateway-level guards alone, in the same order, once each. On a gateway without gateway-level guards such a join asks no guard and goes ahead.
+- A guard or interceptor of a join or a leave reads the room from `getRoomName()`: the room the gateway adds the client to or removes it from, the one `@RoomName()` injects. The gateway takes it from the message — the data when it is a string, else the data's `room` field when that is not empty, else what follows `join:` / `leave:` in the event — so `getData()`, which is whatever the client sent, does not tell which room is joined: `join:user:42` with `{ room: '' }`, `5` or `{}` joins `user:42`, and `join:lobby` with `'user:42'` joins `user:42` too. Never look for the room in `getData()`. On `@OnMessage`, `@OnConnect` and `@OnDisconnect` `getRoomName()` is `undefined`.
+- For a join no handler matches, the guard's context describes a handler that does not exist: `getHandler()` is `{ type: 'joinRoom', handler: '', params: [], guards }` — an empty `handler` name, no `pattern`, the gateway-level guards — and `getPatternParams()` is `{}`. A guard tells such a join by the empty `handler` name and its room by `getRoomName()`. A gateway-level guard written for `@OnMessage` handlers must handle this context: one that denies or throws on it keeps clients out of every room no handler matches.
 - The guard sees the client before the join: `client.rooms` does not list the room yet. A `WsRoomGuard` naming the room being joined therefore denies every join to it.
 - The guard covers the client's own `join` message only. A server-side `joinRoom(clientId, room)` — from a handler or a service — adds the client without asking any guard.
-- A room no `@OnJoinRoom` handler matches has no guard to ask and is joined. A room that needs protecting needs a handler whose pattern matches it.
 - A `leave` never waits for a join. It takes effect at once and cancels any join of the same room still waiting on its guards, so a `join` followed by a `leave` ends with the client out of the room however long the guards take, or if they never answer. A server-side `leaveRoom(clientId, room)` cancels such a join the same way when it runs on the instance holding the connection; with several instances sharing Redis storage, a `leaveRoom()` on another instance does not, and the join lands once its guards allow it.
 - A join that will not happen any more — cancelled by a leave, or by a Socket.IO move to another gateway — is answered at once with the same `error` frame (`code: 'FORBIDDEN'`, `message` naming the reason), so an ack id never goes unanswered; the guards' later verdict is ignored. A join from a connection that closed meanwhile is dropped and asks no further guard.
 - A guard on `@OnLeaveRoom` never keeps a client in a room. The leave happens first; a denial skips the handler and sends no frame.

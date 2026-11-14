@@ -112,11 +112,26 @@ the handler, so an override does not inherit those.
 denial keeps the client out (not stored, not subscribed, not in `client.rooms`, no broadcasts),
 runs none of the room's `@OnJoinRoom` handlers and answers with the same `FORBIDDEN` error frame a
 denied `@OnMessage` gets. The guards of every `@OnJoinRoom` handler whose pattern matches the room
-are asked (gateway-level ones included), in declaration order; one denial is enough. When all allow,
-the client joins and the handlers run after it, each guard asked once. The guard sees the client
-before the join, so `client.rooms` does not list the room yet — `WsRoomGuard('<the room being
-joined>')` denies every join to it. A room no `@OnJoinRoom` handler matches has no guard and is
-joined — to protect a room, give it a matching handler. The guards cover only the client's own
+are asked, in declaration order; one denial is enough. Each handler's list starts with the
+gateway-level guards (class-level `@UseGuards`, base gateway classes included), so with several
+matching handlers those run once per handler. When all allow, the client joins and the handlers run
+after it, no guard asked again for them. **A gateway-level `@UseGuards` decides EVERY client join**:
+a room no `@OnJoinRoom` handler matches (e.g. a server-filled `user:<id>`) is decided by the
+gateway-level guards alone — same order, once each, same `FORBIDDEN` frame, cancelled by a leave or
+a move like any pending join. Only a gateway WITHOUT gateway-level guards lets such a join through
+unasked. **A room guard reads the room from `ctx.getRoomName()`** — on every guard of a join or
+leave (matched or handler-less) and every `@OnJoinRoom`/`@OnLeaveRoom` interceptor it is the room
+the gateway adds the client to or removes it from, what `@RoomName()` injects; `undefined` on
+`@OnMessage`/`@OnConnect`/`@OnDisconnect`. NEVER derive the room from `getData()`: the gateway takes
+string data, else a non-empty `data.room`, else the `join:`/`leave:` suffix, so `join:user:42` with
+`{ room: '' }`, `5`, `[]` or `{}` joins `user:42`, and `join:lobby` with `'user:42'` joins `user:42`.
+Server-filled rooms: `@UseGuards(createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:')))` on
+the gateway. In a handler-less join `getHandler()` = `{ type: 'joinRoom', handler: '', params: [],
+guards }` (no `pattern`) and `getPatternParams()` = `{}` — recognise it by `handler === ''`; a
+gateway-level guard written for `@OnMessage` must cope — one that denies or throws on it keeps
+clients out of every room no handler matches. The
+guard sees the client before the join, so `client.rooms` does not list the room yet —
+`WsRoomGuard('<the room being joined>')` denies every join to it. The guards cover only the client's own
 `join` message: a server-side `joinRoom(clientId, room)` never asks them. A `leave` never waits for
 a join — the client's `leave` and a server-side `leaveRoom()` (a kick) apply at once and cancel a
 still-pending join of the same room; the kick only on the instance holding the connection — with

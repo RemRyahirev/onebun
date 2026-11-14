@@ -1,6 +1,6 @@
 /**
- * Client room joins waiting on their `@OnJoinRoom` guards, and a Socket.IO move's removal of a
- * connection's stored rooms that a join has to wait for.
+ * Client room joins waiting on their guards (an `@OnJoinRoom` handler's, or the gateway-level ones),
+ * and a Socket.IO move's removal of a connection's stored rooms that a join has to wait for.
  *
  * Shared by the two places that change a client's rooms: `WsHandler`, which tracks a join while its
  * guards run and makes the move, and `BaseWebSocketGateway`, whose server-side `leaveRoom()` has to

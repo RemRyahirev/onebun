@@ -33,6 +33,8 @@ export class WsExecutionContextImpl implements WsExecutionContext {
     private data: unknown,
     private handler: WsHandlerMetadata,
     private patternParams: Record<string, string>,
+    /** The room a join or leave changes, as the gateway resolved it; absent for other handlers. */
+    private roomName?: string,
   ) {}
 
   getClient(): WsClientData {
@@ -53,6 +55,11 @@ export class WsExecutionContextImpl implements WsExecutionContext {
 
   getPatternParams(): Record<string, string> {
     return this.patternParams;
+  }
+
+  /** The room the join or leave being decided changes — what `@RoomName()` injects. */
+  getRoomName(): string | undefined {
+    return this.roomName;
   }
 }
 

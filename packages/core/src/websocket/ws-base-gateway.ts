@@ -837,8 +837,8 @@ export abstract class BaseWebSocketGateway {
   /**
    * Add a client to a room
    *
-   * A server-side join: no `@OnJoinRoom` guard is asked. Those decide the client's own `join`
-   * message only.
+   * A server-side join: no guard is asked, neither an `@OnJoinRoom` handler's nor a gateway-level
+   * one. Guards decide the client's own `join` message only.
    *
    * Only for a client this gateway serves. A join still being written when the client moves to
    * another gateway by a Socket.IO CONNECT — on this instance or, with shared Redis storage, on
@@ -901,9 +901,9 @@ export abstract class BaseWebSocketGateway {
   /**
    * Remove a client from a room
    *
-   * Also cancels a `join` of that room the client sent whose `@OnJoinRoom` guards are still
-   * deciding — the join is answered with a `FORBIDDEN` error frame and does not happen — so a
-   * removal is never undone by a join that was already under way.
+   * Also cancels a `join` of that room the client sent whose guards are still deciding — the join
+   * is answered with a `FORBIDDEN` error frame and does not happen — so a removal is never undone
+   * by a join that was already under way.
    */
   async leaveRoom(clientId: string, roomName: string): Promise<void> {
     if (!this.storage) {

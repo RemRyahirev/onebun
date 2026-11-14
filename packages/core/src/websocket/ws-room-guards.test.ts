@@ -23,11 +23,16 @@ import {
 } from 'bun:test';
 
 import type { Guard } from '../http-guards/http-guards';
-import type { ExecutionContext } from '../types';
+import type { ExecutionContext, Interceptor } from '../types';
 
 import { OneBunApplication } from '../application/application';
-import { Module, UseGuards } from '../decorators/decorators';
+import {
+  Module,
+  UseGuards,
+  UseInterceptors,
+} from '../decorators/decorators';
 import { clearGlobalServicesRegistry } from '../module/module';
+import { BaseService, Service } from '../module/service';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 import { isWsContext } from '../types';
 
@@ -41,7 +46,7 @@ import {
   RoomName,
   WebSocketGateway,
 } from './ws-decorators';
-import { type WsClientData } from './ws.types';
+import { WsHandlerType, type WsClientData } from './ws.types';
 
 const HOST = '127.0.0.1';
 const ROOM = 'room:1';
@@ -102,6 +107,39 @@ function throwingGuard(name: string): new () => Guard {
       throw new Error('guard failed');
     }
   };
+}
+
+/** A room only the server fills. */
+const USER_ROOM = 'user:42';
+
+/**
+ * Every way a client can name `USER_ROOM` in a join, as `[event, data]`. The room is the string
+ * data, else a truthy `data.room`, else the `join:` suffix — so the data alone does not say which
+ * room is joined, and the last one names it in the data while the event names another.
+ */
+const USER_ROOM_SPELLINGS: [string, unknown][] = [
+  ['join', USER_ROOM],
+  ['join', { room: USER_ROOM }],
+  [`join:${USER_ROOM}`, undefined],
+  [`join:${USER_ROOM}`, { room: '' }],
+  [`join:${USER_ROOM}`, { room: null }],
+  [`join:${USER_ROOM}`, 5],
+  [`join:${USER_ROOM}`, []],
+  [`join:${USER_ROOM}`, {}],
+  ['join:lobby', USER_ROOM],
+];
+
+/** Keeps clients out of `user:*` rooms, deciding by the room the context names. */
+class NoUserRoomsGuard implements Guard {
+  canActivate(ctx: ExecutionContext): boolean {
+    if (!isWsContext(ctx)) {
+      return false;
+    }
+    const room = ctx.getRoomName();
+    calls.push(`room:${room}`);
+
+    return !room?.startsWith('user:');
+  }
 }
 
 interface Gate {
@@ -353,8 +391,12 @@ interface Peer {
 const running: OneBunApplication[] = [];
 const sockets: WebSocket[] = [];
 
-async function boot(gatewayClasses: Function | Function[], socketio = false): Promise<OneBunApplication> {
-  @Module({ controllers: Array.isArray(gatewayClasses) ? gatewayClasses : [gatewayClasses] })
+async function boot(
+  gatewayClasses: Function | Function[],
+  socketio = false,
+  providers: Function[] = [],
+): Promise<OneBunApplication> {
+  @Module({ controllers: Array.isArray(gatewayClasses) ? gatewayClasses : [gatewayClasses], providers })
   class RoomModule {}
 
   const app = new OneBunApplication(RoomModule, {
@@ -469,6 +511,14 @@ async function broadcastTo(member: Peer): Promise<void> {
   owner.getWsServer()?.publish(ROOM, JSON.stringify({ event: 'raw-news', data: {} }));
   await waitUntil(() => (member.frames.some((frame) => frame.event === 'news') ? true : undefined), 'news');
   await waitUntil(() => (member.frames.some((frame) => frame.event === 'raw-news') ? true : undefined), 'raw-news');
+}
+
+/** Wait until the storage lists the client in the room: an allowed join no handler answers sends no reply. */
+async function untilStored(clientId: string, room: string): Promise<void> {
+  await waitUntil(
+    async () => ((await currentGateway().membership(clientId, room)).inStorage ? true : undefined),
+    `the join of ${room}`,
+  );
 }
 
 /** A member added server-side, so a broadcast has someone to reach whatever the guards say. */
@@ -737,34 +787,6 @@ describe('a guard on @OnJoinRoom decides whether the client joins the room', () 
     ]);
   });
 
-  it('joins as before when no @OnJoinRoom handler matches the room, whatever the gateway-level guard says', async () => {
-    const deny = recordingGuard('class-deny', false);
-
-    @WebSocketGateway({ path: '/ws' })
-    @UseGuards(deny)
-    class NoMatchingHandlerGateway extends RoomGateway {
-      @OnJoinRoom('vip:*')
-      onVipJoin() {
-        calls.push('vip-handler');
-      }
-    }
-
-    const app = await boot(NoMatchingHandlerGateway);
-    const peer = await connect(app);
-
-    peer.send('join', ROOM, 1);
-
-    expect(await waitUntil(async () => {
-      const membership = await currentGateway().membership(peer.id, ROOM);
-
-      return membership.inStorage ? membership : undefined;
-    }, 'the join')).toEqual(IN);
-    await broadcastTo(peer);
-    // The two fan-out paths race each other, so only the set of frames is fixed.
-    expect(eventsOf(peer).sort()).toEqual(['news', 'raw-news']);
-    expect(calls).toEqual([]);
-  });
-
   it('changes nothing when a client already in the room is denied a join to it', async () => {
     const deny = recordingGuard('deny', false);
 
@@ -808,6 +830,437 @@ describe('a guard on @OnJoinRoom decides whether the client joins the room', () 
     expect((await peer.reply(1)).data).toEqual({ ...FORBIDDEN_DATA, event: 'join' });
     expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
     expect(calls).toEqual(['broken:throw']);
+  });
+});
+
+describe('the gateway-level guards decide every client join, whether or not an @OnJoinRoom handler matches', () => {
+  it('keeps a client they deny out of a room no @OnJoinRoom handler matches, and answers FORBIDDEN once', async () => {
+    const deny = recordingGuard('class-deny', false);
+    const vipDeny = recordingGuard('vip-deny', false);
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(deny)
+    class UnmatchedDeniedGateway extends RoomGateway {
+      // Its pattern does not match the room, so neither its own guard nor its body has a say.
+      @UseGuards(vipDeny)
+      @OnJoinRoom('vip:*')
+      onVipJoin() {
+        calls.push('vip-handler');
+      }
+    }
+
+    const app = await boot(UnmatchedDeniedGateway);
+    const member = await memberOf(app);
+    const outsider = await connect(app);
+
+    outsider.send('join', ROOM, 1);
+    expect(await outsider.reply(1)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' }, ack: 1 });
+    // The `join:<room>` spelling is decided the same way.
+    outsider.send(`join:${ROOM}`, undefined, 2);
+    expect(await outsider.reply(2)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event: `join:${ROOM}` }, ack: 2 });
+    expect(await currentGateway().membership(outsider.id, ROOM)).toEqual(OUT);
+
+    await broadcastTo(member);
+    await outsider.drain();
+
+    // One frame per join and nothing from the room. The server-side join of `member` asked no guard.
+    expect(eventsOf(outsider)).toEqual(['error', 'error', 'marker']);
+    expect(calls).toEqual(['class-deny:out', 'class-deny:out']);
+  });
+
+  it('answers a denied join of a room no handler matches over Socket.IO with the frame a denied @OnMessage gets', async () => {
+    const deny = recordingGuard('class-deny', false);
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(deny)
+    class SocketioUnmatchedGateway extends RoomGateway {}
+
+    const app = await boot(SocketioUnmatchedGateway, true);
+    const peer = await connectSocketio(app, currentGateway());
+    peer.send('40');
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+
+    peer.send(`421["join","${ROOM}"]`);
+    const joinAck = await peer.ack(1);
+    // Without an ack id the denial is an `error` event.
+    peer.send(`42["join",{"room":"${ROOM}"}]`);
+    const joinEvent = await waitUntil(() => peer.frames.find((frame) => frame.startsWith('42["error"')), 'the error event');
+
+    expect(joinAck).toEqual([{ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' } }]);
+    expect(JSON.parse(joinEvent.slice(2))).toEqual(['error', { ...FORBIDDEN_DATA, event: 'join' }]);
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual([]);
+    expect(calls).toEqual(['class-deny:out', 'class-deny:out']);
+  });
+
+  it('joins a room no handler matches once they allow, each asked once, in order, with the context of a join without a handler', async () => {
+    const allow = recordingGuard('class-allow', true);
+    const seen: unknown[] = [];
+
+    class InspectingGuard implements Guard {
+      canActivate(ctx: ExecutionContext): boolean {
+        if (isWsContext(ctx)) {
+          const handler = ctx.getHandler();
+          calls.push('inspect');
+          seen.push({
+            type: handler.type,
+            handler: handler.handler,
+            pattern: handler.pattern,
+            handlerParams: handler.params,
+            guards: handler.guards?.length,
+            patternParams: ctx.getPatternParams(),
+            room: ctx.getRoomName(),
+            data: ctx.getData(),
+            rooms: [...ctx.getClient().rooms],
+          });
+        }
+
+        return true;
+      }
+    }
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(allow, InspectingGuard)
+    class UnmatchedAllowedGateway extends RoomGateway {
+      @OnJoinRoom('vip:*')
+      onVipJoin() {
+        calls.push('vip-handler');
+      }
+    }
+
+    const app = await boot(UnmatchedAllowedGateway);
+    const peer = await connect(app);
+
+    peer.send('join', ROOM);
+    await untilStored(peer.id, ROOM);
+    // The room comes from the event here: the data names none.
+    peer.send('join:room:2', { room: '' });
+    await untilStored(peer.id, 'room:2');
+
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(IN);
+    expect(await currentGateway().membership(peer.id, 'room:2')).toEqual(IN);
+    expect(calls).toEqual(['class-allow:out', 'inspect', 'class-allow:in', 'inspect']);
+    // No handler: an empty handler name, no pattern, no parameters, the gateway-level guards. The
+    // room is the one being joined; the data is whatever the client sent.
+    const bareJoin = {
+      type: WsHandlerType.JOIN_ROOM,
+      handler: '',
+      pattern: undefined,
+      handlerParams: [],
+      guards: 2,
+      patternParams: {},
+    };
+    expect(seen).toEqual([
+      {
+        ...bareJoin,
+        room: ROOM,
+        data: ROOM,
+        rooms: [],
+      },
+      {
+        ...bareJoin,
+        room: 'room:2',
+        data: { room: '' },
+        rooms: [ROOM],
+      },
+    ]);
+
+    await broadcastTo(peer);
+  });
+
+  it('applies the gateway-level guards a base gateway class declares, base class first', async () => {
+    const baseAllow = recordingGuard('base-allow', true);
+    const ownDeny = recordingGuard('own-deny', false);
+
+    @UseGuards(baseAllow)
+    class GuardedBase extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(ownDeny)
+    class InheritingGateway extends GuardedBase {}
+
+    const app = await boot(InheritingGateway);
+    const peer = await connect(app);
+
+    peer.send('join', ROOM, 1);
+
+    expect((await peer.reply(1)).data).toEqual({ ...FORBIDDEN_DATA, event: 'join' });
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(calls).toEqual(['base-allow:out', 'own-deny:out']);
+  });
+
+  it('denies a join no handler matches when a gateway-level guard written for @OnMessage handlers throws on it', async () => {
+    // Reads the pattern every @OnMessage handler has. A join without a handler has none.
+    class ChatOnlyGuard implements Guard {
+      canActivate(ctx: ExecutionContext): boolean {
+        if (!isWsContext(ctx)) {
+          return false;
+        }
+        calls.push('chat-only');
+
+        return (ctx.getHandler().pattern as string).startsWith('chat:');
+      }
+    }
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(ChatOnlyGuard)
+    class ChatGateway extends RoomGateway {
+      @OnMessage('chat:say')
+      say() {
+        return { event: 'said', data: {} };
+      }
+    }
+
+    const app = await boot(ChatGateway);
+    const peer = await connect(app);
+
+    peer.send('chat:say', {}, 1);
+    expect(await peer.reply(1)).toEqual({ event: 'said', data: {}, ack: 1 });
+    peer.send('join', ROOM, 2);
+
+    expect(await peer.reply(2)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' }, ack: 2 });
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(calls).toEqual(['chat-only', 'chat-only']);
+  });
+
+  it('asks them once on a join a handler matches, before that handler\'s own guards', async () => {
+    const classAllow = recordingGuard('class-allow', true);
+    const ownAllow = recordingGuard('own-allow', true);
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(classAllow)
+    class MatchedOnceGateway extends RoomGateway {
+      @UseGuards(ownAllow)
+      @OnJoinRoom('room:{id}')
+      onRoomJoin(@Client() client: WsClientData, @RoomName() room: string) {
+        calls.push(`room-handler:${inRoom(client, room)}`);
+
+        return { event: 'joined', data: { room } };
+      }
+
+      @OnJoinRoom('open:*')
+      onOpenJoin(@RoomName() room: string) {
+        calls.push('open-handler');
+
+        return { event: 'joined', data: { room } };
+      }
+    }
+
+    const app = await boot(MatchedOnceGateway);
+    const peer = await connect(app);
+
+    peer.send('join', ROOM, 1);
+    expect(await peer.reply(1)).toEqual({ event: 'joined', data: { room: ROOM }, ack: 1 });
+    expect(calls).toEqual(['class-allow:out', 'own-allow:out', 'room-handler:in']);
+
+    // A handler without guards of its own: the gateway-level ones alone, still once.
+    calls.length = 0;
+    peer.send('join', 'open:1', 2);
+    expect(await peer.reply(2)).toEqual({ event: 'joined', data: { room: 'open:1' }, ack: 2 });
+    expect(calls).toEqual(['class-allow:in', 'open-handler']);
+  });
+
+  it('joins a room no handler matches on a gateway without gateway-level guards, asking no guard', async () => {
+    const vipDeny = recordingGuard('vip-deny', false);
+
+    @WebSocketGateway({ path: '/ws' })
+    class OpenGateway extends RoomGateway {
+      @UseGuards(vipDeny)
+      @OnJoinRoom('vip:*')
+      onVipJoin() {
+        calls.push('vip-handler');
+      }
+    }
+
+    const app = await boot(OpenGateway);
+    const peer = await connect(app);
+
+    peer.send('join', ROOM, 1);
+    await untilStored(peer.id, ROOM);
+
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(IN);
+    await broadcastTo(peer);
+    // The two fan-out paths race each other, so only the set of frames is fixed. No reply to the join.
+    expect(eventsOf(peer).sort()).toEqual(['news', 'raw-news']);
+    expect(calls).toEqual([]);
+  });
+
+  it('hands a room-based gateway-level guard the room being joined however the client spells it (native)', async () => {
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(NoUserRoomsGuard)
+    class UserRoomsNativeGateway extends RoomGateway {}
+
+    const app = await boot(UserRoomsNativeGateway);
+    const peer = await connect(app);
+
+    for (const [index, [event, data]] of USER_ROOM_SPELLINGS.entries()) {
+      peer.send(event, data, index + 1);
+      expect(await peer.reply(index + 1)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event }, ack: index + 1 });
+    }
+    // Data that names a room wins over the event, for the guard as for the join.
+    peer.send(`join:${USER_ROOM}`, 'lobby');
+    await untilStored(peer.id, 'lobby');
+
+    expect(await currentGateway().membership(peer.id, USER_ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual(['lobby']);
+    expect(calls).toEqual([...USER_ROOM_SPELLINGS.map(() => `room:${USER_ROOM}`), 'room:lobby']);
+  });
+
+  it('hands a room-based gateway-level guard the room being joined however the client spells it (Socket.IO)', async () => {
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(NoUserRoomsGuard)
+    class UserRoomsSocketioGateway extends RoomGateway {}
+
+    const app = await boot(UserRoomsSocketioGateway, true);
+    const peer = await connectSocketio(app, currentGateway());
+    peer.send('40');
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+
+    for (const [index, [event, data]] of USER_ROOM_SPELLINGS.entries()) {
+      const args = data === undefined ? [event] : [event, data];
+      peer.send(`42${index + 1}${JSON.stringify(args)}`);
+      expect(await peer.ack(index + 1)).toEqual([{ event: 'error', data: { ...FORBIDDEN_DATA, event } }]);
+    }
+    // Extra arguments, and a packet naming another namespace, are the same join.
+    peer.send(`4299${JSON.stringify(['join', USER_ROOM, 'more'])}`);
+    expect(await peer.ack(99)).toEqual([{ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' } }]);
+    peer.send(`42/other,${JSON.stringify(['join', USER_ROOM])}`);
+    await waitUntil(() => peer.frames.find((frame) => frame.startsWith('42["error"')), 'the error event');
+    peer.send(`42${JSON.stringify([`join:${USER_ROOM}`, 'lobby'])}`);
+    await untilStored(peer.id, 'lobby');
+
+    expect(await currentGateway().membership(peer.id, USER_ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual(['lobby']);
+    expect(calls).toEqual([...[...USER_ROOM_SPELLINGS, [], []].map(() => `room:${USER_ROOM}`), 'room:lobby']);
+  });
+
+  it('gives every room guard and interceptor the room the join or leave changes, and none to a message', async () => {
+    class RoomSeenGuard implements Guard {
+      canActivate(ctx: ExecutionContext): boolean {
+        if (isWsContext(ctx)) {
+          calls.push(`guard:${ctx.getHandler().handler || 'bare'}:${ctx.getRoomName() ?? 'none'}`);
+        }
+
+        return true;
+      }
+    }
+
+    class RoomSeenInterceptor implements Interceptor {
+      async intercept(ctx: ExecutionContext, next: () => Promise<unknown>): Promise<unknown> {
+        if (isWsContext(ctx)) {
+          calls.push(`interceptor:${ctx.getHandler().handler}:${ctx.getRoomName() ?? 'none'}`);
+        }
+
+        return await next();
+      }
+    }
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(RoomSeenGuard)
+    @UseInterceptors(RoomSeenInterceptor)
+    class RoomContextGateway extends RoomGateway {
+      @OnJoinRoom('room:{id}')
+      onJoin(@RoomName() room: string) {
+        calls.push(`onJoin:${room}`);
+
+        return { event: 'joined', data: { room } };
+      }
+
+      @OnLeaveRoom('room:*')
+      onLeave(@RoomName() room: string) {
+        calls.push(`onLeave:${room}`);
+
+        return { event: 'left', data: { room } };
+      }
+
+      @OnMessage('ping')
+      ping() {
+        calls.push('ping');
+
+        return { event: 'pong', data: {} };
+      }
+    }
+
+    const app = await boot(RoomContextGateway);
+    const peer = await connect(app);
+
+    peer.send(`join:${ROOM}`, { room: '' }, 1);
+    expect(await peer.reply(1)).toEqual({ event: 'joined', data: { room: ROOM }, ack: 1 });
+    peer.send('join', { room: 'lobby' });
+    await untilStored(peer.id, 'lobby');
+    peer.send(`leave:${ROOM}`, undefined, 2);
+    expect(await peer.reply(2)).toEqual({ event: 'left', data: { room: ROOM }, ack: 2 });
+    peer.send('ping', {}, 3);
+    expect(await peer.reply(3)).toEqual({ event: 'pong', data: {}, ack: 3 });
+
+    expect(calls).toEqual([
+      `guard:onJoin:${ROOM}`,
+      `interceptor:onJoin:${ROOM}`,
+      `onJoin:${ROOM}`,
+      'guard:bare:lobby',
+      `guard:onLeave:${ROOM}`,
+      `interceptor:onLeave:${ROOM}`,
+      `onLeave:${ROOM}`,
+      'guard:ping:none',
+      'interceptor:ping:none',
+      'ping',
+    ]);
+  });
+
+  it('decides a join no handler matches with a gateway-level guard whose dependencies come from DI', async () => {
+    @Service()
+    class RoomPolicy extends BaseService {
+      allows(room: string | undefined): boolean {
+        return room === 'room:open';
+      }
+    }
+
+    @Service()
+    class PolicyGuard implements Guard {
+      constructor(private readonly policy: RoomPolicy) {}
+
+      canActivate(ctx: ExecutionContext): boolean {
+        if (!isWsContext(ctx)) {
+          return false;
+        }
+        calls.push(`policy:${ctx.getRoomName()}`);
+
+        return this.policy.allows(ctx.getRoomName());
+      }
+    }
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(PolicyGuard)
+    class PolicyGateway extends RoomGateway {}
+
+    const app = await boot(PolicyGateway, false, [RoomPolicy]);
+    const peer = await connect(app);
+
+    peer.send('join', 'room:open');
+    await untilStored(peer.id, 'room:open');
+    peer.send('join', 'room:closed', 1);
+
+    expect(await peer.reply(1)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' }, ack: 1 });
+    expect(await currentGateway().membership(peer.id, 'room:open')).toEqual(IN);
+    expect(await currentGateway().membership(peer.id, 'room:closed')).toEqual(OUT);
+    expect(calls).toEqual(['policy:room:open', 'policy:room:closed']);
+  });
+
+  it('adds a client through a server-side joinRoom() without asking them', async () => {
+    const deny = recordingGuard('class-deny', false);
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(deny)
+    class ServerJoinGateway extends RoomGateway {}
+
+    const app = await boot(ServerJoinGateway);
+    const peer = await connect(app);
+
+    await currentGateway().joinRoom(peer.id, ROOM);
+
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(IN);
+    await broadcastTo(peer);
+    expect(calls).toEqual([]);
   });
 });
 
@@ -1104,6 +1557,165 @@ describe('a join that waits on its guards', () => {
 
     expect(calls).toEqual(['first:out']);
     expect(await owner.storedRoomNames()).toEqual([]);
+  });
+});
+
+describe('a join no @OnJoinRoom handler matches that waits on the gateway-level guards', () => {
+  /** A gateway whose only guard is a gateway-level one that answers when released, and a client of it. */
+  async function behindLateClassGuard(name: string, verdict: boolean): Promise<{ gate: Gate; peer: Peer }> {
+    const gate = gatedGuard(name, verdict);
+
+    @WebSocketGateway({ path: '/ws' })
+    @UseGuards(gate.guard)
+    class LateClassGuardGateway extends RoomGateway {}
+
+    const app = await boot(LateClassGuardGateway);
+    const peer = await connect(app);
+
+    peer.send('join', ROOM, 1);
+    await waitUntil(() => (gate.asked() ? true : undefined), 'the gateway-level guard');
+    await nextTick();
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual([]);
+
+    return { gate, peer };
+  }
+
+  it('keeps the client out until a late gateway-level guard allows, then joins it', async () => {
+    const { gate, peer } = await behindLateClassGuard('class-late', true);
+
+    gate.release();
+    await untilStored(peer.id, ROOM);
+
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(IN);
+    await broadcastTo(peer);
+    expect(calls).toEqual(['class-late:out']);
+  });
+
+  it('keeps the client out before and after a late gateway-level guard denies', async () => {
+    const { gate, peer } = await behindLateClassGuard('class-late', false);
+
+    gate.release();
+
+    expect(await peer.reply(1)).toEqual({ event: 'error', data: { ...FORBIDDEN_DATA, event: 'join' }, ack: 1 });
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(calls).toEqual(['class-late:out']);
+  });
+
+  it('lets a leave cancel it at once, answer it once, and ignore the guard\'s late verdict', async () => {
+    const { gate, peer } = await behindLateClassGuard('class-late', true);
+
+    peer.send('leave', ROOM, 2);
+
+    expect(await peer.reply(1)).toEqual({ event: 'error', data: CANCELLED_BY_LEAVE, ack: 1 });
+    expect(gate.answered()).toBe(false);
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+
+    gate.release();
+    await waitUntil(() => (gate.answered() ? true : undefined), 'the verdict');
+    await peer.drain();
+    expect(peer.frames.filter((frame) => frame.ack === 1)).toHaveLength(1);
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual([]);
+    expect(calls).toEqual(['class-late:out']);
+  });
+
+  it('lets a server-side leaveRoom() cancel it', async () => {
+    const { gate, peer } = await behindLateClassGuard('class-late', true);
+
+    await currentGateway().leaveRoom(peer.id, ROOM);
+
+    expect(await peer.reply(1)).toEqual({ event: 'error', data: CANCELLED_BY_LEAVE, ack: 1 });
+
+    gate.release();
+    await waitUntil(() => (gate.answered() ? true : undefined), 'the verdict');
+    await peer.drain();
+    expect(peer.frames.filter((frame) => frame.ack === 1)).toHaveLength(1);
+    expect(await currentGateway().membership(peer.id, ROOM)).toEqual(OUT);
+    expect(await currentGateway().storedRoomNames()).toEqual([]);
+  });
+
+  it('does not write a client that disconnected while the guard was deciding into the room', async () => {
+    const { gate, peer } = await behindLateClassGuard('class-late', true);
+    const owner = currentGateway();
+
+    peer.close();
+    await waitUntil(async () => ((await owner.storedClient(peer.id)) === null ? true : undefined), 'the disconnect');
+
+    gate.release();
+    await waitUntil(() => (gate.answered() ? true : undefined), 'the verdict');
+    await nextTick();
+
+    expect(await owner.storedMembers(ROOM)).toEqual([]);
+    expect(await owner.storedRoomNames()).toEqual([]);
+    expect(calls).toEqual(['class-late:out']);
+  });
+
+  it('is cancelled and answered at once by a Socket.IO move to a gateway without a hook', async () => {
+    const gate = gatedGuard('public-late', true);
+
+    @WebSocketGateway({ path: '/ws', namespace: 'public' })
+    @UseGuards(gate.guard)
+    class PublicGateway extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws', namespace: 'admin' })
+    class AdminGateway extends RoomGateway {}
+
+    const app = await boot([PublicGateway, AdminGateway], true);
+    const publicGateway = gatewayOf(PublicGateway);
+    const admin = gatewayOf(AdminGateway);
+    const peer = await connectSocketio(app, publicGateway, '&namespace=public');
+
+    peer.send(`421["join","${SECRET}"]`);
+    await waitUntil(() => (gate.asked() ? true : undefined), 'the public gateway-level guard');
+    peer.send('40/admin,');
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+
+    expect(await peer.ack(1)).toEqual([{ event: 'error', data: CANCELLED_BY_MOVE }]);
+    expect(gate.answered()).toBe(false);
+
+    gate.release();
+    await waitUntil(() => (gate.answered() ? true : undefined), 'the verdict');
+    admin.emit(peer.id, 'marker', {});
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"marker"')), 'the marker');
+
+    expect(peer.frames.filter((frame) => frame.startsWith('431['))).toHaveLength(1);
+    expect(await admin.membership(peer.id, SECRET)).toEqual(OUT);
+    expect(await admin.storedRoomNames()).toEqual([]);
+    expect(calls).toEqual(['public-late:out']);
+  });
+
+  it('is waited for by a Socket.IO move to a gateway with a hook, and left at the move', async () => {
+    const gate = gatedGuard('public-late', true);
+
+    @WebSocketGateway({ path: '/ws', namespace: 'public' })
+    @UseGuards(gate.guard)
+    class PublicGateway extends RoomGateway {}
+
+    @WebSocketGateway({ path: '/ws', namespace: 'admin', authenticate: () => ({ userId: 'u-admin' }) })
+    class AdminGateway extends RoomGateway {}
+
+    const app = await boot([PublicGateway, AdminGateway], true);
+    const publicGateway = gatewayOf(PublicGateway);
+    const admin = gatewayOf(AdminGateway);
+    const peer = await connectSocketio(app, publicGateway, '&namespace=public');
+
+    peer.send(`421["join","${SECRET}"]`);
+    await waitUntil(() => (gate.asked() ? true : undefined), 'the public gateway-level guard');
+    peer.send('40/admin,');
+
+    // The admin hook allows the move, and the move waits for the join the public guard is deciding.
+    await Bun.sleep(20);
+    expect(peer.frames.filter((frame) => frame.includes('"connect"'))).toEqual([]);
+    expect(publicGateway.clients.has(peer.id)).toBe(true);
+
+    gate.release();
+    await waitUntil(() => peer.frames.find((frame) => frame.includes('"connect"')), 'the CONNECT answer');
+
+    expect(admin.clients.has(peer.id)).toBe(true);
+    expect(await admin.membership(peer.id, SECRET)).toEqual(OUT);
+    expect(await admin.storedRoomNames()).toEqual([]);
+    expect(calls).toEqual(['public-late:out']);
   });
 });
 

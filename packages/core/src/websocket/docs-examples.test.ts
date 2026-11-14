@@ -43,8 +43,10 @@ import {
   registerDependencies,
   RoomName,
   Service,
+  UseGuards,
   UseWsGuards,
   WebSocketGateway,
+  WsAuthGuard,
   WsPermissionGuard,
 } from '@onebun/core';
 import { makeMockLoggerLayer } from '@onebun/core/testing';
@@ -1018,6 +1020,116 @@ describe('docs/api/websocket.md', () => {
       first.client.disconnect();
       basic.client.disconnect();
       second.client.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * A gateway-level guard decides every client join, also of a room no `@OnJoinRoom` handler
+   * matches: `noUserRoomJoins` keeps clients out of the `user:<id>` rooms only the server fills,
+   * whichever way the client names the room, and `WsAuthGuard` keeps an anonymous client out of
+   * every room. The server-side join in `@OnConnect` asks neither.
+   *
+   * @source docs:api/websocket.md#room-joins-and-leaves
+   */
+  it('lets the gateway-level guards decide a join of a room no @OnJoinRoom handler matches', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      alice: { id: 'u-alice', permissions: [] },
+      bob: { id: 'u-bob', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    // `user:<id>` rooms are filled by the server alone. `getRoomName()` is the room the join would
+    // add the client to, however the client spelled it; on a message handler it is undefined.
+    const noUserRoomJoins = createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:'));
+
+    @WebSocketGateway({
+      path: '/inbox',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id, permissions: user.permissions } : null;
+      },
+    })
+    // Asked on every client join of this gateway, and before each of its handlers.
+    @UseGuards(WsAuthGuard, noUserRoomJoins)
+    class InboxGateway extends BaseWebSocketGateway {
+      @OnConnect()
+      async handleConnect(@Client() client: WsClientData) {
+        // A server-side join asks no guard: only the server puts a client in its `user:<id>` room.
+        await this.joinRoom(client.id, `user:${client.auth?.userId}`);
+      }
+
+      @OnJoinRoom('thread:{threadId}')
+      handleThreadJoin(@RoomName() room: string) {
+        return { event: 'thread:joined', data: { room } };
+      }
+    }
+
+    @Module({ controllers: [InboxGateway] })
+    class InboxModule {}
+
+    const app = new OneBunApplication(InboxModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    const connect = async (token?: string) => {
+      const client = createNativeWsClient({
+        url: wsUrl(app, '/inbox'),
+        ...(token ? { auth: { token } } : {}),
+        timeout: CLIENT_TIMEOUT_MS,
+      });
+      const notes: JsonRecord[] = [];
+      client.on<JsonRecord>('note', (data) => notes.push(data));
+      await client.connect();
+
+      return { client, notes };
+    };
+
+    try {
+      const alice = await connect('alice');
+      const bob = await connect('bob');
+      const anonymous = await connect();
+      const forbidden = (event: string) => ({ code: 'FORBIDDEN', event, message: 'Guard denied this message' });
+
+      // A room a handler declares: open to an authenticated client, closed to an anonymous one.
+      expect(await bob.client.emit<JsonRecord>('join', 'thread:1')).toEqual({ room: 'thread:1' });
+      expect(await anonymous.client.emit<JsonRecord>('join', 'thread:1')).toEqual(forbidden('join'));
+      // A `user:` room no handler declares: closed to every client, whatever the message says.
+      const spellings: [string, unknown][] = [
+        ['join', 'user:u-bob'],
+        ['join', { room: 'user:u-bob' }],
+        ['join:user:u-bob', undefined],
+        ['join:user:u-bob', { room: '' }],
+        ['join:user:u-bob', 5],
+        ['join:user:u-bob', []],
+        ['join:user:u-bob', {}],
+        // Data that names a room wins over the event.
+        ['join:lobby', 'user:u-bob'],
+      ];
+      for (const [event, data] of spellings) {
+        expect(await alice.client.emit<JsonRecord>(event, data)).toEqual(forbidden(event));
+      }
+
+      // The server put bob in his own room; the raw topic follows that membership.
+      const server = app.getServer();
+      await waitUntil(() => {
+        server?.publish('user:u-bob', JSON.stringify({ event: 'note', data: { to: 'u-bob' } }));
+
+        return bob.notes[0];
+      }, 'the note to bob');
+      // Alice's next reply is sent after those publishes, so a note addressed to her would be in first.
+      expect(await alice.client.emit<JsonRecord>('join', 'user:u-bob')).toEqual(forbidden('join'));
+      expect(alice.notes).toEqual([]);
+
+      alice.client.disconnect();
+      bob.client.disconnect();
+      anonymous.client.disconnect();
     } finally {
       await app.stop();
     }

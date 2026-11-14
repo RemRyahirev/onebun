@@ -343,7 +343,10 @@ export interface PatternMatch {
 // ============================================================================
 
 /**
- * Execution context for WebSocket guards
+ * Execution context for WebSocket guards and interceptors. On a room join or leave,
+ * `getRoomName()` is the room it changes.
+ *
+ * @see docs:api/guards.md
  */
 export interface WsExecutionContext {
   /** Transport discriminant for type narrowing in universal handlers */
@@ -358,6 +361,18 @@ export interface WsExecutionContext {
   getHandler(): WsHandlerMetadata;
   /** Get pattern match params */
   getPatternParams(): Record<string, string>;
+  /**
+   * The room a client's `join` or `leave` changes — the one the gateway adds the client to or
+   * removes it from, resolved from the message the way `@RoomName()` receives it — on a guard or
+   * interceptor of a room join or leave, an `@OnJoinRoom` or `@OnLeaveRoom` handler's or the
+   * gateway-level one deciding a join no handler matches. `undefined` on `@OnMessage`,
+   * `@OnConnect` and `@OnDisconnect`. A guard deciding by room reads it here, never from
+   * `getData()`: the data is what the client sent, and a `join:<room>` event names the room only
+   * when the data does not.
+   *
+   * @see docs:api/websocket.md
+   */
+  getRoomName(): string | undefined;
 }
 
 /**

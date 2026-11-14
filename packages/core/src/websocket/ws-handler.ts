@@ -193,9 +193,38 @@ interface GatewayInstance {
   handlers: Map<WsHandlerType, WsHandlerMetadata[]>;
   /** The registry key this gateway is stored under, recorded on every client it admits. */
   key: string;
+  /**
+   * What decides a client join of a room no `@OnJoinRoom` handler matches: the gateway-level
+   * guards, resolved at registration, carried by a handler that has no method — see
+   * `bareRoomJoin`. Absent when the gateway has no gateway-level guards; such a join asks no guard.
+   */
+  bareJoin?: WsHandlerMetadata;
 }
 
-/** An `@OnJoinRoom` handler whose pattern matched the room being joined, with what it captured. */
+/**
+ * The handler a client join of a room no `@OnJoinRoom` handler matches is decided under, so the
+ * gateway-level guards that would have reached it through a matching handler still decide it. It
+ * has no method — `handler` is empty, there is no `pattern` and no parameter — and its guards are
+ * the gateway-level ones, resolved like a handler's list: the same guards, in the same order.
+ */
+function bareRoomJoin(guards: (Function | WsGuard)[]): WsHandlerMetadata {
+  return {
+    type: WsHandlerType.JOIN_ROOM,
+    handler: '',
+    params: [],
+    guards,
+  };
+}
+
+/** How a log line names a handler: its method, or the join of a room no handler matches. */
+function handlerLabel(handler: WsHandlerMetadata): string {
+  return handler.handler || 'a room join no @OnJoinRoom handler matches';
+}
+
+/**
+ * An `@OnJoinRoom` handler whose pattern matched the room being joined, with what it captured — or
+ * a gateway's `bareJoin`, which captures nothing, deciding a room no handler matches.
+ */
 interface MatchedRoomHandler {
   gateway: GatewayInstance;
   handler: WsHandlerMetadata;
@@ -291,7 +320,9 @@ function identityFrom(token: string | undefined, result: WsAuthResult): HookIden
 
 /**
  * The room a `join` / `leave` message names: the data when it is a string, else its `room`
- * field, else what follows the `join:` / `leave:` prefix of the event.
+ * field, else what follows the `join:` / `leave:` prefix of the event. The one room the change is
+ * made to, decided once: the guards read it from their context (`getRoomName()`) and the handlers
+ * receive it through `@RoomName()`, so neither has to repeat this rule on the raw message.
  *
  * `undefined` when that is not a string. Such a message names no room — an array or an object
  * would otherwise reach storage as a key and the pub/sub calls as a topic, and throw there — so
@@ -517,6 +548,15 @@ export class WsHandler {
       handlers.set(handler.type, typeHandlers);
     }
 
+    // A client join of a room no `@OnJoinRoom` handler matches has no handler to carry the
+    // gateway-level guards, so it gets one of its own: the list every handler's starts with,
+    // resolved once, here, the same way.
+    const bareJoin = gatewayGuards.length > 0
+      ? bareRoomJoin(guardBinding
+        ? (guardBinding.resolve(gatewayGuards) as unknown as (Function | WsGuard)[])
+        : gatewayGuards)
+      : undefined;
+
     const key = gatewayKeyFor(metadata);
     const existing = this.gateways.get(key);
     if (existing && existing.instance.constructor !== instance.constructor) {
@@ -537,7 +577,7 @@ export class WsHandler {
     instance._attachSockets(key, sockets, () => this.gateways.size);
 
     this.gateways.set(key, {
-      instance, metadata, handlers, key,
+      instance, metadata, handlers, key, bareJoin,
     });
 
     this.logger.debug(`Registered WebSocket gateway: ${gatewayClass.name} at ${metadata.path}`);
@@ -1730,9 +1770,11 @@ export class WsHandler {
    * changes: those of every handler whose pattern matches the room, in declaration order. One
    * denial keeps the client out — no storage write, no subscription, nothing in `client.rooms` —
    * runs none of the handlers, and is answered with the `FORBIDDEN` frame a denied message gets.
-   * A room no handler matches has no guard to ask and is joined unconditionally. Once every guard
-   * has allowed it, the join and the handlers run as they do without guards: the room change
-   * first, then each handler, without asking its guards a second time.
+   * The gateway-level guards are part of every handler's list; a room no handler matches is
+   * decided by them alone, under a handler without a method (`bareRoomJoin`), and a gateway without
+   * them joins it without asking any guard. Once every guard has allowed it, the join and the
+   * handlers run as they do without guards: the room change first, then each handler, without
+   * asking its guards a second time.
    *
    * A join that asks guards is pending until its room change is made — see `joinAfterGuards`.
    */
@@ -1775,6 +1817,15 @@ export class WsHandler {
       return;
     }
 
+    // No matching handler carries guards — with gateway-level guards that means none matches, as
+    // every handler's list starts with them. They decide the join on their own.
+    if (joinOwner?.bareJoin) {
+      const deciding = [{ gateway: joinOwner, handler: joinOwner.bareJoin, params: {} }];
+      await this.joinAfterGuards(ws, event, data, ackId, roomName, joinOwner, matched, deciding);
+
+      return;
+    }
+
     if (await this.addToRoom(ws, roomName, joinOwner)) {
       await this.runJoinHandlers(ws, event, data, ackId, roomName, matched);
     }
@@ -1788,6 +1839,10 @@ export class WsHandler {
    * immediately, and by a Socket.IO move to another gateway, whose guards it never asked. Whatever
    * its guards say afterwards is ignored. A connection that closed is dropped silently — there is
    * nobody to answer — and asks no further guard.
+   *
+   * @param matched - the `@OnJoinRoom` handlers whose pattern matches the room, run once it is joined
+   * @param deciding - whose guards decide the join: the matched handlers, or the gateway's
+   *   `bareJoin` when none of them carries guards
    */
   private async joinAfterGuards(
     ws: ServerWebSocket<WsClientData>,
@@ -1797,6 +1852,7 @@ export class WsHandler {
     roomName: string,
     joinOwner: GatewayInstance | undefined,
     matched: MatchedRoomHandler[],
+    deciding: MatchedRoomHandler[] = matched,
   ): Promise<void> {
     const join = trackRoomJoin(ws, roomName, (reason) => {
       if (ws.readyState === WS_OPEN) {
@@ -1811,7 +1867,7 @@ export class WsHandler {
 
     let joined = false;
     try {
-      joined = await this.admitAfterGuards(ws, event, data, ackId, join, joinOwner, matched);
+      joined = await this.admitAfterGuards(ws, event, data, ackId, join, joinOwner, deciding);
     } finally {
       untrackRoomJoin(ws, join);
     }
@@ -1833,16 +1889,16 @@ export class WsHandler {
     ackId: number | undefined,
     join: PendingRoomJoin,
     joinOwner: GatewayInstance | undefined,
-    matched: MatchedRoomHandler[],
+    deciding: MatchedRoomHandler[],
   ): Promise<boolean> {
-    for (const { gateway, handler, params } of matched) {
+    for (const { gateway, handler, params } of deciding) {
       if (!handler.guards || handler.guards.length === 0) {
         continue;
       }
       if (!this.joinWanted(ws, joinOwner, join)) {
         return false;
       }
-      const verdict = await this.joinGuardsAllow(gateway, handler, ws, data, params);
+      const verdict = await this.joinGuardsAllow(gateway, handler, ws, data, params, join.room);
       if (verdict !== true) {
         // A join a move stopped was answered when the move cancelled it.
         if (join.cancelled === undefined) {
@@ -1963,7 +2019,8 @@ export class WsHandler {
   }
 
   /**
-   * Ask one `@OnJoinRoom` handler's guards whether the join may happen.
+   * Ask one `@OnJoinRoom` handler's guards — or the gateway's `bareJoin` — whether the join of
+   * `roomName`, the room the join will add the client to, may happen.
    *
    * Fails closed: a guard that throws already denies inside `executeGuards`, and anything else
    * that throws while the guards are asked denies too, because the join would otherwise go ahead
@@ -1975,12 +2032,13 @@ export class WsHandler {
     ws: ServerWebSocket<WsClientData>,
     data: unknown,
     patternParams: Record<string, string>,
+    roomName: string,
   ): Promise<GuardVerdict> {
     try {
-      return await this.guardsAllow(gateway, handler, ws, data, patternParams);
+      return await this.guardsAllow(gateway, handler, ws, data, patternParams, roomName);
     } catch (error) {
       this.logger.error(
-        `WebSocket guards of ${handler.handler} threw on a room join for client ${ws.data.id}, denying: ${error}`,
+        `WebSocket guards of ${handlerLabel(handler)} threw on a room join for client ${ws.data.id}, denying: ${error}`,
       );
 
       return false;
@@ -2060,6 +2118,8 @@ export class WsHandler {
    * client object the guards read — to another gateway, with that gateway's identity. A guard of
    * the gateway that started the message never reads it, and neither does its handler body. A
    * close is not a move: the message of a connection that closed runs on.
+   *
+   * @param roomName - the room a join or leave changes, which the guards read from the context
    */
   private async guardsAllow(
     gateway: GatewayInstance,
@@ -2067,6 +2127,7 @@ export class WsHandler {
     ws: ServerWebSocket<WsClientData>,
     data: unknown,
     patternParams: Record<string, string>,
+    roomName?: string,
   ): Promise<GuardVerdict> {
     const client = ws.data;
     const context = new WsExecutionContextImpl(
@@ -2075,20 +2136,21 @@ export class WsHandler {
       data,
       handler,
       patternParams,
+      roomName,
     );
     const onError = (name: string, error: unknown): void => {
       // The framework's own diagnostic. Before this, a guard that threw denied the message
       // and said nothing anywhere — indistinguishable from a guard that meant to deny.
       this.logger.error(
         `WebSocket guard ${name} threw on ${gateway.metadata?.path ?? '/'} ` +
-        `${handler.handler} for client ${client.id}, denying: ${error}`,
+        `${handlerLabel(handler)} for client ${client.id}, denying: ${error}`,
       );
     };
 
     for (const guard of handler.guards ?? []) {
       if (!(await executeGuards([guard], context, onError))) {
         this.logger.warn(
-          `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
+          `WebSocket guard denied ${handlerLabel(handler)} (${handler.pattern ?? handler.type}) ` +
           `for client ${client.id}`,
         );
 
@@ -2123,7 +2185,7 @@ export class WsHandler {
     // Check guards
     let waited = false;
     if (!guardsChecked && handler.guards && handler.guards.length > 0) {
-      const verdict = await this.guardsAllow(gateway, handler, ws, data, patternParams);
+      const verdict = await this.guardsAllow(gateway, handler, ws, data, patternParams, roomName);
       if (verdict !== true) {
         return verdict === false ? GUARD_DENIED : MOVED_AWAY;
       }
@@ -2189,7 +2251,7 @@ export class WsHandler {
 
     let result: unknown;
     if (intercepted) {
-      const ctx = new WsExecutionContextImpl(client, ws, data, handler, patternParams);
+      const ctx = new WsExecutionContextImpl(client, ws, data, handler, patternParams, roomName);
       result = await composeInterceptors(handler.interceptors ?? [], ctx, handlerFn)();
     } else {
       result = await handlerFn();
