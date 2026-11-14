@@ -384,6 +384,22 @@ describe('NatsQueueAdapter Integration', () => {
       expect(receivedMessage!.id).toBe(sentId);
     });
 
+    it('delivers a message published with undefined data, with data undefined and the publisher\'s id', async () => {
+      // `JSON.stringify` drops `data: undefined`: the envelope a scheduled job returning nothing
+      // publishes carries no `data` key, and reaches the handler like any other.
+      const received: Array<Message<unknown>> = [];
+      await adapter.subscribe('test.nodata', async (msg) => {
+        received.push(msg);
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      const sentId = await adapter.publish('test.nodata', undefined);
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].id).toBe(sentId);
+      expect(received[0].data).toBeUndefined();
+    });
+
     it('should include pattern in received message', async () => {
       let receivedMessage: Message<unknown> | null = null;
       

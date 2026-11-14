@@ -714,7 +714,9 @@ describe('Negative acknowledgement (docs/api/queue.md)', () => {
       ack: mock(() => undefined),
       nak: mock(() => undefined),
       term: mock(() => undefined),
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'events.created', data: {} })),
+      data: new TextEncoder().encode(JSON.stringify({
+        id: 'evt-1', pattern: 'events.created', data: {}, timestamp: 1,
+      })),
       subject: 'events.created',
       info: { redelivered: false },
     };
@@ -786,9 +788,11 @@ describe('Where pattern, params and subject come from (docs/api/queue.md)', () =
   class ResultConsumer {
     readonly seen: Array<Record<string, unknown>> = [];
     readonly refused: Array<string | undefined> = [];
+    readonly payloads: unknown[] = [];
 
     @Subscribe('*.wq.result.{runId}', { group: 'results' })
     async onResult(message: Message<{ status: string }>): Promise<void> {
+      this.payloads.push(message.data);
       const { runId } = message.params;
       if (!/^\d+$/.test(runId)) {
         this.refused.push(message.subject);
@@ -819,7 +823,10 @@ describe('Where pattern, params and subject come from (docs/api/queue.md)', () =
    * out one message delivered on `subject`. Settles on the loop's own disposition — `ack()` after
    * a handler that returned, `term()` after `nack(false)` — so no timer decides when it is done.
    */
-  async function consumeOnJetStream(subject: string): Promise<{ consumer: ResultConsumer; jsMsg: AnyRecord }> {
+  async function consumeOnJetStream(
+    subject: string,
+    body: string = FORGED,
+  ): Promise<{ consumer: ResultConsumer; jsMsg: AnyRecord }> {
     const wire = natsHeaders();
     wire.set('Nats-Msg-Id', 'forged-1');
     let settle!: () => void;
@@ -830,7 +837,7 @@ describe('Where pattern, params and subject come from (docs/api/queue.md)', () =
       ack: mock(() => settle()),
       nak: mock(() => undefined),
       term: mock(() => settle()),
-      data: new TextEncoder().encode(FORGED),
+      data: new TextEncoder().encode(body),
       subject,
       headers: wire,
       info: { redelivered: false, deliveryCount: 1, stream: 'RESULTS' },
@@ -901,6 +908,40 @@ describe('Where pattern, params and subject come from (docs/api/queue.md)', () =
     expect(jsMsg.term).toHaveBeenCalledTimes(1);
   });
 
+  it('hands JetStream an envelope without data as data undefined, as publish(topic, undefined) writes it', async () => {
+    // "`data` may be missing ... and the handler receives `data === undefined`."
+    const { consumer, jsMsg } = await consumeOnJetStream('app-a.wq.result.1', JSON.stringify({
+      id: 'tick-1', pattern: 'app-a.wq.result.1', timestamp: 1, metadata: {},
+    }));
+
+    expect(consumer.payloads).toEqual([undefined]);
+    expect(consumer.seen).toHaveLength(1);
+    expect(jsMsg.ack).toHaveBeenCalledTimes(1);
+    expect(jsMsg.term).not.toHaveBeenCalled();
+  });
+
+  it('delivers on JetStream another producer\'s payload wrapped as { "data": … }', async () => {
+    // "A producer outside OneBun is delivered when it wraps its payload as `{ "data": … }`."
+    const { consumer, jsMsg } = await consumeOnJetStream('app-a.wq.result.1', JSON.stringify({
+      data: { status: 'succeeded' },
+    }));
+
+    expect(consumer.payloads).toEqual([{ status: 'succeeded' }]);
+    expect(jsMsg.ack).toHaveBeenCalledTimes(1);
+    expect(jsMsg.term).not.toHaveBeenCalled();
+  });
+
+  it('terminates on JetStream an object with neither data nor a string id and a numeric timestamp', async () => {
+    // "Anything else is terminated and reported through `onError` with the subject named."
+    const { consumer, jsMsg } = await consumeOnJetStream('app-a.wq.result.1', JSON.stringify({
+      status: 'succeeded',
+    }));
+
+    expect(consumer.payloads).toEqual([]);
+    expect(jsMsg.term).toHaveBeenCalledTimes(1);
+    expect(jsMsg.ack).not.toHaveBeenCalled();
+  });
+
   it('reads subject and headers from the NATS delivery, and has no stream', async () => {
     const adapter = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
     const consumer = new ResultConsumer();
@@ -941,7 +982,7 @@ describe('Dead Letter Queue (docs/api/queue.md)', () => {
       nak: mock(() => undefined),
       term: mock(() => undefined),
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'order-42', pattern: 'orders.created', data: { total: 10 }, metadata: {},
+        id: 'order-42', pattern: 'orders.created', data: { total: 10 }, timestamp: 1, metadata: {},
       })),
       subject: 'orders.created',
       info: { redelivered: deliveryCount > 1, deliveryCount },
@@ -1044,7 +1085,7 @@ describe('Error Handling in Handlers (docs/api/queue.md)', () => {
       nak: mock(() => undefined),
       term: mock(() => undefined),
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'order-1', pattern: 'orders.created', data: { orderId: 'o-1' }, metadata: {},
+        id: 'order-1', pattern: 'orders.created', data: { orderId: 'o-1' }, timestamp: 1, metadata: {},
       })),
       subject: 'orders.created',
       info: { redelivered: deliveryCount > 1, deliveryCount },

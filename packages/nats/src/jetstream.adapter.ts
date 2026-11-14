@@ -253,18 +253,40 @@ interface OneBunEnvelope {
    * message on is the topic, and this field is only the publisher's claim about it.
    */
   pattern?: string;
+  /** Absent when the publisher passed `undefined`: `JSON.stringify` drops the key. */
   data?: unknown;
   timestamp?: number;
   metadata?: MessageMetadata;
 }
 
 /**
- * A JetStream subject can carry messages this framework did not publish. Without this
- * check they reached the handler as `data: undefined`, which reads like an application
- * bug rather than a foreign payload.
+ * Whether a parsed payload is delivered: an object that carries a `data` key, or a plain object
+ * with a string `id` and a numeric `timestamp`.
+ *
+ * The second branch is the shape `publish()` writes when `data` is `undefined`: `JSON.stringify`
+ * drops the key, so `publish(topic, undefined)` — and a `@Cron` or `@Interval` tick whose method
+ * returns nothing, and the dead letter of either — carries no `data`, and its handler receives
+ * `data === undefined`.
+ *
+ * The first branch admits whatever another producer wraps as `{ "data": … }`, with no check on
+ * the other fields: a JetStream stream is an integration surface, and the consume loop fills in a
+ * missing `id`, `timestamp` and `metadata`. The Redis adapter's rule is stricter, because only the
+ * framework writes its queue lists. Anything else — an object with neither, an array, a primitive,
+ * `null` — would reach a handler with an undefined payload that reads like an application bug, so
+ * it is refused.
  */
 function isOneBunEnvelope(value: unknown): value is OneBunEnvelope {
-  return typeof value === 'object' && value !== null && 'data' in value;
+  if (typeof value === 'object' && value !== null && 'data' in value) {
+    return true;
+  }
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const { id, timestamp } = value as { id?: unknown; timestamp?: unknown };
+
+  return typeof id === 'string' && typeof timestamp === 'number';
 }
 
 function poisonMessageError(subject: string, cause: unknown): Error {
@@ -394,9 +416,10 @@ function deadLetterRepublishError(queue: string, pattern: string, cause: unknown
 
 function foreignEnvelopeError(subject: string): Error {
   return new Error(
-    `A JetStream message on subject "${subject}" parsed as JSON but is not a OneBun envelope: it `
-    + 'carries no "data" field. It was terminated rather than delivered to the handler with an '
-    + 'undefined payload. Another producer is publishing to a subject this application subscribes to.',
+    `A JetStream message on subject "${subject}" parsed as JSON but is not a OneBun envelope — an `
+    + 'object with a "data" field, or with a string "id" and a numeric "timestamp". It was terminated '
+    + 'rather than delivered to the handler with an undefined payload. Another producer is publishing '
+    + 'to a subject this application subscribes to; wrap its payload as {"data": ...} to have it delivered.',
   );
 }
 
@@ -2360,9 +2383,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
         // Parsing is its own branch. Folding it together with the handler call meant an
         // ack failure was misread as a parse failure and the message destroyed for it.
-        let messageData: OneBunEnvelope;
+        let parsed: unknown;
         try {
-          messageData = JSON.parse(decoder.decode(msg.data)) as OneBunEnvelope;
+          parsed = JSON.parse(decoder.decode(msg.data));
         } catch (error) {
           this.emit('onError', poisonMessageError(msg.subject, error));
           // Terminated, not acked and not retried: a payload that failed to parse will
@@ -2372,11 +2395,15 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           continue;
         }
 
-        if (!isOneBunEnvelope(messageData)) {
+        // Terminated for the same reason as a parse failure: a payload another producer wrote
+        // does not become an envelope on a redelivery.
+        if (!isOneBunEnvelope(parsed)) {
           this.emit('onError', foreignEnvelopeError(msg.subject));
           msg.term();
           continue;
         }
+
+        const messageData = parsed;
 
         // Matched on the subject the server delivered on, never on the envelope's `pattern`: the
         // envelope is the publisher's to write, and a client allowed to publish on one subject

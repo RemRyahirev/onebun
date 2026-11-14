@@ -18,8 +18,22 @@ import {
 
 
 import type { Message } from '@onebun/core';
-import { matchQueuePattern } from '@onebun/core';
-import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
+import {
+  BaseController,
+  Controller,
+  Cron,
+  Interval,
+  Module,
+  OnQueueError,
+  OneBunApplication,
+  Subscribe,
+  matchQueuePattern,
+} from '@onebun/core';
+import {
+  createNatsContainer,
+  makeMockLoggerLayer,
+  type TestContainer,
+} from '@onebun/core/testing';
 
 import { hashReconcileConfig } from '../src/config-stamp';
 import { JetStreamQueueAdapter } from '../src/jetstream.adapter';
@@ -810,6 +824,298 @@ describe('JetStreamQueueAdapter Integration', () => {
     expect(onlyB[0].params).toEqual({ id: '2' });
   }, CASE_TIMEOUT_MS);
 
+  describe('a message published with undefined data', () => {
+    // `JSON.stringify` drops `data: undefined`, so these envelopes carry no `data` key at all —
+    // and they are the framework's own writes, which the consume loop has to deliver.
+
+    it('delivers publish(topic, undefined) to the handler with data undefined', async () => {
+      const js = makeAdapter('ITEST_NODATA', ['nodata.>']);
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const received: Array<Message<unknown>> = [];
+      await js.subscribe('nodata.direct', async (message) => {
+        received.push(message);
+      }, { group: 'itest-nodata' });
+
+      const id = await js.publish('nodata.direct', undefined);
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].id).toBe(id);
+      expect(received[0].data).toBeUndefined();
+      expect(received[0].subject).toBe('nodata.direct');
+      expect(typeof received[0].timestamp).toBe('number');
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('dead-letters a message without data, and the dead-letter reader receives it', async () => {
+      // The republish writes `message.data` — `undefined` again — so the dead letter is a
+      // data-less envelope too. Refusing it would lose the one copy the queue exists to keep.
+      const js = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [
+          { name: 'ITEST_NODATA_SRC', subjects: ['nodatasrc.>'] },
+          { name: 'ITEST_NODATA_DLQ', subjects: ['nodatadlq.>'] },
+        ],
+      });
+      adapter = js;
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const parked: Array<Message<unknown>> = [];
+      await js.subscribe('nodatadlq.parked', async (message) => {
+        parked.push(message);
+      }, { group: 'itest-nodata-dlq-reader' });
+
+      let attempts = 0;
+      await js.subscribe('nodatasrc.one', async () => {
+        attempts += 1;
+        throw new Error('always fails');
+      }, { group: 'itest-nodata-dlq', deadLetter: { queue: 'nodatadlq.parked', maxRetries: 1 } });
+
+      await js.publish('nodatasrc.one', undefined);
+      await pollUntil(() => parked.length === 1);
+
+      expect(attempts).toBe(1);
+      expect(parked[0].data).toBeUndefined();
+      expect(parked[0].metadata['dlq.originalPattern']).toBe('nodatasrc.one');
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('redelivers a data-less message whose handler throws, and the retry reads data undefined too', async () => {
+      // A redelivery is the same stored message, so it passes the same envelope check again —
+      // a refusal there would turn the retry into a termination.
+      const streamName = 'ITEST_NODATA_RETRY';
+      const group = 'itest-nodata-retry';
+      const js = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects: ['nodataretry.>'] }],
+        consumerConfig: { ackWait: 1_000_000_000 },
+      });
+      adapter = js;
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const seen: Array<{ attempt?: number; data: unknown }> = [];
+      await js.subscribe('nodataretry.one', async (message) => {
+        seen.push({ attempt: message.attempt, data: message.data });
+        if (message.attempt === 1) {
+          throw new Error('first attempt fails');
+        }
+      }, { group, retry: { attempts: 3, delay: 50 } });
+
+      await js.publish('nodataretry.one', undefined);
+      await pollUntil(() => seen.length === 2);
+
+      // The second attempt succeeded and was acknowledged: nothing is left in flight.
+      const jsm = asAny(js).jsm as AnyRecord;
+      await pollUntil(async () => {
+        const info = await jsm.consumers.info(streamName, durableNameFor(group, 'nodataretry.one'));
+
+        return info.num_ack_pending === 0 && info.num_pending === 0;
+      });
+
+      expect(seen).toEqual([{ attempt: 1, data: undefined }, { attempt: 2, data: undefined }]);
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers every tick of a @Cron and an @Interval job whose method returns nothing', async () => {
+      // The decorated method is the data provider, so a method that returns nothing publishes
+      // `undefined` on every tick. Each tick must reach the subscriber; one that was refused
+      // would surface through @OnQueueError instead.
+      const runs = { cron: 0, interval: 0 };
+      const delivered: Record<'cron' | 'interval', Array<Message<unknown>>> = { cron: [], interval: [] };
+      const errors: Error[] = [];
+
+      @Controller('/nodata-ticks')
+      class TickController extends BaseController {
+        @Cron('* * * * * *', { pattern: 'nodatatick.cron', name: 'itest-nodata-cron' })
+        everySecond(): void {
+          runs.cron += 1;
+        }
+
+        @Interval(200, { pattern: 'nodatatick.interval', name: 'itest-nodata-interval' })
+        everyFewMilliseconds(): void {
+          runs.interval += 1;
+        }
+
+        @Subscribe('nodatatick.cron', { group: 'itest-nodata-cron' })
+        async onCronTick(message: Message<unknown>): Promise<void> {
+          delivered.cron.push(message);
+        }
+
+        @Subscribe('nodatatick.interval', { group: 'itest-nodata-interval' })
+        async onIntervalTick(message: Message<unknown>): Promise<void> {
+          delivered.interval.push(message);
+        }
+
+        @OnQueueError()
+        onQueueError(error: Error): void {
+          errors.push(error);
+        }
+      }
+
+      @Module({ controllers: [TickController] })
+      class TickModule {}
+
+      const app = new OneBunApplication(TickModule, {
+        port: 0,
+        loggerLayer: makeMockLoggerLayer(),
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        queue: {
+          adapter: JetStreamQueueAdapter,
+          options: {
+            servers: nats.url,
+            streams: [{ name: 'ITEST_NODATA_TICKS', subjects: ['nodatatick.>'] }],
+          },
+        },
+      });
+      await app.start();
+
+      try {
+        await pollUntil(() => delivered.cron.length >= 2 && delivered.interval.length >= 2);
+      } finally {
+        await app.stop();
+      }
+
+      expect(runs.cron).toBeGreaterThanOrEqual(2);
+      expect(runs.interval).toBeGreaterThanOrEqual(2);
+      for (const message of [...delivered.cron, ...delivered.interval]) {
+        expect(message.data).toBeUndefined();
+      }
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+  });
+
+  describe('payloads another producer publishes raw', () => {
+    // Published raw, each on its own subject, then a framework message as the sync point. One
+    // consumer delivers the stream in sequence order, so once the sync message is handled every
+    // payload before it has been dealt with. The server's terminated advisory is what proves
+    // `term()` — an ack and a term both settle the message, only a term announces itself.
+
+    async function deliverRaw(
+      streamName: string,
+      prefix: string,
+      payloads: ReadonlyArray<readonly [label: string, raw: string]>,
+      expectTerminated: number,
+    ): Promise<{ errors: Error[]; handled: Array<Message<unknown>>; terminated: number }> {
+      const js = makeAdapter(streamName, [`${prefix}.>`]);
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const connection = asAny(js).client.getConnection();
+      let terminated = 0;
+      const advisories = connection.subscribe(`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.${streamName}.>`, {
+        callback() {
+          terminated += 1;
+        },
+      });
+      await connection.flush();
+
+      const handled: Array<Message<unknown>> = [];
+      await js.subscribe(`${prefix}.*`, async (message) => {
+        handled.push(message);
+      }, { group: `itest-${prefix}` });
+
+      const synced = (): boolean => handled.some(message => message.subject === `${prefix}.sync`);
+
+      try {
+        const encoder = new TextEncoder();
+        for (const [index, [, raw]] of payloads.entries()) {
+          await asAny(js).js.publish(`${prefix}.${index}`, encoder.encode(raw));
+        }
+        await js.publish(`${prefix}.sync`, { sync: true });
+
+        await pollUntil(() => synced() && terminated === expectTerminated).catch((cause: unknown) => {
+          const subjects = handled.map(message => message.subject);
+          throw new Error(
+            `handled ${JSON.stringify(subjects)}, ${terminated} terminated, errors ${JSON.stringify(errors.map(e => e.message))}`,
+            { cause },
+          );
+        });
+      } finally {
+        advisories.unsubscribe();
+      }
+
+      return { errors, handled, terminated };
+    }
+
+    it('terminates JSON that is not a OneBun envelope, and reports each one', async () => {
+      // Neither a `data` key nor a string `id` with a numeric `timestamp`. Pinned so the shape
+      // admitted for `publish(topic, undefined)` admits nothing more than that.
+      const payloads = [
+        ['an empty object', '{}'],
+        ['an object from another producer', '{"hello":"world"}'],
+        ['an object with an id but no timestamp', '{"id":"m"}'],
+        ['an object with a timestamp but no id', '{"timestamp":1}'],
+        ['an object whose id is not a string', '{"id":7,"timestamp":1}'],
+        ['an object whose timestamp is not a number', '{"id":"m","timestamp":"1"}'],
+        ['an array', '[1]'],
+        ['a number', '42'],
+        ['a string', '"x"'],
+        ['null', 'null'],
+        ['text that is not JSON', 'not json'],
+      ] as const;
+
+      const { errors, handled, terminated } = await deliverRaw('ITEST_FOREIGN_REFUSED', 'foreignrefused', payloads, payloads.length);
+
+      expect(handled.map(message => message.subject)).toEqual(['foreignrefused.sync']);
+      expect(terminated).toBe(payloads.length);
+      expect(errors).toHaveLength(payloads.length);
+      for (const [index] of payloads.entries()) {
+        expect(errors[index].message).toContain(`"foreignrefused.${index}"`);
+      }
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers an object that carries data whatever its other fields, and a data-less one with an id and timestamp', async () => {
+      // A stream is an integration surface: another producer that wraps its payload as
+      // `{ "data": … }` is delivered, and the consume loop fills in what it left out.
+      const payloads = [
+        ['data and nothing else', '{"data":1}'],
+        ['data whose value is null', '{"data":null}'],
+        ['data with an id that is not a string', '{"id":7,"timestamp":1,"data":2}'],
+        ['data with a timestamp that is not a number', '{"id":"m","timestamp":"1","data":3}'],
+        ['data with metadata that is null', '{"id":"m","timestamp":1,"data":4,"metadata":null}'],
+        ['data with metadata that is an array', '{"id":"m","timestamp":1,"data":5,"metadata":[]}'],
+        ['data with an attempt that is not a number', '{"id":"m","timestamp":1,"data":6,"attempt":"2"}'],
+        ['no data, a string id and a numeric timestamp', '{"id":"m","timestamp":1}'],
+      ] as const;
+
+      const { errors, handled, terminated } = await deliverRaw('ITEST_FOREIGN_DELIVERED', 'foreigndelivered', payloads, 0);
+
+      expect(handled.map(message => message.subject)).toEqual([
+        ...payloads.map((_, index) => `foreigndelivered.${index}`),
+        'foreigndelivered.sync',
+      ]);
+      expect(handled.slice(0, payloads.length).map(message => message.data)).toEqual([1, null, 2, 3, 4, 5, 6, undefined]);
+
+      // A `{ "data": … }`-only payload gets a generated id and the time of receipt.
+      expect(handled[0].id).toEqual(expect.any(String));
+      expect(handled[0].timestamp).toBeGreaterThan(1);
+      expect(handled[0].metadata).toEqual({});
+
+      expect(terminated).toBe(0);
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+  });
+
   it('counts attempts across real redeliveries', async () => {
     // The server is the only thing that can increment a delivery count, so the 1, 2, 3
     // progression the documented retry recipe branches on needs a real broker to prove.
@@ -1259,6 +1565,41 @@ describe('JetStreamQueueAdapter Integration', () => {
         durableNameFor(group, 'wqbacklog.run'),
       );
       expect(consumer.config.deliver_policy).toBe(DeliverPolicy.All);
+    }, CASE_TIMEOUT_MS);
+
+    it('hands a data-less task to its worker, and only the acknowledgement deletes it', async () => {
+      // `publish(topic, undefined)` on a workqueue: a termination there deletes the task before any
+      // handler sees it, so the task must still be stored while its handler runs.
+      const streamName = 'ITEST_WQ_NODATA';
+      const group = 'itest-wq-nodata';
+      const producer = makeStreamAdapter(streamName, ['wqnodata.>']);
+      await producer.connect();
+
+      await producer.publish('wqnodata.run', undefined);
+      expect(await storedMessages(producer, streamName)).toBe(1);
+
+      const worker = makeStreamAdapter(streamName, ['wqnodata.>']);
+      await worker.connect();
+
+      const errors: Error[] = [];
+      worker.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const received: Array<Message<unknown>> = [];
+      let storedWhileHandling = -1;
+      await worker.subscribe('wqnodata.run', async (message) => {
+        storedWhileHandling = await storedMessages(producer, streamName);
+        received.push(message);
+        await message.ack();
+      }, { group, ackMode: 'manual' });
+
+      await pollUntil(() => received.length === 1);
+      expect(storedWhileHandling).toBe(1);
+      expect(received[0].data).toBeUndefined();
+
+      await pollUntil(async () => await storedMessages(producer, streamName) === 0);
+      expect(errors).toEqual([]);
     }, CASE_TIMEOUT_MS);
 
     it('hands a restarted worker of the same group what was published while it was offline', async () => {

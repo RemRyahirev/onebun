@@ -840,13 +840,36 @@ Everything else on the message is the publisher's word, on every adapter: `id`, 
 `timestamp` and `metadata` — `metadata.headers`, `authorization` and `serviceId` included — arrive
 exactly as written. `headers` is never merged into `metadata.headers`.
 
-A Redis queue list is a plain key that anything with keyspace access can push onto. An entry that
-is not what `publish()` writes — not JSON, not an object, or an object without a string `id` and a
-numeric `timestamp`, or with a `metadata` that is not an object or an `attempt` that is not a
-number — is removed from the list and reported through `onError` with the topic named; no handler
-receives it. `data` may be missing: `publish(topic, undefined)`, and a `@Cron` or `@Interval`
-method that returns nothing, write an entry without it, and the handler receives
-`data === undefined`.
+`publish()` writes a JSON envelope with a string `id`, a numeric `timestamp`, `metadata` and the
+`data`. `data` may be missing: `publish(topic, undefined)`, a `@Cron` or `@Interval` method that
+returns nothing, and the dead letter of either write an envelope without it, and the handler
+receives `data === undefined` on every adapter. What else an adapter accepts depends on who can
+write to its queues:
+
+- **Redis** — a queue list is a plain key that only the framework is meant to write, though
+  anything with keyspace access can push onto it. An entry is delivered when it is an object with
+  a string `id` and a numeric `timestamp`, whose `metadata`, when present, is an object and whose
+  `attempt`, when present, is a number. Anything else is removed from the list and reported through
+  `onError` with the topic named; no handler receives it.
+- **JetStream** — a stream is an integration surface: another producer can publish to a subject it
+  binds. A payload is delivered when it is an object that carries a `data` key, whatever its other
+  fields, or an object with a string `id` and a numeric `timestamp`. Both shapes let another
+  producer's JSON through:
+  - wrapped as `{ "data": … }`, its payload arrives as `data`; a missing `id` is generated, a
+    missing `timestamp` is the time of receipt, and missing `metadata` is `{}`;
+  - an object with a string `id`, a numeric `timestamp` and no `data` key is taken for a framework
+    envelope published with `undefined`. It reaches the handler with `data` undefined — its other
+    fields are not on the `Message` — and is acknowledged like any delivered message, which on a
+    work-queue stream deletes it. A handler on a stream other producers publish to must treat
+    `data === undefined` as possible.
+
+  Anything else is terminated and reported through `onError` with the subject named; no handler
+  receives it (see *Messages the adapter cannot read* under
+  [JetStreamQueueAdapter](#jetstreamqueueadapter)).
+- **Core NATS** — the shape is not checked: any JSON value other than `null` reaches the handler,
+  with `data` undefined when it carries none. `null`, and a payload that does not parse, are
+  reported through `onError`.
+- **In-memory** — there is no envelope.
 
 <llm-only>
 
@@ -854,6 +877,9 @@ method that returns nothing, write an entry without it, and the handler receives
 - JetStream: the consume loop matches `entry.matcher(msg.subject)`; `JetStreamMessage` sets `pattern` and `subject` from `jsMsg.subject` in its constructor, `stream` from `jsMsg.info.stream` (the driver parses the reply subject once and caches it — the same `info` the `redelivered` and `attempt` reads use). `headers` is an OWN enumerable property, so `{ ...message }` and `Object.assign` carry it as they carry core NATS's: the constructor installs it as an accessor from the shared static descriptor `JetStreamMessage.lazyHeaders`, and the first read or write replaces it with a writable data property (`settleHeaders`) holding `toHeaderMap(jsMsg.headers)` (`packages/nats/src/nats-client.ts`) or the assigned value. Nothing reads `jsMsg.headers` — whose driver getter decodes the header block — unless something reads `message.headers`. The field is `declare`d, because a class field would define a data property before the constructor runs. On a message frozen or sealed before the first read the accessor cannot be replaced; `settleHeaders` then keeps the value in the static `WeakMap` `unsettledHeaders`, which the accessor reads, so the read still returns one map. Measured in Bun: the per-instance `defineProperty` costs about 45–50 ns per message
 - Core NATS: `processMessage()` matches `entry.matcher(natsMsg.subject)`; `NatsQueueMessage` takes `pattern`, `subject` and `headers` from the `NatsMessage` frame. `headers` is the frame's own map, which `NatsClient.subscribe()` already built with `toHeaderMap()` — passed by reference, not converted again
 - Redis: `drainTopic()` reads each claimed entry through `parseQueueEnvelope(raw, topic)`, which throws an error naming the topic for invalid JSON, a non-object (array, number, string, null), or an object that lacks a string `id` or a numeric `timestamp`, or whose `metadata` is not an object or `attempt` not a number. It does NOT require a `data` key: `JSON.stringify` drops `data: undefined`, so the framework's own `publish(topic, undefined)` — and every `@Cron`/`@Interval` tick whose method returns nothing — writes an entry without one; the existing catch in `drainTopic()` emits it as `onError` and the drain moves on. The envelope's `pattern` is not checked. It then assigns `messageData.pattern = topic` — the topic of the list `LPOP` just claimed from — before `processMessage()` reads anything. Every reader downstream (the match, `Message.pattern`/`subject`, `requeue()`, `scheduleRetry()`, the wake frame, `dlq.originalPattern`) reads that one field, so a forged envelope cannot move a message onto another list through a retry. On the publish side the field is the routing key: `publish()` pushes to `queue(pattern)`, and the delayed and priority promoters push to `queue(messageData.pattern)`, so for every message `publish()` wrote the claimed topic and the envelope agree
+- JetStream envelope check: the consume loop parses into `unknown` and runs `isOneBunEnvelope(parsed)` (`packages/nats/src/jetstream.adapter.ts`), which accepts `typeof value === 'object' && value !== null && 'data' in value` — any object carrying a `data` key, its other fields unchecked — OR a non-null, non-array object with `typeof id === 'string'` and `typeof timestamp === 'number'`, the shape `publish()` writes when `JSON.stringify` drops `data: undefined`. The second branch cannot distinguish a framework envelope from another producer's object that happens to carry a string `id` and a numeric `timestamp`: that object is delivered with `data` undefined, its other top-level fields dropped, and acked like any delivered message. `routeToDeadLetter()` republishes `message.data` through `publish()`, so the dead letter of a data-less message is data-less too and passes the second branch on the dead-letter subscription. `pattern`, `metadata` and `attempt` are not checked: a `{ "data": … }` payload's `id`, `timestamp` and `metadata` go through the consume loop's fallbacks (`messageData.id || generateMessageId()`, `messageData.timestamp || Date.now()`, `messageData.metadata || {}`) as they are, so a non-string `id` or a truthy non-object `metadata` reaches `Message` unchanged. A failed check emits `foreignEnvelopeError(msg.subject)` and calls `msg.term()`, ahead of the subject match, so a stray foreign payload is terminated rather than acked
+- The JetStream rule is deliberately wider than Redis's `parseQueueEnvelope`: a Redis queue list is framework-internal, while a JetStream stream is an integration surface where other producers publish `{ "data": … }`. The two predicates are separate functions in their own packages and are not meant to converge
+- Core NATS: `processMessage()` checks no shape — whatever `JSON.parse` returns is read with `id || generateMessageId()`, `timestamp || Date.now()` and `metadata || {}`, so a data-less envelope is delivered with `data` undefined and so is any other producer's JSON. A `null` body throws on the property read and is reported through the same `onError` as a parse failure. Core NATS has no `term()`, so reporting is the only refusal it could make
 - In-memory: `InMemoryMessage` sets `subject` to the topic `dispatch()` was called with, the same value as `pattern`
 - The Redis, NATS and JetStream `publish()` write the envelope's `pattern` field (the in-memory adapter has no envelope). Redis needs it to route delayed and priority messages; on NATS and JetStream nothing reads it on delivery. `OneBunEnvelope.pattern` in `jetstream.adapter.ts` documents that
 - JetStream dead-lettering records `dlq.originalPattern: msg.subject` — the delivery subject, through the same `message.pattern` value the handler saw
@@ -1685,7 +1711,11 @@ One consequence is unavoidable and worth planning for: deleting a consumer destr
 
 `heartbeats_missed` and `stream_not_found` are reported to `@OnQueueError` as well but are deliberately not repaired: a missing stream is an operator problem, and re-creating a consumer against a stream that does not exist cannot help.
 
-**Messages the adapter cannot read.** A payload that fails to parse, or one that parses as JSON but carries no `data` field and so is not a OneBun envelope, is `term()`ed — terminated on the server and never redelivered — and the failure is emitted to `@OnQueueError` with the subject and the underlying parse error. It is not acknowledged and it is not retried: a payload that does not parse will not parse on a redelivery either, so `maxDeliver` attempts would only spend the acknowledgement window on a message that can never succeed. The message is never handed to your handler with an undefined payload. This most often means another producer publishes to a subject this application subscribes to.
+**Messages the adapter cannot read.** A payload that fails to parse, or one that parses as JSON but is not a OneBun envelope — neither an object with a `data` key nor an object with a string `id` and a numeric `timestamp` (see [where `pattern`, `params` and `subject` come from](#message-subject)) — is `term()`ed: terminated on the server and never redelivered. The failure is emitted to `@OnQueueError` with the subject, and for a parse failure the underlying parse error. It is not acknowledged and it is not retried: a payload that does not parse will not parse on a redelivery either, so `maxDeliver` attempts would only spend the acknowledgement window on a message that can never succeed. Such a payload never reaches your handler. It most often means another producer publishes to a subject this application subscribes to.
+
+An envelope without `data` is not foreign. `JSON.stringify` drops `data: undefined`, so `publish(topic, undefined)`, every tick of a `@Cron` or `@Interval` method that returns nothing, and the dead letter of such a message are written without it. They are delivered like any other message, and the handler receives `data === undefined`.
+
+The adapter cannot tell such an envelope from another producer's JSON. A payload another producer wrote is delivered when it carries a `data` key, and also when it is an object with a string `id` and a numeric `timestamp` and no `data` key: that one reaches the handler with `data` undefined, its other fields not on the `Message`, and is acknowledged like any delivered message — on a [work-queue stream](#work-queue-streams) the acknowledgement deletes it. A handler on a stream that other producers publish to must treat `data === undefined` as possible.
 
 Errors from the consume loop itself — a vanished consumer, a broken connection — reach `@OnQueueError` as well, so a failing consumer is never indistinguishable from an idle one.
 

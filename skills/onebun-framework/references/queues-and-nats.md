@@ -82,10 +82,15 @@ has. Within its grant the publisher still picks the subject, wildcard tokens inc
 subscription pattern itself matches as a literal with `params` `{}`. **Validate `params` values like any other
 input.** `metadata` (`serviceId`, `authorization`, `headers`), `id`, `timestamp` and `data` are the publisher's
 own claims on every adapter. A Redis subject proves only keyspace access: delayed and priority messages are
-routed by their envelope, and a list entry that is not a OneBun envelope (an object with a string `id` and a
-numeric `timestamp`; `metadata` an object and `attempt` a number when present) goes to `onError` naming the
-topic, never to a handler. `data` may be absent — `publish(topic, undefined)` and a job method returning
-nothing write no `data` key — and arrives as `undefined`. `subject` is optional in the type so
+routed by their envelope. What counts as an envelope differs per adapter. Redis (framework-internal lists):
+an object with a string `id` and a numeric `timestamp` (`metadata` an object and `attempt` a number when
+present); anything else goes to `onError` naming the topic. JetStream (an integration surface): an object
+with a `data` key, other fields unchecked — so another producer's `{ "data": … }` is delivered, with a
+generated `id`, receive-time `timestamp` and `{}` metadata filling the gaps — or an object with a string `id`
+and a numeric `timestamp`, a foreign one included (it arrives with `data` undefined and is acked); anything
+else is `term()`ed and reported naming the subject. Core NATS checks no
+shape. `data` may be absent — `publish(topic, undefined)`, a job method returning nothing, and the dead
+letter of either write no `data` key — and arrives as `undefined` on every adapter. `subject` is optional in the type so
 hand-built test doubles compile — built-in adapters always set it. `headers` is an own property on both NATS
 adapters, so `{ ...message }` keeps it.
 
@@ -712,7 +717,7 @@ Key JetStream behaviors:
   subscription take over the first's consumer. The same group with the *same* pattern resolves to
   a single durable, which is exactly what lets several instances share the work. Durables outlive unsubscribe, disconnect and restarts and are
   never deleted implicitly — drop one with `nats consumer rm <stream> <consumer>`
-- **Poison messages**: a payload that fails to parse, or valid JSON that is not a OneBun envelope, is `term()`ed and reported to `@OnQueueError` — never acked, never retried, never handed to the handler as `undefined`. Consume-loop errors reach `@OnQueueError` too rather than being swallowed.
+- **Poison messages**: a payload that fails to parse, or valid JSON that is not a OneBun envelope (neither an object with a `data` key nor one with a string `id` + numeric `timestamp`), is `term()`ed and reported to `@OnQueueError` — never acked, never retried, never handed to the handler. An envelope without `data` but with `id` + `timestamp` is one: a `@Cron`/`@Interval` method that returns nothing publishes it, and the handler receives `data === undefined`. Another producer's JSON gets through either shape: `{ "data": … }` arrives as `data`; an object with a string `id` + numeric `timestamp` and no `data` is taken for a data-less framework envelope — delivered with `data` undefined, its other fields not on the `Message`, and acked (deleted on a workqueue). On a stream shared with other producers, a handler must treat `data === undefined` as possible. Consume-loop errors reach `@OnQueueError` too rather than being swallowed.
 - **Consumer lifecycle**: framework-generated ephemerals (no `group`) are deleted on `unsubscribe()` and `disconnect()`; `group` durables are never deleted implicitly, because `QueueService.stop()` unsubscribes on every graceful shutdown and a durable exists to survive restarts. Delete one deliberately with `nats consumer rm <stream> <consumer>`.
 - **A `group` is a PERMANENT server resource on JetStream — never template it per run or per deploy.** The durable is named `${group}--${filterSubject}--${digest}`, so a group built from a build number, pod name or timestamp leaves a new orphaned consumer behind every deploy, each holding its own position and `max_ack_pending` budget. Name the ROLE. Note the same option means something else on `NatsQueueAdapter`: there it is a stateless NATS queue group that dies with its members.
 - **Decommission a durable in code with `deleteDurableConsumer(pattern, group)`** — not on the `QueueAdapter` interface (only JetStream has durables), so it needs `queueService.getAdapter() as JetStreamQueueAdapter`. Returns `true` when one was removed and `false` when there was none, so it is safe to call twice; rethrows a permissions denial rather than reporting it as already gone; and resolves the stream through the SAME `resolveStreamForSubject` that `subscribe()` uses — it must, or it could not decommission what `subscribe()` created. Re-subscribing afterwards creates a fresh durable with `deliver_policy: new`, so the old position is gone for good — except on a workqueue stream, where the fresh durable is `deliver_policy: all` and receives every task still stored.

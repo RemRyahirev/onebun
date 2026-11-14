@@ -127,6 +127,17 @@ function makeMockJsMsg(overrides: Partial<AnyRecord> = {}): AnyRecord {
 }
 
 /**
+ * A body as `publish()` writes it, with the case's own fields on top. The consume loop takes an
+ * object for a OneBun envelope when it carries a `data` key, or a string `id` and a numeric
+ * `timestamp`; this body has all three, so a case that overrides one still delivers.
+ */
+function envelopeJson(fields: AnyRecord = {}): string {
+  return JSON.stringify({
+    id: 'msg-1', pattern: 'test.topic', data: {}, timestamp: 1, metadata: {}, ...fields,
+  });
+}
+
+/**
  * A consumer whose `consume()` resolves ONE stable handle. After the seeded
  * messages the iterator parks on a deferred instead of ending, so the adapter's
  * 100ms restart at `jetstream.adapter.ts:619-622` never fires and no test leaks
@@ -3852,7 +3863,7 @@ describe('subscription lifecycle: the pull loop', () => {
   it('nacks a message it pulled but will not process', async () => {
     // A message dropped by pause or unsubscribe used to be abandoned, holding an ack
     // slot until ack_wait expired.
-    const jsMsg = makeMockJsMsg({ data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })) });
+    const jsMsg = makeMockJsMsg({ data: new TextEncoder().encode(envelopeJson()) });
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([jsMsg, jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
@@ -3945,8 +3956,72 @@ describe('poison messages', () => {
     expect(raw.term).toHaveBeenCalled();
   });
 
+  it('delivers what publish(topic, undefined) writes, with data undefined', async () => {
+    // `JSON.stringify` drops `data: undefined`: this is the envelope of a `@Cron` or `@Interval`
+    // method that returns nothing, and it is the framework's own write.
+    const { adapter: publisher, mockJs } = makeConnectedAdapter();
+    const id = await publisher.publish('test.topic', undefined);
+    const [, wire] = asAny(mockJs.publish).mock.calls[0] as [string, Uint8Array];
+    expect(Object.keys(JSON.parse(new TextDecoder().decode(wire)) as object)).not.toContain('data');
+
+    const { errors, seen, raw } = await deliver(makeMockJsMsg({ data: wire }), { ackMode: 'auto' });
+
+    expect(seen).toEqual([undefined]);
+    expect(errors).toEqual([]);
+    expect(raw.ack).toHaveBeenCalled();
+    expect(raw.term).not.toHaveBeenCalled();
+    expect(id).toEqual(expect.any(String));
+  });
+
+  // An object that carries `data` is delivered whatever else it carries or lacks: a stream is an
+  // integration surface, and another producer may wrap its payload as `{ "data": … }`.
+  for (const [label, body, data] of [
+    ['data and nothing else', '{"data":1}', 1],
+    ['data whose value is null', '{"data":null}', null],
+    ['data with an id that is not a string', '{"id":7,"timestamp":1,"data":2}', 2],
+    ['data with a timestamp that is not a number', '{"id":"m","timestamp":"1","data":3}', 3],
+    ['data with metadata that is null', '{"id":"m","timestamp":1,"data":4,"metadata":null}', 4],
+    ['data with metadata that is an array', '{"id":"m","timestamp":1,"data":5,"metadata":[]}', 5],
+    ['data with an attempt that is not a number', '{"id":"m","timestamp":1,"data":6,"attempt":"2"}', 6],
+    ['no data, a string id and a numeric timestamp', '{"id":"m","timestamp":1}', undefined],
+  ] as const) {
+    it(`delivers ${label} to the handler and acknowledges it`, async () => {
+      const { errors, seen, raw } = await deliver(payload(body), { ackMode: 'auto' });
+
+      expect(seen).toEqual([data]);
+      expect(errors).toEqual([]);
+      expect(raw.ack).toHaveBeenCalledTimes(1);
+      expect(raw.term).not.toHaveBeenCalled();
+    });
+  }
+
+  // Neither a `data` key nor a string `id` with a numeric `timestamp`: nothing a OneBun publisher
+  // writes, and nothing that would reach a handler as more than an undefined payload.
+  for (const [label, body] of [
+    ['an empty object', '{}'],
+    ['an object with an id but no timestamp', '{"id":"m"}'],
+    ['an object with a timestamp but no id', '{"timestamp":1}'],
+    ['an object whose id is not a string', '{"id":7,"timestamp":1}'],
+    ['an object whose timestamp is not a number', '{"id":"m","timestamp":"1"}'],
+    ['an array', '[1]'],
+    ['a number', '42'],
+    ['a string', '"x"'],
+  ] as const) {
+    it(`terminates ${label} and reports it, without calling the handler`, async () => {
+      const { errors, seen, raw } = await deliver(payload(body), { ackMode: 'auto' });
+
+      expect(seen).toHaveLength(0);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain('"test.topic"');
+      expect(errors[0].message).toContain('not a OneBun envelope');
+      expect(raw.term).toHaveBeenCalledTimes(1);
+      expect(raw.ack).not.toHaveBeenCalled();
+      expect(raw.nak).not.toHaveBeenCalled();
+    });
+  }
+
   it('leaves a healthy message completely unaffected', async () => {
-    const raw = payload(JSON.stringify({ pattern: 'test.topic', data: { ok: true } }));
+    const raw = payload(envelopeJson({ data: { ok: true } }));
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([raw]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
@@ -3977,7 +4052,7 @@ describe('poison messages', () => {
   it('reports an ack failure as an ack failure, not as a parse failure', async () => {
     // The old catch wrapped both branches, so a throwing ack() was reported — and
     // handled — as if the payload had been unparseable.
-    const raw = payload(JSON.stringify({ pattern: 'test.topic', data: {} }));
+    const raw = payload(envelopeJson());
     raw.ack = mock(() => {
       throw new Error('ack transport failure');
     });
@@ -4327,7 +4402,7 @@ describe('graceful shutdown: in-flight handlers', () => {
   /** A connected adapter whose consumer yields exactly one well-formed envelope. */
   function withOneMessage() {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
     });
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([jsMsg]);
@@ -4619,6 +4694,7 @@ describe('dead-letter queue: disposition', () => {
         id: 'original-id',
         pattern: 'test.topic',
         data: { n: 1 },
+        timestamp: 1,
         metadata: { traceId: 'trace-1' },
       })),
       info: { redelivered: deliveryCount > 1, deliveryCount },
@@ -4678,7 +4754,7 @@ describe('dead-letter queue: disposition', () => {
 
   async function deliverFailingWithBrokenPublish() {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: true, deliveryCount: 3 },
     });
     const { adapter, mockJs } = makeConnectedAdapter();
@@ -4802,7 +4878,7 @@ describe('dead-letter queue: disposition', () => {
 
     it('still lets a handler\'s own nack(false) route to the dead-letter queue', async () => {
       const jsMsg = makeMockJsMsg({
-        data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+        data: new TextEncoder().encode(envelopeJson()),
         info: { redelivered: false, deliveryCount: 1 },
       });
       const { adapter, mockJs } = makeConnectedAdapter();
@@ -4849,7 +4925,7 @@ describe('a handler that nacks and returns normally', () => {
   ) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'nack-id', pattern: 'test.topic', data: {},
+        id: 'nack-id', pattern: 'test.topic', data: {}, timestamp: 1,
       })),
       info: { redelivered: false, deliveryCount: 1 },
     });
@@ -4917,7 +4993,7 @@ describe('dead-letter queue: manual nack', () => {
   async function deliverManual(options: AnyRecord) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'manual-id', pattern: 'test.topic', data: {},
+        id: 'manual-id', pattern: 'test.topic', data: {}, timestamp: 1,
       })),
       info: { redelivered: false, deliveryCount: 1 },
     });
@@ -5031,7 +5107,7 @@ describe("ackMode 'none': consumer config", () => {
 describe("ackMode 'none': the loop acknowledges nothing", () => {
   async function deliverUnder(handler: () => Promise<void>) {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -5066,7 +5142,7 @@ describe("ackMode 'none': the loop acknowledges nothing", () => {
     // gated by acknowledgesAutomatically, but a handler calling nack(false) itself
     // reaches the router closure directly — so the closure is what has to be gated.
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter, mockJs } = makeConnectedAdapter();
@@ -5096,7 +5172,7 @@ describe('Message.attempt and Message.maxAttempts', () => {
   /** Delivers one message at the given delivery count and hands back what the handler saw. */
   async function deliveredAt(deliveryCount: number, options: AnyRecord = {}) {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: deliveryCount > 1, deliveryCount },
     });
     const { adapter, mockJsm } = makeConnectedAdapter();
@@ -5498,7 +5574,7 @@ describe('retry.backoff and retry.delay', () => {
     overrides: Partial<JetStreamAdapterOptions> = {},
   ): Promise<unknown[]> {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: deliveryCount > 1, deliveryCount },
     });
     const { adapter } = makeConnectedAdapter(overrides);
@@ -5576,7 +5652,7 @@ describe('retry.backoff and retry.delay', () => {
 
   it('is not sent under ackMode: none, where nothing is acknowledged at all', async () => {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -5593,7 +5669,7 @@ describe('retry.backoff and retry.delay', () => {
 
   it('keeps manual nack(true) immediate — it is the handler itself asking, not a policy', async () => {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -6030,7 +6106,7 @@ describe('delivery subject: pattern and params follow the subject, not the envel
   it('matches on the subject when the envelope carries no pattern at all', async () => {
     const jsMsg = makeMockJsMsg({
       subject: 'test.orders.7',
-      data: new TextEncoder().encode(JSON.stringify({ data: { n: 1 } })),
+      data: new TextEncoder().encode(JSON.stringify({ id: 'n-2', data: { n: 1 }, timestamp: 1 })),
     });
     const message = await consume('test.orders.{id}', jsMsg);
 
