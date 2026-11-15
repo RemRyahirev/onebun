@@ -2,6 +2,79 @@
 
 ## 0.9.0 — 2026-11-15
 
+### Package Versions
+
+Every package moves together. `workspace:^` is rewritten to `^<version>` at publish time and a
+caret on a 0.x version pins the minor, so once one package crosses a minor, everything that depends
+on it must cross with it — otherwise an install resolves two copies of the same package. The
+packages that declare `@onebun/core` as a peer (`@onebun/cache`, `@onebun/docs`, `@onebun/drizzle`,
+`@onebun/nats`) require `^0.9.0`: `@onebun/nats` imports queue helpers that exist only from core
+0.9.0. Update the `@onebun/*` packages together.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.8.2 | 0.9.0 |
+| `@onebun/requests` | 0.8.2 | 0.9.0 |
+| `@onebun/nats` | 0.8.2 | 0.9.0 |
+| `@onebun/drizzle` | 0.8.2 | 0.9.0 |
+| `@onebun/logger` | 0.8.2 | 0.9.0 |
+| `@onebun/trace` | 0.8.2 | 0.9.0 |
+| `@onebun/metrics` | 0.8.2 | 0.9.0 |
+| `@onebun/create` | 0.8.2 | 0.9.0 |
+| `@onebun/cache` | 0.8.0 | 0.9.0 |
+| `@onebun/docs` | 0.8.0 | 0.9.0 |
+| `@onebun/envs` | 0.8.0 | 0.9.0 |
+
+`@onebun/cache`, `@onebun/docs`, `@onebun/envs`, `@onebun/trace` and `@onebun/metrics` carry no
+change of their own in this release; they move with the line. `bun create @onebun` scaffolds new
+projects on `@onebun/core` `^0.9.0`.
+
+### Read This First
+
+This is a breaking release. Ten entries are marked **BREAKING**, each with what to change; read
+those before upgrading. They fall into four groups:
+
+- **Guards.** `AuthGuard` is `BearerPresenceGuard` and `MessageAuthGuard` is
+  `MessageAuthorizationPresenceGuard` — both only check that a credential is present — and
+  `RolesGuard` takes its `rolesExtractor` as a required argument: the `x-user-roles` header default
+  is gone.
+- **One wire form.** Whatever a handler returns that is not a `Response` is sent as
+  `{ success: true, result }`, on every route.
+- **HTTP client and service client.** A failed request rejects with a OneBun error class instead of
+  an Effect `FiberFailure`, and a service-client call resolves with the value the handler returned.
+  A generated call takes arguments only for `@Param`, `@Query` and `@Body`, encodes every path value
+  itself, and passes query arrays and body values through as given.
+- **Dependency injection and boot.** A provider whose constructor throws fails the boot with
+  `ServiceConstructionError`; a decorated class without its own constructor is injected with the
+  dependencies of the one it inherits; `onModuleInit` of an imported module's services completes
+  before the importing module's.
+
+A second set of entries is not marked breaking but changes what a running application does. Each
+names what to check:
+
+- **Access control on WebSocket gateways** — the three Security entries. A guard that denies
+  `@OnJoinRoom` now keeps the client out of the room; a gateway-level guard decides every client
+  join, including rooms no handler declares; a Socket.IO client that moves to another namespace is
+  authenticated by that gateway's own `authenticate` hook, and a move from a gateway with a hook to
+  one without is refused. A guard on a base method now applies to an overriding handler on HTTP and
+  WebSocket as it did on the queue. If a gateway relied on any of the old gaps, clients that got in
+  before are refused after the upgrade.
+- **Queues.** `retry.attempts` of 0 or below means "no limit" on the memory and Redis adapters, as
+  on JetStream; the handler pattern and `params` come from the subject a message was delivered on,
+  not from the publisher's envelope; a failed `publish()` throws `QueuePublishError`, whose message
+  text differs from the plain `Error` it replaces.
+- **Logging.** The error-level `Unhandled error in <Controller>.<handler>:` line is written only when
+  none of your exception filters answered the error. Alerting keyed on that line for errors a filter
+  answers must move to the filter's own logging.
+
+The rest are fixes and additions that need no code change: binary request bodies in
+`@onebun/requests`, transaction isolation level and access mode in `@onebun/drizzle`,
+`retry.maxDelay`, native NATS wildcards in subscription patterns, a JetStream fix for jobs that
+return nothing, and a logger that no longer loses lines on a full pipe.
+
+Most entries answer reports from consumers of the framework; the breaking set was held back from
+0.8.2 for this minor.
+
 ### Added
 
 - @onebun/drizzle: `DrizzleService.transaction(callback, options)` takes the isolation level and access mode of the transaction on PostgreSQL — `{ isolationLevel: 'read committed' | 'repeatable read' | 'serializable', accessMode: 'read write' | 'read only' }`, typed `PostgreSQLTransactionOptions` (with `PostgreSQLIsolationLevel` and `PostgreSQLAccessMode`). The settings are applied before the callback runs, so every repository and service called inside the callback runs under them too — for example `{ isolationLevel: 'repeatable read', accessMode: 'read only' }` gives a response assembled from several queries one consistent snapshot without passing `tx` around. A nested transaction is a savepoint and runs under the outermost transaction's settings: it may repeat them or pass none, and asking for anything else — a different value, or an option the outermost call did not set — throws `DrizzleTransactionError` with code `POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH` before its callback runs. On SQLite any option throws `SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED` before the callback runs; an unknown option or value throws `TRANSACTION_OPTIONS_INVALID` on both dialects. A `DrizzleService.transaction(callback)` call without options behaves as it does without this feature. (FB-32)

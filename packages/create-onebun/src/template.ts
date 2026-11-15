@@ -9,7 +9,7 @@
  * name the current core minor: `template.test.ts` fails as soon as it no longer covers
  * `packages/core/package.json`'s version, which every minor release does.
  */
-const CORE_RANGE = '^0.8.2';
+const CORE_RANGE = '^0.9.0';
 
 /**
  * A fresh project has no lockfile, so this installs the newest bun-types 1.x;
