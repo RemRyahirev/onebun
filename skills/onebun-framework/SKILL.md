@@ -215,7 +215,11 @@ send nothing); on `POST`/`PUT`/`PATCH` the `@Body` value is always sent as JSON,
 `false`, `''` and `null` reach `@Body()` unchanged and only `undefined` sends no body (other methods
 send no body and do not serialize it). Pass values, never `JSON.stringify(dto)` (it arrives as a
 string) or `tags.join(',')` (it arrives as one string). A BigInt or cyclic body of a
-`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. A handler that other HTTP clients
+`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. So does a body that is bytes or a
+stream — a typed array (a `Buffer` included, despite its `toJSON`), `DataView`, `ArrayBuffer`,
+`SharedArrayBuffer`, `Blob`/`Bun.file()`, `ReadableStream`, Node.js stream, async generator — which
+JSON has no form for (any other value with `toJSON`, e.g. `URLSearchParams`, still goes as its JSON): send bytes through `HttpClient`
+(`createHttpClient`), which sends a `Uint8Array`, `ArrayBuffer` or `Blob` as its bytes. A handler that other HTTP clients
 call too gets a plain `?tags=a,b` as one string: type it `string | string[]`; a `type('string')`
 query schema answers a service client's array with a 400. A `custom` auth `interceptor` sees
 `config.data` as the JSON text that is sent (a string, or `undefined` with no body), not the value: sign it as it is, or

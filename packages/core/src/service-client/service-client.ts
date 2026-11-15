@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+
 import type { ServiceClientOptions, ControllerClient } from './service-client.types';
 import type {
   ControllerDefinition,
@@ -147,6 +149,46 @@ function queryStringFor(query: ReadonlyMap<string, unknown>): string {
 }
 
 /**
+ * The name of a `@Body` value that is bytes or a stream, which JSON has no form for, or `undefined`
+ * for any other value.
+ *
+ * `JSON.stringify` makes `{"0":1,"1":2}` of a typed array and `{}` of an `ArrayBuffer`, a
+ * `SharedArrayBuffer`, a `DataView`, a `Blob` (a `Bun.file()` is one) and a stream — a
+ * `ReadableStream`, a Node.js `Readable`, an async generator object. The handler would receive
+ * that object instead of what the value holds, so such a body is refused.
+ *
+ * Bytes are refused whatever else they are, so a Node.js `Buffer` is refused too: it is a
+ * `Uint8Array`, and its `toJSON` (`{ type: 'Buffer', data: [...] }`) is not the bytes. Any other
+ * value with a `toJSON` method says how it serializes and stays JSON — `URLSearchParams`,
+ * `FormData`, and a stream-like object that declares one.
+ */
+function bytesOrStreamTypeOf(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+
+  const bytes = ArrayBuffer.isView(value) ||
+    value instanceof ArrayBuffer ||
+    value instanceof SharedArrayBuffer ||
+    value instanceof Blob;
+  const stream = typeof (value as { toJSON?: unknown }).toJSON !== 'function' && (
+    value instanceof ReadableStream ||
+    value instanceof Readable ||
+    Object.prototype.toString.call(value) === '[object AsyncGenerator]'
+  );
+  if (!bytes && !stream) {
+    return undefined;
+  }
+
+  // An async generator's `constructor` is not a function: its tag names it
+  const owner: unknown = (value as { constructor?: unknown }).constructor;
+
+  return typeof owner === 'function' && owner.name !== ''
+    ? owner.name
+    : Object.prototype.toString.call(value).slice('[object '.length, -1);
+}
+
+/**
  * The bytes of a call's body: the `@Body` value as JSON, or `undefined` when it sends none.
  *
  * Serialized here, because the HTTP client sends a string as it is and skips a falsy value: it
@@ -158,14 +200,35 @@ function queryStringFor(query: ReadonlyMap<string, unknown>): string {
  * `config.data`, not the value.
  *
  * `undefined` sends no body, and so does any value `JSON.stringify` has no text for (a function, a
- * symbol). A value it throws on, a BigInt or a cyclic object, is refused with a `TypeError` naming
- * the call before any request is made.
+ * symbol). Refused with a `TypeError` naming the call, before any request is made:
+ * - bytes and streams ({@link bytesOrStreamTypeOf}), which JSON has no form for. The handler's
+ *   `@Body` is parsed JSON, so bytes are sent through `HttpClient`, which sends a `Uint8Array`, an
+ *   `ArrayBuffer` or a `Blob` as its bytes;
+ * - a value `JSON.stringify` throws on, a BigInt or a cyclic object.
  *
  * Called only for a method in {@link BODY_CARRYING_METHODS}, the ones whose body is sent.
+ *
+ * @param position - The `@Body` parameter's position among the call's arguments, from 0
  */
-function jsonBodyFor(endpoint: EndpointMetadata, value: unknown): string | undefined {
+function jsonBodyFor(endpoint: EndpointMetadata, value: unknown, position: number): string | undefined {
   if (value === undefined) {
     return undefined;
+  }
+
+  const bytesOrStream = bytesOrStreamTypeOf(value);
+  if (bytesOrStream !== undefined) {
+    // A Buffer's toJSON gives { type: 'Buffer', data: [...] }; other bytes and streams have none
+    const sentAs = typeof (value as { toJSON?: unknown }).toJSON === 'function'
+      ? 'the JSON of its toJSON()'
+      : ArrayBuffer.isView(value) && !(value instanceof DataView) ? '{"0":…}' : '{}';
+
+    throw new TypeError(
+      `${endpoint.controller}.${endpoint.method}: the @Body argument (argument ${position + 1}) is a ${bytesOrStream}, ` +
+      `which has no JSON form: it would be sent as ${sentAs}, and the handler would receive that object. ` +
+      'A service-client body is JSON. To send bytes, call ' +
+      `${endpoint.httpMethod} ${endpoint.path} through HttpClient (createHttpClient), which sends a Uint8Array, ` +
+      'an ArrayBuffer or a Blob as its bytes; read a stream into a Uint8Array first. Nothing was sent.',
+    );
   }
 
   try {
@@ -192,6 +255,7 @@ function buildRequestParams(
   args: unknown[],
 ): { url: string; body?: string } {
   let body: unknown;
+  let bodyPosition = 0;
   const query = new Map<string, unknown>();
   const pathValues = new Map<string, unknown>();
 
@@ -207,6 +271,7 @@ function buildRequestParams(
         break;
       case ParamType.BODY:
         body = value;
+        bodyPosition = position;
         break;
       case ParamType.QUERY:
         if (param.name) {
@@ -228,7 +293,7 @@ function buildRequestParams(
   // none. The value is not serialized: one JSON cannot represent (a BigInt) must not fail a call
   // that never sends it. And a `custom` auth interceptor sees
   // `config.data` as `undefined`, which is what is sent.
-  const sent = BODY_CARRYING_METHODS.has(endpoint.httpMethod) ? jsonBodyFor(endpoint, body) : undefined;
+  const sent = BODY_CARRYING_METHODS.has(endpoint.httpMethod) ? jsonBodyFor(endpoint, body, bodyPosition) : undefined;
 
   return { url: `${path}${queryStringFor(query)}`, body: sent };
 }
@@ -397,7 +462,10 @@ function createControllerProxy(
  * always sent as JSON, so a string, `0`, `false`, `''` and `null` reach the handler as they were
  * passed; `undefined`
  * sends no body, and a value `JSON.stringify` throws on is refused with a `TypeError` before any
- * request is made. With any other method no body is sent, and the value is neither serialized nor
+ * request is made. So is a value that is bytes or a stream (a typed array, a `Buffer` included, an
+ * `ArrayBuffer`, a `Blob`, a `ReadableStream`, ...), which JSON has no form for: send bytes through `HttpClient`,
+ * which sends a `Uint8Array`, an `ArrayBuffer` or a `Blob` as its bytes. With any other method no
+ * body is sent, and the value is neither serialized nor
  * checked. A `custom` auth interceptor sees what is sent: the query string in `config.url`, and in
  * `config.data` the JSON text of the body, or `undefined`.
  *

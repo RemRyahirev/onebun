@@ -683,4 +683,30 @@ describe('logging an escaped error', () => {
       await app.stop();
     }
   });
+
+  test('logs a filter that throws on a client failure, then the client failure with its code and details', async () => {
+    const recorder = makeRecordingLoggerLayer();
+    const broken = createExceptionFilter(() => {
+      throw new Error('filter bug');
+    });
+    const app = await startApp(LoggedModule, { loggerLayer: recorder.layer, filters: [broken] });
+
+    try {
+      const response = await fetch(`${app.url}/log/refused`);
+      await response.text();
+
+      // The default filter answers in the broken filter's place: a code outside 400-599 is a 500
+      expect(response.status).toBe(500);
+      const logged = recorder.records.filter((record) => record.level === 'error');
+      expect(logged.map((record) => record.message)).toEqual([
+        expect.stringMatching(/^Exception filter .+ threw; falling back to the default filter$/),
+        'Unhandled error in LoggedController.refused:',
+      ]);
+      expect(logged[1].args[0]).toBeInstanceOf(TransportError);
+      expect(logged[1].args[1]).toEqual({ code: 0, details: { transport: 'network' } });
+      expect(markersIn(JSON.stringify(logged[1].args.slice(1)))).toEqual([]);
+    } finally {
+      await app.stop();
+    }
+  });
 });

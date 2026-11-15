@@ -230,10 +230,11 @@ The refusal is never retried and records no metrics: no request was made.
 - On a `307`/`308` to another origin the body goes along with its `Content-Type` and nothing else
   (see [Credentials stay with their origin](#redirect-headers)). A `301`/`302` answering a `POST`,
   and a `303`, drop the body and its `Content-Type`.
-- `REQUEST_CONFIG_ERROR` has `code: 500`, so `req()` and the `RequestsService` Effect API turn it
-  into an `InternalServerError`. `details.url` and `details.details` are transport details, left
-  out of the body the default exception filter sends. The `TIMEOUT_ERROR` of a `Blob` read carries
-  only `details.transport` and `details.phase`.
+- `REQUEST_CONFIG_ERROR` has `code: 500`, so every Promise method (`req()` included) rejects with
+  an `InternalServerError`, and `OneBunBaseError.fromErrorResponse` and the `RequestsService` Effect
+  API turn it into one; the `*Effect` methods fail with the `ErrorResponse` itself. `details.url`
+  and `details.details` are transport details, left out of the body the default exception filter
+  sends. The `TIMEOUT_ERROR` of a `Blob` read carries only `details.transport` and `details.phase`.
 - `RequestsService`'s `post`, `put` and `patch` send a payload by the same rules.
 
 </llm-only>
@@ -2188,7 +2189,9 @@ rule, sees the encoded form.
   and retries do not apply. The causes are `null`/`undefined` (typically an omitted positional
   argument or an id read from a missing field), `''`, `.`, `..`, and an unpaired surrogate in a path
   value, and a `@Body` value of a `POST`, `PUT` or `PATCH` that `JSON.stringify` throws on (a BigInt,
-  a cyclic object).
+  a cyclic object) or that JSON has no form for: bytes (a typed array — a `Buffer` included, its
+  `toJSON` notwithstanding — a `DataView`, an `ArrayBuffer`, a `SharedArrayBuffer`, a `Blob`) or a
+  stream (a `ReadableStream`, a Node.js `Readable`, an async generator) without a `toJSON` method.
 - Each `:name` in the route is replaced by the `@Param('name')` argument with exactly that name, so
   `/:idx/:id` gets both values regardless of declaration order. A `:name` with no matching `@Param`
   stays in the URL literally.
@@ -2202,7 +2205,8 @@ rule, sees the encoded form.
 The handler receives each `@Query` and `@Body` value as it was passed, arrays and falsy values
 included. A `@Query` array is sent as one `name[]` key per element, which the callee's query parser
 reads back as an array, even with a single element. The `@Body` value of a `POST`, `PUT` or `PATCH`
-is always sent as JSON, with `Content-Type: application/json`:
+is always sent as JSON, with `Content-Type: application/json`, so a body JSON has no form for —
+bytes or a stream — is refused before anything is sent:
 
 ```typescript
 import {
@@ -2267,6 +2271,7 @@ await postsClient.PostsController.setPinned('42', false);
 | `@Body` a plain object, an array, a number | its JSON | an equal value |
 | `@Body` `undefined` | no body | `undefined` |
 | `@Body` a BigInt, a cyclic object | nothing: the call rejects with a `TypeError` naming the controller and the method | |
+| `@Body` a `Uint8Array` or another typed array (a Node.js `Buffer` included), a `DataView`, an `ArrayBuffer`, a `SharedArrayBuffer`, a `Blob` (a `Bun.file()` too), a `ReadableStream`, a Node.js stream, an async generator | nothing: the call rejects with a `TypeError` naming the controller, the method and the `@Body` argument | |
 | `@Body` any value, on a `GET`, `DELETE`, `HEAD` or `OPTIONS` endpoint | no body | `undefined` |
 
 The elements of a query array are sent as text, and its `null` and `undefined` elements are left
@@ -2276,11 +2281,23 @@ a function, sends no body, as `undefined` does. The HTTP client sends a body onl
 and `PATCH`, so a `@Body` of a `GET` or `DELETE` handler is not sent. It is not serialized either: a
 BigInt there does not fail the call.
 
+**Bytes and streams are refused.** The handler's `@Body` is parsed JSON, and JSON has no form for
+bytes: `JSON.stringify` makes `{"0":1,"1":2}` of a `Uint8Array` and `{}` of an `ArrayBuffer`, a
+`Blob` or a stream, and the handler would receive that object. A service client call therefore
+rejects such a body with a `TypeError` before anything is sent. A Node.js `Buffer` is refused too:
+it is a `Uint8Array`, and its `toJSON` form, `{"type":"Buffer","data":[…]}`, is not the bytes. To
+send bytes, call the route through `HttpClient`, which sends a `Uint8Array` (a `Buffer` included),
+an `ArrayBuffer` or a `Blob` as its bytes (see [Sending bytes](#request-bytes)); a stream is read
+into a `Uint8Array` first. Any other value with a `toJSON` method is a JSON value and is sent as
+one: `URLSearchParams` as an object of its entries. A `Map` or a `Set` has no fields and is sent as
+`{}`, as `HttpClient` sends it: convert it first (`Object.fromEntries(map)`, `[...set]`).
+
 The service client builds the query string and the JSON body itself, before the HTTP client sees
 them. `HttpClient` from `@onebun/requests`, called directly, keeps its own rules: it sends
 `String(value)` once per query key, so an array goes out joined (`tags=news%2Ctech`) and arrives as
 `'news,tech'`; it sends a string body as bare text, which `req.json()` on a OneBun callee cannot
-parse; and it sends no body for `0`, `false`, `''` or `null`.
+parse; it sends no body for `0`, `false`, `''` or `null`; and it sends a `Uint8Array`, an
+`ArrayBuffer` or a `Blob` as its bytes.
 
 #### Handlers, schemas and interceptors {#service-client-query-body-upgrade}
 
@@ -2323,8 +2340,10 @@ sees the wire format: the query keys of an array end in `[]` (`url.searchParams.
 and a string body arrives in quotes (`await req.text()` gives `"Hello"`).
 
 A BigInt or cyclic body of a `POST`, `PUT` or `PATCH` rejects with a `TypeError` whose message names
-the call, and whose `cause` is the error of `JSON.stringify`. With the other methods the body is not
-sent, so it is not serialized either, and such a value does not fail the call.
+the call, and whose `cause` is the error of `JSON.stringify`. A body that is bytes or a stream
+rejects with a `TypeError` that names the call, the `@Body` argument and its type, and points to
+`HttpClient`. With the other methods the body is not sent, so it is not serialized either, and such
+a value does not fail the call.
 
 A `custom` auth interceptor (`auth: { type: 'custom', interceptor }`) on a service client sees the
 request as it will be sent. `config.data` is the JSON text of the body, a string such as
@@ -2375,7 +2394,13 @@ const usersClient = createServiceClient(usersDefinition, {
   `JSON.parse` it, change it and `JSON.stringify` it again. Never spread `config.data` or
   `JSON.stringify` it a second time.
 - `@Body` values are serialized only for `POST`, `PUT` and `PATCH`, the methods that send a body; on
-  other methods the value is dropped unchecked, so a BigInt there does not reject.
+  other methods the value is dropped unchecked, so a BigInt or bytes there do not reject.
+- A service-client body is JSON. Never pass bytes or a stream as `@Body`: the call rejects with a
+  `TypeError` (`<Controller>.<method>: the @Body argument (argument N) is a Uint8Array, which has no
+  JSON form ...`). Call the route with `createHttpClient(...).post/put/patch(path, bytes)` instead,
+  which sends a `Uint8Array`, an `ArrayBuffer` or a `Blob` as its bytes. A `Buffer` is refused like
+  any typed array, although it has a `toJSON`; another value with a `toJSON` (`URLSearchParams`) is
+  sent as its JSON.
 - The HMAC signature (`auth: { type: 'onebun' }`) covers the query string and the exact JSON bytes
   that are sent.
 

@@ -338,19 +338,33 @@ const users = await client.get<User[], UserQuery>(
 
 ### Promise API Error Handling
 
+Every Promise method (`request`, `get`, `post`, `put`, `patch`, `delete`, `head`, `options`,
+`reqRaw`, `req`) rejects on every failure — a 4xx or 5xx, a timeout, a refused connection — with the
+`OneBunBaseError` subclass the failure's `code` names: `NotFoundError` for 404, `ConflictError` for
+409, `InternalServerError` for 500 and so on, `HttpStatusError` for a status without a class of its
+own (a 418 stays 418), and `TransportError` with `code` 0 for a timeout, an abort or a network
+failure. Each carries the failure's `error`, `code` and `details`; `message` is the `error` name.
+
 ```typescript
+import { NotFoundError, OneBunBaseError, TransportError } from '@onebun/requests';
+
 try {
-  const user = await client.get<User>('/users/1');
+  const user = await client.req<User>('GET', '/users/1');
   console.log('User:', user);
-} catch (error: RequestError) {
-  console.error('Request failed:', {
-    code: error.code,
-    message: error.message,
-    statusCode: error.statusCode,
-    traceId: error.traceId
-  });
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    // error.error: 'HTTP_ERROR', error.code: 404, error.details: the upstream's answer
+  } else if (error instanceof TransportError) {
+    // error.error: 'TIMEOUT_ERROR', 'ABORT_ERROR' or 'FETCH_ERROR'; error.code: 0
+  } else if (error instanceof OneBunBaseError) {
+    console.error('Request failed:', { error: error.error, code: error.code, details: error.details });
+  }
 }
 ```
+
+`retryCount` and `traceId` of a failure are on the Effect API's `ErrorResponse`, below. See
+[A failed request rejects](https://onebun.dev/api/requests#a-failed-request-rejects) for the full
+class table.
 
 ### Effect API Error Handling
 

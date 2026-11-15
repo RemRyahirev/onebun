@@ -4297,6 +4297,32 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       );
       expect(wire).toEqual([]);
 
+      // From the table: bytes and streams are refused with a TypeError naming the call and the
+      // @Body argument, pointing to HttpClient, and nothing is sent — a Buffer included
+      const refusedBodies = [
+        new Uint8Array([1, 2]),
+        Buffer.from([1, 2]),
+        new ArrayBuffer(2),
+        new Blob(['hi']),
+        new ReadableStream(),
+      ];
+      for (const bytes of refusedBodies) {
+        await expect(postsClient.PostsController.rename('42', bytes)).rejects.toThrow(
+          /^PostsController\.rename: the @Body argument \(argument 2\) is a \w+, which has no JSON form.*through HttpClient/,
+        );
+      }
+      expect(wire).toEqual([]);
+
+      // From the prose: any other value with toJSON is a JSON value, and a Map has no fields
+      received.length = 0;
+      await postsClient.PostsController.rename('42', new URLSearchParams('a=1'));
+      await postsClient.PostsController.rename('42', new Map([['a', 1]]));
+      expect(wire).toEqual(['PUT /posts/42/title {"a":"1"}', 'PUT /posts/42/title {}']);
+      expect(received).toEqual([
+        { id: '42', title: { a: '1' } },
+        { id: '42', title: {} },
+      ]);
+
       // From the prose: array elements are sent as text, null and undefined ones are left out,
       // and an object in the query goes out as [object Object]
       received.length = 0;

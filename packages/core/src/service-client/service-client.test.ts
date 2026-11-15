@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+
 import {
   describe,
   expect,
@@ -909,6 +911,63 @@ describe('query and body values', () => {
     expect(error.message).toEndWith('Nothing was sent.');
     expect(error.cause).toBeInstanceOf(TypeError);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  /*
+   * Bytes and streams have no JSON form: `JSON.stringify` makes `{"0":1,…}` of a typed array and `{}`
+   * of the rest, and the handler would receive that object. `HttpClient` sends the binary ones as
+   * their bytes; the service client's body is JSON, so it refuses them all before sending.
+   */
+  test.each([
+    ['a Uint8Array', 'Uint8Array', (): unknown => new Uint8Array([1, 2, 3])],
+    // Bytes, even with a toJSON of its own: { type: 'Buffer', data: [...] } is not the bytes
+    ['a Node.js Buffer', 'Buffer', (): unknown => Buffer.from([1, 2, 3])],
+    ['an ArrayBuffer', 'ArrayBuffer', (): unknown => new Uint8Array([1, 2, 3]).buffer],
+    ['a SharedArrayBuffer', 'SharedArrayBuffer', (): unknown => new SharedArrayBuffer(2)],
+    ['a Float32Array', 'Float32Array', (): unknown => new Float32Array([1.5])],
+    ['a DataView', 'DataView', (): unknown => new DataView(new ArrayBuffer(2))],
+    ['a Blob', 'Blob', (): unknown => new Blob(['hi'], { type: 'text/plain' })],
+    ['a Bun.file()', 'Blob', (): unknown => Bun.file(import.meta.path)],
+    ['a ReadableStream', 'ReadableStream', (): unknown => new ReadableStream()],
+    ['a Node.js Readable', 'Readable', (): unknown => Readable.from(['chunk'])],
+    ['an async generator', 'AsyncGenerator', (): unknown => (async function* chunks() {
+      yield 'chunk';
+    })()],
+  ])('%s as the body is refused with a TypeError pointing to HttpClient, and nothing is sent', async (_label, type, make) => {
+    const error = await rejectionOf(client.Values.echo(make()));
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toStartWith(`Values.echo: the @Body argument (argument 1) is a ${type}, which has no JSON form`);
+    expect(error.message).toContain('call POST /values/echo through HttpClient');
+    expect(error.message).toEndWith('Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(received).toEqual([]);
+  });
+
+  test('the refusal names the @Body argument by its position among the call arguments', async () => {
+    const error = await rejectionOf(client.Values.both('7', ['a'], new Uint8Array([1])));
+
+    expect(error.message).toStartWith('Values.both: the @Body argument (argument 3) is a Uint8Array');
+    expect(error.message).toContain('call PUT /values/both/:id through HttpClient');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['URLSearchParams', (): unknown => new URLSearchParams('a=1'), '{"a":"1"}', { a: '1' }],
+    ['a Map', (): unknown => new Map([['a', 1]]), '{}', {}],
+  ])('%s has a JSON form and is sent as it', async (_label, make, json, value) => {
+    await client.Values.echo(make());
+
+    // A value with `toJSON` says how it serializes; a Map has no fields, so its JSON is {}
+    expect(wire()).toEqual([`POST /values/echo ${json}`]);
+    expect(received).toEqual([{ body: value, type: 'object' }]);
+  });
+
+  test('bytes as the @Body of a GET are not refused: no body is sent, and the call succeeds', async () => {
+    await client.Values.peek(new Uint8Array([1, 2, 3]));
+
+    expect(wire()).toEqual(['GET /values/peek -']);
+    expect(received).toEqual([{ body: ABSENT }]);
   });
 
   test.each([
