@@ -24,6 +24,7 @@ import {
   type ErrorResponse,
   getTransportFailureKind,
   HttpMethod,
+  InternalServerError,
   type RequestMetricsData,
   type RequestsOptions,
   TRANSPORT_FAILURE_CODE,
@@ -522,8 +523,15 @@ describe('Binary request bodies', () => {
       expect(fixture.arrivals).toHaveLength(0);
     });
 
-    it('should reject the Promise API with an error, sending nothing', async () => {
-      await expect(clientFor().req('PUT', '/upload', new ReadableStream())).rejects.toThrow();
+    it('should reject the Promise API with the failure as its OneBunBaseError class, sending nothing', async () => {
+      const rejection = clientFor().req('PUT', '/upload', new ReadableStream());
+
+      await expect(rejection).rejects.toBeInstanceOf(InternalServerError);
+      await expect(rejection).rejects.toMatchObject({
+        error: 'REQUEST_CONFIG_ERROR',
+        code: 500,
+        details: { option: 'data', reason: 'unsupported-body', type: 'ReadableStream' },
+      });
       expect(fixture.arrivals).toHaveLength(0);
     });
 

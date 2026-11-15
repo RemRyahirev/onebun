@@ -762,10 +762,11 @@ object keeps everything: only the body the filter serializes leaves the transpor
 is answered with HTTP 500, and the body keeps the `code`; a OneBun client reading that body takes the
 500 ([A failed request rejects](#a-failed-request-rejects)).
 
-**The application logs it.** An escaped client failure is logged at error level as
-`Unhandled error in <Controller>.<handler>:`, as any unhandled error is, although a
-`OneBunBaseError` the application throws itself is not: nobody in the application chose this one's
-status. The logger writes the error's name and stack; beside them go its `code` and the `details`
+**The application logs it.** An escaped client failure that no exception filter of yours answered
+is logged at error level as `Unhandled error in <Controller>.<handler>:` on its way to the default
+filter, as any unhandled error is, although a `OneBunBaseError` the application throws itself is
+not: nobody in the application chose this one's status. A filter that answers it takes the logging
+over, as for any error it answers ([What Gets Logged](./exception-filters.md#what-gets-logged)). The logger writes the error's name and stack; beside them go its `code` and the `details`
 the caller's body keeps, `{ code: 503, details: { method: 'GET', duration: 12 } }` or, for a refused
 connection, `{ code: 0, details: { transport: 'network' } }`. The transport details stay out of the
 log as well: the request URL and its query, the upstream's headers and its body. Log what you need
@@ -907,8 +908,9 @@ export const envelopeFilter = createExceptionFilter((error) => {
   `RESPONSE_PARSE_ERROR`. A caller never reads `200 OK` or a redirect without a `Location` for a
   failure.
 - The application logs an escaped error for which `isHttpClientFailure(error)` is true at error
-  level, `Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, before
-  the filter runs; any other `OneBunBaseError` it does not log. The logger writes the error's message
+  level, `Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, when no
+  route/controller/global filter answered it — after the filter chain, before the default filter
+  answers; an error a filter answered is not logged, and any other `OneBunBaseError` it does not log. The logger writes the error's message
   (its `error` name) and stack; `details` is serialized with `withoutTransportDetails`, as for the
   body, so the transport details reach neither the body nor the log, whatever `exposeErrorDetails`
   says. A OneBun callee's own `details` log as `{}`. `isHttpClientFailure` is true for an object

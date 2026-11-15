@@ -232,10 +232,10 @@ Base guards run before the subclass's own, matching the controller-then-route or
 A method-level guard on a base method guards every method that overrides it in a subclass. The override adds its own guards to the inherited ones; it cannot drop them.
 
 ```typescript
-import { AuthGuard, BaseController, Controller, Delete, Param, RolesGuard, UseGuards } from '@onebun/core';
+import { BaseController, Controller, Delete, Param, RolesGuard, UseGuards } from '@onebun/core';
 
 class AccountHandlers extends BaseController {
-  @UseGuards(AuthGuard)
+  @UseGuards(VerifiedTokenGuard)
   remove(id: string) {
     return { removed: id };
   }
@@ -243,10 +243,10 @@ class AccountHandlers extends BaseController {
 
 @Controller('/accounts')
 class AdminAccountController extends AccountHandlers {
-  @UseGuards(new RolesGuard(['admin']))
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/:id')
   override remove(@Param('id') id: string) {
-    // reached only after AuthGuard (from the base method), then RolesGuard
+    // reached only after VerifiedTokenGuard (from the base method), then RolesGuard
     return { removed: id };
   }
 }

@@ -445,7 +445,8 @@ included, before the default filter answers — grep the logs for `Unhandled err
 
 **What gets logged at error level.** `Unhandled error in <Controller>.<handler>:` is written only
 when no route/controller/global filter answered — the error is on its way to the default filter —
-and never for an `HttpException` or a `OneBunBaseError`. An error a filter answered is not logged
+and never for an `HttpException` or a `OneBunBaseError`, except an HTTP-client failure the handler let
+escape (logged with `{ code, details }`, see below). An error a filter answered is not logged
 by the framework, so mapping a domain error class to a 4xx in a filter produces no error-level line;
 a filter that answers a real failure reports it itself. A filter that throws or rejects — including
 one that rethrows to decline — is logged as `Exception filter <name> threw; …`, and one that
@@ -472,8 +473,8 @@ status (500), never a `TransportError` — a body's `code` counts only when it i
 callee's own error (`{ success: false, error, code, details }` in its body) keeps its status and `error`
 on the way out, but its `details` and `originalError` go out as `{}`: they were written for the calling
 service's code, which reads them whole. To pass them on, throw your own error with a copy
-(`new ConflictError(e.error, { ...e.details })`). The escaped client failure is also LOGGED at error level
-(`Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, `details` minus
+(`new ConflictError(e.error, { ...e.details })`). The escaped client failure no filter answered is also
+LOGGED at error level (`Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, `details` minus
 the transport details: no URL, upstream headers or body — log those where you catch), unlike a `OneBunBaseError`
 the application throws itself; `isHttpClientFailure(error)` (from `@onebun/core` / `@onebun/requests`)
 tells one apart. The client's own `AUTH_ERROR` (signing failed) is an `UnauthorizedError`, 401 — map it

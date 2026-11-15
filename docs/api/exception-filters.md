@@ -307,9 +307,10 @@ const app = new OneBunApplication(AppModule, { filters: [domainFilter] });
 | The thrown error | What the framework logs at error level |
 |---|---|
 | is answered by a route, controller or global filter | nothing |
-| goes to the default filter and is an `HttpException` or a `OneBunBaseError` | nothing |
+| goes to the default filter and is a failure of the HTTP client the handler let escape — a refused connection, a timeout, an upstream 5xx or 401 | `Unhandled error in <Controller>.<handler>:`, once, with the error and `{ code, details }` — `details` without the transport details (see [An uncaught client error and your caller](./requests.md#uncaught-client-errors)) |
+| goes to the default filter and is any other `HttpException` or `OneBunBaseError` | nothing |
 | goes to the default filter and is anything else | `Unhandled error in <Controller>.<handler>:`, once, with the error and its stack |
-| goes to the default filter because a filter threw, or returned neither a `Response` nor `undefined`/`null` | `Exception filter <name> threw; …` (or `… returned neither a Response nor undefined; …`) for the filter, then the `Unhandled error in …` line for the error it was handed, unless that is an `HttpException` or a `OneBunBaseError` |
+| goes to the default filter because a filter threw, or returned neither a `Response` nor `undefined`/`null` | `Exception filter <name> threw; …` (or `… returned neither a Response nor undefined; …`) for the filter, then the `Unhandled error in …` line for the error it was handed, unless that is an `HttpException` or a `OneBunBaseError` other than an HTTP-client failure |
 
 One more line can follow any row that goes to the default filter: when the default filter cannot
 build its own answer, that failure is logged as `Request handling error:`, as described above.

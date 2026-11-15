@@ -27,6 +27,7 @@ import {
   getTransportFailureKind,
   HttpClient,
   InternalServerError,
+  isHttpClientFailure,
   makeRequestsService,
   NotFoundError,
   OneBunBaseError,
@@ -45,6 +46,8 @@ import {
 import { createServiceClient } from '../service-client/service-client';
 import { createServiceDefinition } from '../service-client/service-definition';
 import { makeMockLoggerLayer, makeRecordingLoggerLayer } from '../testing/test-utils';
+
+import { createExceptionFilter } from './exception-filters';
 
 const COOKIE_ONE = 'session=COOKIE-SECRET-ONE; Path=/; HttpOnly';
 const COOKIE_TWO = 'refresh=COOKIE-SECRET-TWO; Path=/; HttpOnly';
@@ -577,10 +580,10 @@ describe('a OneBun callee\'s error a caller lets escape', () => {
 });
 
 /**
- * Before the filter runs, the application logs what nobody in it chose: an unhandled throw, and a
- * failure of the HTTP client a handler let escape. Up to 0.8 the client's rejection was a
- * FiberFailure, logged as unhandled; a OneBunBaseError the application throws itself is ordinary
- * control flow and is not logged.
+ * When no exception filter of the application answers, the application logs what nobody in it
+ * chose, on the way to the default filter: an unhandled throw, and a failure of the HTTP client a
+ * handler let escape. A OneBunBaseError the application throws itself is ordinary control flow and
+ * is not logged, and neither is an error one of its filters answered.
  */
 describe('logging an escaped error', () => {
   const refusing = new HttpClient({ baseUrl: closedOrigin(), retries: { max: 0 } });
@@ -651,6 +654,29 @@ describe('logging an escaped error', () => {
       await (await fetch(`${app.url}/log/own`)).text();
       expect(recorder.messages('error')).toEqual([]);
 
+      await (await fetch(`${app.url}/log/plain`)).text();
+      expect(recorder.messages('error')).toEqual(['Unhandled error in LoggedController.plain:']);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('does not log a client failure an exception filter of the application answered', async () => {
+    const recorder = makeRecordingLoggerLayer();
+    const upstreamDown = createExceptionFilter((error) => (
+      isHttpClientFailure(error)
+        ? Response.json({ success: false, error: 'UPSTREAM_UNAVAILABLE', code: 503 }, { status: 503 })
+        : undefined
+    ));
+    const app = await startApp(LoggedModule, { loggerLayer: recorder.layer, filters: [upstreamDown] });
+
+    try {
+      const answered = await fetch(`${app.url}/log/refused`);
+      expect(answered.status).toBe(503);
+      expect(await answered.json()).toEqual({ success: false, error: 'UPSTREAM_UNAVAILABLE', code: 503 });
+      expect(recorder.messages('error')).toEqual([]);
+
+      // The filter declines everything else: an unhandled throw still reaches the log
       await (await fetch(`${app.url}/log/plain`)).text();
       expect(recorder.messages('error')).toEqual(['Unhandled error in LoggedController.plain:']);
     } finally {
