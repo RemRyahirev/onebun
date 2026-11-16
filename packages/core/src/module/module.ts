@@ -26,18 +26,18 @@ import {
   isOptionalParam,
   getInjectToken,
   registerControllerDependencies,
+  traceConstructorMetadata,
 } from '../decorators/decorators';
 import {
   buildDecoratorMetadataDiagnosticMessage,
   diagnoseDecoratorMetadata,
-  getMetadata,
-  getOwnGlobalMetadata,
   isInjectableParamType,
 } from '../decorators/metadata';
 import {
   CircularDependencyError,
   DependencyResolutionError,
   OneBunBootstrapError,
+  ServiceConstructionError,
 } from '../errors/dependency-errors';
 import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
@@ -208,8 +208,11 @@ export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, 
   return new Map(processDefaultScope.services);
 }
 
-/** Why a provider left the resolution queue without an instance. */
-type NeverConstructedReason = 'undecorated' | 'constructor-threw';
+/**
+ * Why a provider left the resolution queue without an instance. A constructor that throws is not
+ * one of them: that ends the boot at the throw, with a `ServiceConstructionError`.
+ */
+type NeverConstructedReason = 'undecorated';
 
 /** What a deferred provider waits for. */
 interface ProviderWait {
@@ -217,6 +220,17 @@ interface ProviderWait {
   readonly provider: Function;
   /** The declared parameter type: `provider` itself, or an abstract or base class it extends. */
   readonly parameterType: Function;
+}
+
+/**
+ * Whether an error a provider's constructor threw is one the framework raised for its own reasons
+ * and that already names what is wrong, so it propagates unwrapped: a `OneBunBootstrapError`
+ * (`DependencyResolutionError`, `CircularDependencyError`, ...) or a registration or configuration
+ * error, whose `name` starts with `OneBun` — a check that also recognises such an error from a
+ * second copy of `@onebun/core`, where `instanceof` fails.
+ */
+function isFrameworkBootstrapError(error: unknown): boolean {
+  return error instanceof OneBunBootstrapError || (error instanceof Error && error.name.startsWith('OneBun'));
 }
 
 /**
@@ -265,19 +279,18 @@ function findStalledCycle(waits: ReadonlyMap<Function, Function>): Function[] | 
   return undefined;
 }
 
-/** A parent whose constructor dependencies a class with no constructor types of its own does not get. */
-interface InheritedConstructorDependencies {
-  /** The nearest ancestor DI would inject. */
+/** The constructor dependencies of an ancestor that a class DI found no constructor types for does not get. */
+interface UninheritedConstructorDependencies {
+  /** The nearest ancestor with constructor metadata of its own. */
   readonly ancestor: Function;
   /** Its constructor types, as `getConstructorParamTypes` reports them. */
   readonly types: readonly (Function | undefined)[];
   /**
-   * The class declares a constructor WITH parameters of its own (`length > 0`), yet no types were
-   * emitted for them — it carries no decorator. Otherwise it declares no constructor and runs the
-   * one it inherits, or it is undecorated and declares one that takes no parameters: nothing is
-   * recorded for either, so the two cannot be told apart.
+   * Where the inheritance stopped: the class itself, or a class between it and `ancestor`. It has
+   * no constructor metadata of its own and is not known to declare no constructor — it carries no
+   * decorator, or it declares parameters (`length > 0`) for which no types were emitted.
    */
-  readonly declaresParameters: boolean;
+  readonly stoppedAt: Function;
 }
 
 /** What DI constructs: a provider, or one of the kinds `resolveConstructorArgs` resolves. */
@@ -300,43 +313,60 @@ function decoratorFor(target: Function, kind: ConstructedKind): string {
 }
 
 /**
- * The nearest ancestor whose constructor DI would inject, for a class DI finds no constructor
- * types for — or `undefined`.
+ * For a class DI found no constructor types for: the ancestor whose constructor dependencies it
+ * does not get because the inheritance stopped on the way — or `undefined`.
  *
- * DI reads a class's OWN constructor types, never its parent's, so such a class is built with no
- * arguments. It boots, and fails at the first call that uses a dependency. Two shapes get here:
- * - it declares no constructor, so the one it inherits hands its parent `undefined` for each;
- * - it declares a constructor with parameters but carries no decorator, so TypeScript emitted no
- *   types for them and each parameter is `undefined` (typically a guard, interceptor, filter or
- *   middleware that extends a decorated base).
- * Neither is HANDED the parent's types, even with `reflect-metadata` imported before the core,
- * whose walking `getMetadata` would offer them: for the second shape that is the positional
- * defect own-only reading exists to avoid. Both are only reported.
- *
- * "No constructor types" means no own `design:paramtypes` array at all (Bun records `[]` for an
- * explicit `constructor()` on a decorated class) and no explicit `@Inject` types. Callers pass
- * only a class `getConstructorParamTypes` found nothing for. An UNDECORATED class that declares a
- * constructor taking no parameters (`constructor() { super(new Dep()); }`) records nothing either,
- * so it lands in the first shape although it may work: the warning is worded for both.
+ * A decorated class that declares no constructor is injected with the dependencies of the
+ * constructor it inherits (see `traceConstructorMetadata`), so such a class never gets here. What
+ * does is a class the walk could not take through:
+ * - it carries no decorator, so a constructor it declares records no types and cannot be told from
+ *   none: with no parameters (`constructor() { super(new Dep()); }`) it looks exactly like an
+ *   inherited constructor, with parameters it gets no types for them (typically a guard,
+ *   interceptor, filter or middleware that extends a decorated base);
+ * - it is decorated and declares no constructor, but a class between it and the ancestor carries no
+ *   decorator (or declares parameters without types), and that class's constructor may be the one
+ *   it runs.
+ * It boots, and fails at the first call that uses a dependency. An ancestor whose own constructor
+ * takes nothing is not reported: there is nothing to miss.
  */
-function findInheritedConstructorDependencies(target: Function): InheritedConstructorDependencies | undefined {
-  const declaresOwnTypes = Array.isArray(getOwnGlobalMetadata('design:paramtypes', target))
-    || Array.isArray(getMetadata('design:paramtypes', target))
-    || getConstructorParamTypes(target) !== undefined;
-  if (declaresOwnTypes) {
+function findUninheritedConstructorDependencies(target: Function): UninheritedConstructorDependencies | undefined {
+  const { stoppedAt, declaringAncestor } = traceConstructorMetadata(target);
+  if (stoppedAt === undefined || declaringAncestor === undefined) {
     return undefined;
   }
 
-  let ancestor: unknown = Object.getPrototypeOf(target);
-  while (typeof ancestor === 'function' && ancestor !== Function.prototype) {
-    const types = getConstructorParamTypes(ancestor);
-    if (types !== undefined) {
-      return { ancestor, types, declaresParameters: target.length > 0 };
-    }
-    ancestor = Object.getPrototypeOf(ancestor);
+  const types = getConstructorParamTypes(declaringAncestor);
+
+  return types === undefined ? undefined : { ancestor: declaringAncestor, types, stoppedAt };
+}
+
+/** `A, B, unresolvable` — constructor types as a warning or an error names them. */
+function describeParamTypes(types: readonly (Function | undefined)[]): string {
+  return types.map((type) => type?.name ?? 'unresolvable').join(', ');
+}
+
+/**
+ * `<Class> declares no constructor of its own, so it is injected with the parameters of the
+ * constructor it inherits from <Parent> (<Types>)` — the start of every error note about a parameter
+ * `target` never names itself — and that parent; `undefined` when `target` declares its own.
+ *
+ * Such a class is injected with its parent's constructor dependencies, so each way a parameter can
+ * fail to resolve — missing, in a cycle, ambiguous, an unselected registration — is a boot failure
+ * it can hit, for a dependency its own source never mentions.
+ */
+function describeInheritedConstructor(target: Function): { text: string; source: Function } | undefined {
+  const { source } = traceConstructorMetadata(target);
+  if (source === target) {
+    return undefined;
   }
 
-  return undefined;
+  const names = describeParamTypes(getConstructorParamTypes(source) ?? []);
+
+  return {
+    text: `${target.name} declares no constructor of its own, so it is injected with the parameters of the `
+      + `constructor it inherits from ${source.name} (${names})`,
+    source,
+  };
 }
 
 /**
@@ -875,19 +905,27 @@ export class OneBunModule implements ModuleInstance {
    * be answered, and leaving a value there would answer it. The error names both
    * registrations, because "could not resolve" for a service that is present twice reads as
    * a missing import and sends the reader looking in the wrong place.
+   *
+   * `owner`, the class whose constructor parameter asked, is named only when it inherits that
+   * constructor: it then never mentions the type, and the fix belongs in its parent.
    */
-  private assertUnambiguous(tag: Context.Tag<unknown, unknown>, requestedBy: string): void {
+  private assertUnambiguous(tag: Context.Tag<unknown, unknown>, requestedBy: string, owner?: Function): void {
     const contributors = this.tagContributors.get(tag);
     if (!contributors || contributors.length < 2) {
       return;
     }
 
     const names = contributors.map((module) => module.name).join(', ');
+    const inherited = owner === undefined ? undefined : describeInheritedConstructor(owner);
+    const inheritedHint = owner === undefined || inherited === undefined
+      ? ''
+      : ` ${inherited.text}. Name the registration there with @Inject(TOKEN), or declare a constructor in ` +
+        `${owner.name} that does not take it.`;
     const error = new Error(
       `Module ${this.moduleClass.name} selects ${contributors.length} registrations that ` +
       `each provide this service (${names}), so the dependency of ${requestedBy} is ` +
       'ambiguous. Import one registration per module, so each module\'s providers resolve ' +
-      'to the one it selected.',
+      'to the one it selected.' + inheritedHint,
     );
     error.name = 'OneBunAmbiguousRegistrationError';
     throw error;
@@ -1059,14 +1097,30 @@ export class OneBunModule implements ModuleInstance {
     // that left the queue without an instance, so that a stall can say why. The consumer never
     // counts: a class is not injected into itself. Without this second branch a consumer listed
     // before the only implementation of its abstract-typed parameter failed at once.
+    //
+    // A parameter typed as the consumer's OWN class waits for the consumer itself: meanwhile the
+    // queue builds a listed subclass, which the parameter then resolves to by `instanceof`, and
+    // with no subclass the stall reports the cycle `A -> A`. That needs a subclass that is built
+    // without the consumer. When every one still to be built injects the consumer back — a
+    // subclass that declares no constructor inherits the parameter, as in
+    // `Node(@Optional() next?: Node)` + `Leaf extends Node {}` — waiting for itself would turn that
+    // into `Node -> Node`, so the parameter goes to such a subclass instead: a required one reports
+    // the real cycle, an @Optional() one does not wait and gets `undefined`.
     const providerToWaitFor = (depType: Function, consumer: Function): Function | undefined => {
-      if (availableServiceClasses.has(depType)) {
+      if (availableServiceClasses.has(depType) && depType !== consumer) {
         return createdServices.has(depType) ? undefined : depType;
       }
       const unbuilt = listedProviders.filter((candidate) => candidate !== consumer &&
         !createdServices.has(candidate) && constructsInstanceOf(candidate, depType));
+      const buildable = unbuilt.filter((candidate) => !neverConstructed.has(candidate));
+      if (depType === consumer) {
+        const injectsConsumer = (candidate: Function): boolean =>
+          getConstructorParamTypes(candidate)?.includes(consumer) === true;
 
-      return unbuilt.find((candidate) => !neverConstructed.has(candidate)) ?? unbuilt[0];
+        return buildable.length > 0 && buildable.every(injectsConsumer) ? buildable[0] : depType;
+      }
+
+      return buildable[0] ?? unbuilt[0];
     };
     // Deferrals since a provider last left the queue. Resolution reads only state that changes
     // when a provider leaves it, so once every provider still pending has been retried without
@@ -1153,7 +1207,7 @@ export class OneBunModule implements ModuleInstance {
             continue;
           }
 
-          const suggestions = this.buildResolutionSuggestions(depType);
+          const suggestions = this.resolutionSuggestionsFor(provider, depType);
           throw new DependencyResolutionError(provider.name, depType.name, 'service', suggestions);
         }
       }
@@ -1161,7 +1215,7 @@ export class OneBunModule implements ModuleInstance {
       if (!allDependenciesResolved) {
         continue;
       }
-      // Leaving the queue is progress whether or not the constructor below succeeds.
+      // Leaving the queue is progress; a constructor below that throws ends the boot instead.
       deferralsSinceProgress = 0;
 
       for (const warning of optionalLeftUndefined) {
@@ -1238,12 +1292,16 @@ export class OneBunModule implements ModuleInstance {
         if (diMark) {
           getProfiler()!.end(diMark);
         }
-        // Re-throw bootstrap errors (DI resolution, circular deps) so they propagate
-        if (error instanceof Error && error.name.startsWith('OneBun')) {
+        // A framework bootstrap error already names what is wrong, so it propagates as it is.
+        if (isFrameworkBootstrapError(error)) {
           throw error;
         }
-        this.logger.error(`Failed to create service ${provider.name}: ${error}`);
-        neverConstructed.set(provider, 'constructor-threw');
+        // Anything else is the provider's own failure, and it ends the boot here — whether or not
+        // anything injects the provider. Logging it and dropping the provider instead would surface
+        // as a DependencyResolutionError about a dependency that IS registered (under
+        // TestingModule's silent logger, with no trace of the real error), as `undefined` for an
+        // @Optional() consumer, or as an application that boots without the service.
+        throw new ServiceConstructionError(provider.name, this.moduleClass.name, error);
       }
     }
 
@@ -1274,15 +1332,15 @@ export class OneBunModule implements ModuleInstance {
     if (cycle !== undefined) {
       const chain = cycle.map((provider) => provider.name).join(' -> ');
       const unresolvedServices = pending.map((provider) => provider.name);
-      const details = pending
-        .map((provider) => {
-          const wait = waitOf(provider);
-          const needs = wait.provider === wait.parameterType
-            ? wait.provider.name
-            : `${wait.parameterType.name} (${wait.provider.name})`;
+      const needsOf = (provider: Function): string => {
+        const wait = waitOf(provider);
 
-          return `  - ${provider.name} -> needs: [${needs}]`;
-        })
+        return wait.provider === wait.parameterType
+          ? wait.provider.name
+          : `${wait.parameterType.name} (${wait.provider.name})`;
+      };
+      const details = pending
+        .map((provider) => `  - ${provider.name} -> needs: [${needsOf(provider)}]`)
         .join('\n');
       this.logger.error(
         `Circular dependency detected in module ${this.moduleClass.name}!\n` +
@@ -1290,7 +1348,18 @@ export class OneBunModule implements ModuleInstance {
           `Dependency chain: ${chain}`,
       );
 
-      return new CircularDependencyError(this.moduleClass.name, chain, unresolvedServices);
+      // The chain names a class that declares no constructor as if it asked for the next one
+      // itself. The last entry repeats the first.
+      const notes = cycle.slice(0, -1).flatMap((provider) => {
+        const inherited = describeInheritedConstructor(provider);
+
+        return inherited === undefined
+          ? []
+          : [`${inherited.text}: that is where it needs ${needsOf(provider)}. Declare a constructor in `
+            + `${provider.name} that does not take it to break the cycle.`];
+      });
+
+      return new CircularDependencyError(this.moduleClass.name, chain, unresolvedServices, notes);
     }
 
     // No cycle, so walking the waits from any provider leaves the pending set: some provider
@@ -1298,11 +1367,14 @@ export class OneBunModule implements ModuleInstance {
     const consumer = pending.find((provider) => !waits.has(waitOf(provider).provider))!;
     const { provider: dependency, parameterType } = waitOf(consumer);
 
+    const note = this.inheritedConstructorNote(consumer, parameterType);
+    const reason = this.describeNeverConstructed(dependency, parameterType, neverConstructed.get(dependency));
+
     return new DependencyResolutionError(
       consumer.name,
       parameterType.name,
       'service',
-      [this.describeNeverConstructed(dependency, parameterType, neverConstructed.get(dependency))],
+      note === undefined ? [reason] : [note, reason],
     );
   }
 
@@ -1320,18 +1392,15 @@ export class OneBunModule implements ModuleInstance {
       : `${dependency.name} (it extends ${parameterType.name})`;
     const listed = `${subject} is listed in the providers of ${this.moduleClass.name}, but was never constructed`;
 
-    switch (reason) {
-      case 'undecorated':
-        return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
-          'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
-          '@onebun/core — deduplicate the dependency.';
-      case 'constructor-threw':
-        return `${listed}: creating it threw, and the error was logged as ` +
-          `"Failed to create service ${dependency.name}".`;
-      default:
-        return `${listed}: either it is not @Service()-decorated for this copy of @onebun/core, ` +
-          'or its constructor threw (see the error log).';
+    if (reason === 'undecorated') {
+      return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
+        'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
+        '@onebun/core — deduplicate the dependency.';
     }
+
+    // Not reached while skipping an undecorated provider is the only way to leave the queue
+    // without an instance: a constructor that throws ends the boot with a ServiceConstructionError.
+    return `${listed}: this copy of @onebun/core built no instance of it.`;
   }
 
   /**
@@ -1349,6 +1418,13 @@ export class OneBunModule implements ModuleInstance {
     const head = `${consumer.name} gets undefined for its @Optional() parameter #${index} (${parameterType.name}): `;
     if (reason !== undefined) {
       return head + this.describeNeverConstructed(provider, parameterType, reason);
+    }
+    // Typed as its own class, it goes to a subclass only when that one injects it back, so no
+    // listing order helps.
+    if (parameterType === consumer) {
+      return head + `${provider.name}, which extends it, injects ${consumer.name} in turn, so ${consumer.name} is ` +
+        `built first. Declare a constructor in ${provider.name} that does not take ${consumer.name} to have it ` +
+        'injected here.';
     }
 
     return head + `${provider.name}, which extends it, is not built yet, and an @Optional() parameter typed ` +
@@ -1573,7 +1649,7 @@ export class OneBunModule implements ModuleInstance {
    * `this.logger`, and the documented `this.config.get('auth.apiKey')` works at request time.
    *
    * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through as it
-   * is, so `@UseGuards(new RolesGuard(['admin']))` runs that one instance.
+   * is, so `@UseGuards(new RolesGuard(['admin'], rolesExtractor))` runs that one instance.
    *
    * Transport-agnostic: WebSocket gateways and queue consumers run their guards through this
    * same method, via the binding `createControllersWithDI` attaches to each instance, so
@@ -1777,8 +1853,11 @@ export class OneBunModule implements ModuleInstance {
    * is exactly what a module holding two registrations cannot use. An unselected token is an
    * error naming what the module DID select: silently falling back to the tag slot would hand
    * back the other database, which is the failure this whole mechanism exists to prevent.
+   *
+   * `owner` is the class whose constructor parameter carries the token. When it inherits that
+   * constructor the error says so: the class never mentions the token itself.
    */
-  private resolveByRegistrationToken(type: Function, token: symbol | string, requestedBy: string): unknown {
+  private resolveByRegistrationToken(type: Function, token: symbol | string, owner: Function): unknown {
     const registrationModule = findRegistrationModule(token, type);
     let tag: Context.Tag<unknown, unknown> | undefined;
     try {
@@ -1795,10 +1874,16 @@ export class OneBunModule implements ModuleInstance {
     const available = selected && selected.size > 0
       ? [...selected.keys()].map((module) => module.name).join(', ')
       : '(none)';
+    const inherited = describeInheritedConstructor(owner);
+    const inheritedHint = inherited === undefined
+      ? ''
+      : ` ${inherited.text}, and that is where the token comes from. Select it in this module, or declare a ` +
+        `constructor in ${owner.name} that does not take it.`;
     const error = new Error(
       `Module ${this.moduleClass.name} did not select the registration ` +
-      `${describeRegistrationToken(token)} that ${requestedBy} asks for. It selected: ` +
-      `${available}. Add forFeature(${describeRegistrationToken(token)}) to this module's imports.`,
+      `${describeRegistrationToken(token)} that ${owner.name} asks for. It selected: ` +
+      `${available}. Add forFeature(${describeRegistrationToken(token)}) to this module's imports.` +
+      inheritedHint,
     );
     error.name = 'OneBunUnselectedRegistrationError';
     throw error;
@@ -1813,7 +1898,7 @@ export class OneBunModule implements ModuleInstance {
     if (owner !== undefined && paramIndex !== undefined) {
       const token = getInjectToken(owner, paramIndex);
       if (token !== undefined) {
-        return this.resolveByRegistrationToken(type, token, owner.name);
+        return this.resolveByRegistrationToken(type, token, owner);
       }
     }
 
@@ -1855,7 +1940,7 @@ export class OneBunModule implements ModuleInstance {
     if (tag) {
       // Outside the try on purpose: an ambiguity error must propagate, not be swallowed by
       // the catch that exists only to detect a non-@Service class.
-      this.assertUnambiguous(tag, type.name);
+      this.assertUnambiguous(tag, type.name, owner);
 
       const byTag = this.serviceInstances.get(tag);
       if (byTag !== undefined) {
@@ -1928,7 +2013,7 @@ export class OneBunModule implements ModuleInstance {
       }
 
       throw new DependencyResolutionError(
-        target.name, paramType.name, kind, this.buildResolutionSuggestions(paramType),
+        target.name, paramType.name, kind, this.resolutionSuggestionsFor(target, paramType),
       );
     }
 
@@ -1973,13 +2058,13 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Say, once per class, that a class with no constructor types of its own is built without the
-   * constructor dependencies its parent takes.
+   * Say, once per class, that a class with no constructor types is built without the constructor
+   * dependencies of an ancestor, because DI could not carry them down to it.
    *
    * Nothing else would: the class boots, every such field is `undefined`, and the failure shows up
    * at the first request that uses one — as a 500 or a 403, far from its cause. Called only for a
-   * class DI found no constructor types for; see {@link findInheritedConstructorDependencies} for
-   * the two shapes that are reported. The advice names the decorator of the class's `kind`.
+   * class DI found no constructor types for; see {@link findUninheritedConstructorDependencies} for
+   * the shapes that are reported. The advice names the decorator of the class's `kind`.
    */
   private reportInheritedConstructorDependencies(target: Function, kind: ConstructedKind): void {
     if (this.inheritedDependenciesReported.has(target)) {
@@ -1987,36 +2072,81 @@ export class OneBunModule implements ModuleInstance {
     }
     this.inheritedDependenciesReported.add(target);
 
-    const inherited = findInheritedConstructorDependencies(target);
-    if (inherited === undefined) {
+    const uninherited = findUninheritedConstructorDependencies(target);
+    if (uninherited === undefined) {
       return;
     }
 
-    const names = inherited.types.map((type) => type?.name ?? 'unresolvable').join(', ');
-    const decorator = decoratorFor(target, kind);
-    if (inherited.declaresParameters) {
-      this.logger.warn(
-        `${target.name} declares a constructor with parameters, but no types were emitted for them, so `
+    this.logger.warn(this.describeUninheritedConstructorDependencies(target, kind, uninherited));
+  }
+
+  /** The warning {@link reportInheritedConstructorDependencies} logs, for each shape it reports. */
+  private describeUninheritedConstructorDependencies(
+    target: Function,
+    kind: ConstructedKind,
+    { ancestor, types, stoppedAt }: UninheritedConstructorDependencies,
+  ): string {
+    const names = describeParamTypes(types);
+    const decorator = decoratorFor(stoppedAt, kind);
+
+    if (stoppedAt === target && target.length > 0) {
+      return `${target.name} declares a constructor with parameters, but no types were emitted for them, so `
         + 'it is built with no constructor arguments and each parameter receives undefined. TypeScript '
-        + 'emits constructor types only for a class that carries a decorator, and DI never borrows a '
-        + `parent's: those of ${inherited.ancestor.name} (${names}) are not used. Add ${decorator} to `
-        + `${target.name} to have its constructor injected.`,
-      );
-
-      return;
+        + 'emits constructor types only for a class that carries a decorator, and DI never hands a class '
+        + `that declares its own constructor the types of its parent's: those of ${ancestor.name} (${names}) `
+        + `are not used. Add ${decorator} to ${target.name} to have its constructor injected.`;
     }
 
-    // Worded for both shapes that reach here: no constructor at all, and — indistinguishable from
-    // it — an undecorated class whose own constructor takes no parameters and may supply the
-    // parent's dependencies itself.
-    this.logger.warn(
-      `${target.name} declares no constructor of its own (or, without a decorator, one whose parameter `
-      + 'types were not recorded), so it is built with no constructor arguments: DI reads a class\'s OWN '
-      + `constructor types, never its parent's. If it inherits the constructor of ${inherited.ancestor.name}, `
-      + `which takes (${names}), each of them receives undefined. To have them injected, declare the `
-      + `constructor in ${target.name} with those parameters, pass them to super(...), and give `
-      + `${target.name} a decorator (${decorator}) if it has none.`,
-    );
+    if (stoppedAt === target) {
+      // Worded for both shapes that reach here: no constructor at all, and — indistinguishable from
+      // it without a decorator — a constructor that takes no parameters and may supply the parent's
+      // dependencies itself.
+      return `${target.name} declares no constructor of its own (or, without a decorator, one whose parameter `
+        + 'types were not recorded), so it is built with no constructor arguments: DI injects a class with '
+        + 'the dependencies of the constructor it inherits only when the class carries a decorator, which is '
+        + `what tells the two apart. If it inherits the constructor of ${ancestor.name}, which takes (${names}), `
+        + `each of them receives undefined. Give ${target.name} a decorator (${decorator}) to have them injected.`;
+    }
+
+    if (stoppedAt.length > 0) {
+      return `${target.name} declares no constructor of its own and runs the one it inherits from ${stoppedAt.name}, `
+        + 'which declares parameters, but no types were emitted for them (TypeScript emits them only for a '
+        + `class that carries a decorator): ${target.name} is built with no constructor arguments and each `
+        + `of them receives undefined. Add ${decorator} to ${stoppedAt.name} to have its constructor injected.`;
+    }
+
+    return `${target.name} declares no constructor of its own, but it is built with no constructor arguments: `
+      + `${stoppedAt.name}, which it extends, carries no decorator, so DI cannot tell whether ${stoppedAt.name} `
+      + `declares a constructor, and hands ${target.name} nothing from above it. If ${target.name} runs the `
+      + `constructor of ${ancestor.name}, which takes (${names}), each of them receives undefined. Give `
+      + `${stoppedAt.name} a decorator (${decorator}) if it declares no constructor, or declare the constructor `
+      + `in ${target.name} with those parameters and pass them to super(...).`;
+  }
+
+  /**
+   * The resolution suggestions for a dependency `target` needs, led by
+   * {@link inheritedConstructorNote} when the parameter belongs to a constructor `target` inherits.
+   */
+  private resolutionSuggestionsFor(target: Function, missingType: Function): string[] {
+    const note = this.inheritedConstructorNote(target, missingType);
+    const suggestions = this.buildResolutionSuggestions(missingType);
+
+    return note === undefined ? suggestions : [note, ...suggestions];
+  }
+
+  /**
+   * Say that the missing dependency is a parameter of the constructor `target` inherits, or
+   * `undefined` when `target` declares its own (see {@link describeInheritedConstructor}): a
+   * provider missing for its parent is missing for it too.
+   */
+  private inheritedConstructorNote(target: Function, missingType: Function): string | undefined {
+    const inherited = describeInheritedConstructor(target);
+    if (inherited === undefined) {
+      return undefined;
+    }
+
+    return `${inherited.text}. Provide ${missingType.name}, mark that parameter @Optional() in `
+      + `${inherited.source.name}, or declare a constructor in ${target.name} that does not take it.`;
   }
 
   /**
@@ -2126,8 +2256,12 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Collect all descendant modules in depth-first order (leaves first).
-   * This ensures that deeply nested modules are initialized before their parents.
+   * Collect all descendant modules in depth-first post-order (leaves first).
+   *
+   * `childModules` holds only the modules this one BUILT (a module reused from the scope, or a
+   * `@Global()` one built by the tree root's pre-pass, sits under whoever built it first), so this
+   * is the order in which the modules finished construction. Every module that imports another
+   * finished after it, which is what lets `setup()` initialize imports before their importers.
    */
   private collectDescendantModules(): OneBunModule[] {
     const result: OneBunModule[] = [];
@@ -2142,13 +2276,13 @@ export class OneBunModule implements ModuleInstance {
   setup(): Effect.Effect<unknown, never, void> {
     const allDescendants = this.collectDescendantModules();
 
-    return this.callServicesOnModuleInit().pipe(
-      // Run onModuleInit for all descendant modules' services (depth-first)
-      Effect.flatMap(() =>
-        Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
-          discard: true,
-        }),
-      ),
+    // Services' onModuleInit: every imported module first, leaves first, and this module last.
+    // A service here may inject one an import exports, and its hook must find that dependency's
+    // hook already completed — within a module `pendingServiceInits` gives the same guarantee.
+    return Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
+      discard: true,
+    }).pipe(
+      Effect.flatMap(() => this.callServicesOnModuleInit()),
       // Resolve module-level middleware with DI (services are now available)
       // resolveModuleMiddleware is recursive and handles all descendants
       Effect.flatMap(() =>

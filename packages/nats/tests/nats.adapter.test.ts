@@ -10,6 +10,7 @@ import {
   it,
   expect,
   beforeEach,
+  mock,
 } from 'bun:test';
 
 import type {
@@ -17,7 +18,11 @@ import type {
   MessageHandler,
   SubscribeOptions,
 } from '@onebun/core';
-import { createQueuePatternMatcher, resolveAckMode } from '@onebun/core';
+import {
+  createQueuePatternMatcher,
+  QueuePublishError,
+  resolveAckMode,
+} from '@onebun/core';
 
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
 
@@ -52,6 +57,82 @@ describe('NatsQueueAdapter', () => {
     it('should not be connected initially', () => {
       expect(adapter.isConnected()).toBe(false);
     });
+
+    /**
+     * The real `NatsClient` with only the driver connection substituted on it: the driver is
+     * resolved through a module-level dynamic import, and `mock.module` is banned in this repo.
+     * The double models what `@nats-io/nats-core` does — a drain that succeeds ends by closing,
+     * one that fails leaves the connection open.
+     */
+    function connectWith(drain: () => Promise<void>) {
+      const state = { closed: false };
+      let markClosed!: () => void;
+      const closed = new Promise<void>((resolve) => {
+        markClosed = () => {
+          state.closed = true;
+          resolve();
+        };
+      });
+      const nc = {
+        drain: mock(async () => {
+          await drain();
+          markClosed();
+        }),
+        close: mock(async () => {
+          markClosed();
+        }),
+        isClosed: mock(() => state.closed),
+        closed: mock(() => closed),
+      };
+      const unsubscribe = mock(() => undefined);
+      const a = asAny(adapter);
+      a.client.nc = nc;
+      a.connected = true;
+      a.subscriptions = [{ pattern: 'orders.*', handle: { unsubscribe } }];
+
+      return { nc, state, unsubscribe };
+    }
+
+    it('disconnect() on a healthy connection drains, closes and resolves', async () => {
+      const { nc, state, unsubscribe } = connectWith(() => Promise.resolve());
+      expect(adapter.isConnected()).toBe(true);
+
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(nc.drain).toHaveBeenCalledTimes(1);
+      expect(state.closed).toBe(true);
+      expect(adapter.isConnected()).toBe(false);
+    });
+
+    it('disconnect() during an outage closes the connection, resets its state and rethrows the drain error', async () => {
+      const drainError = new Error('connection disconnected');
+      const { nc, state } = connectWith(() => Promise.reject(drainError));
+
+      await expect(adapter.disconnect()).rejects.toBe(drainError);
+
+      expect(nc.close).toHaveBeenCalledTimes(1);
+      expect(state.closed).toBe(true);
+      expect(asAny(adapter).connected).toBe(false);
+      expect(asAny(adapter).client.getConnection()).toBeNull();
+      expect(adapter.isConnected()).toBe(false);
+    });
+
+    it('disconnect() resets its own state when the client disconnect rejects', async () => {
+      connectWith(() => Promise.resolve());
+      const failure = new Error('connection disconnected');
+      const a = asAny(adapter);
+      a.client.disconnect = mock(() => Promise.reject(failure));
+      a.client.isConnected = mock(() => true);
+
+      await expect(adapter.disconnect()).rejects.toBe(failure);
+
+      // The client double still answers `isConnected() === true`, so a false here can only
+      // come from the adapter's own flag.
+      expect(adapter.isConnected()).toBe(false);
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+      expect(a.client.disconnect).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('feature support', () => {
@@ -85,6 +166,14 @@ describe('NatsQueueAdapter', () => {
       await expect(adapter.publish('test', { data: 'test' })).rejects.toThrow(
         'NatsQueueAdapter not connected',
       );
+    });
+
+    it('throws a QueuePublishError "unavailable" for a publish before connect()', async () => {
+      const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+      expect(thrown).toBeInstanceOf(QueuePublishError);
+      expect((thrown as QueuePublishError).reason).toBe('unavailable');
+      expect((thrown as QueuePublishError).safeToRepeat).toBe(true);
     });
 
     it('should throw when subscribing without connecting', async () => {
@@ -281,6 +370,225 @@ describe('NatsQueueAdapter', () => {
       const message = await deliverTo('orders.{id}', 'orders.9');
 
       expect(Object.keys(message?.metadata ?? {})).not.toContain('params');
+    });
+
+    it('runs the handler of a native ">" or "*" pattern for every subject the server delivers, capturing nothing', async () => {
+      expect((await deliverTo('events.>', 'events.user.signed'))?.subject).toBe('events.user.signed');
+      expect((await deliverTo('events.>', 'events.user.signed'))?.params).toEqual({});
+      expect((await deliverTo('>', 'events.user.signed'))?.params).toEqual({});
+      expect((await deliverTo('events.*', 'events.signed'))?.params).toEqual({});
+      expect((await deliverTo('tenants.{tenant}.>', 'tenants.acme.orders.created'))?.params)
+        .toEqual({ tenant: 'acme' });
+    });
+
+    it('runs the handler of a glued wildcard for the literal subject the server delivers to it', async () => {
+      expect((await deliverTo('orders.v*', 'orders.v*'))?.subject).toBe('orders.v*');
+      expect((await deliverTo('events.a>b', 'events.a>b'))?.subject).toBe('events.a>b');
+      expect((await deliverTo('events.{id}>', 'events.1>'))?.params).toEqual({ id: '1' });
+    });
+  });
+
+  describe('subscription patterns NATS cannot express', () => {
+    /** A connected adapter whose client records what reached it, without a server. */
+    function connectedAdapter(): { connected: NatsQueueAdapter; subscribe: ReturnType<typeof mock> } {
+      const connected = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
+      const subscribe = mock(() => Promise.resolve({ unsubscribe: () => undefined }));
+      asAny(connected).connected = true;
+      asAny(connected).client = { subscribe, isConnected: () => true };
+
+      return { connected, subscribe };
+    }
+
+    for (const pattern of ['events.>.created', '>.created', 'orders..created', 'orders.', 'orders.new order']) {
+      it(`refuses "${pattern}", which no subject can match, before the client subscribes`, async () => {
+        const { connected, subscribe } = connectedAdapter();
+
+        const thrown = await connected.subscribe(pattern, async () => undefined).catch((error: unknown) => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect((thrown as Error).message).toContain(`"${pattern}"`);
+        expect(subscribe).not.toHaveBeenCalled();
+      });
+    }
+
+    it('subscribes a native ">" and "*" pattern on the subject it spells', async () => {
+      const { connected, subscribe } = connectedAdapter();
+
+      await connected.subscribe('events.>', async () => undefined);
+      await connected.subscribe('orders.*', async () => undefined);
+      await connected.subscribe('events.#', async () => undefined);
+
+      expect(subscribe.mock.calls.map(call => (call as unknown[])[0])).toEqual(['events.>', 'orders.*', 'events.>']);
+    });
+
+    it('subscribes a glued wildcard on the literal subject it spells, widened only by a parameter', async () => {
+      const { connected, subscribe } = connectedAdapter();
+
+      for (const pattern of ['orders.v*', 'orders.a*b', 'events.new>', 'events.a>b', 'orders.{id}>']) {
+        await connected.subscribe(pattern, async () => undefined);
+      }
+
+      expect(subscribe.mock.calls.map(call => (call as unknown[])[0]))
+        .toEqual(['orders.v*', 'orders.a*b', 'events.new>', 'events.a>b', 'orders.*']);
+    });
+  });
+
+  describe('delivery subject', () => {
+    /**
+     * `processMessage` with a frame the server delivered on `subject` whose envelope names
+     * `envelopePattern`. Any client allowed to publish on one subject can write another pattern
+     * into the envelope; the subject is the server's.
+     */
+    async function deliverOn(
+      pattern: string,
+      frame: { subject: string; data: string; headers?: Map<string, string[]> },
+    ): Promise<Message | null> {
+      let received: Message | null = null;
+
+      const entry = {
+        pattern,
+        async handler(message: Message) {
+          received = message;
+        },
+        options: undefined,
+        matcher: createQueuePatternMatcher(pattern),
+        paused: false,
+        ackMode: resolveAckMode(undefined),
+      };
+
+      await asAny(adapter).processMessage(entry, frame);
+
+      return received;
+    }
+
+    function envelope(pattern: string): string {
+      return JSON.stringify({
+        id: 'forged-1', pattern, data: { ok: true }, timestamp: 1, metadata: { claimedBy: 'b' },
+      });
+    }
+
+    it('captures params from the subject the message arrived on, not from the envelope', async () => {
+      // onebun-FB-53: delivered on `app-a.wq.result.1`, the envelope claiming `app-b.wq.result.999`.
+      const message = await deliverOn('*.wq.result.{id}', {
+        subject: 'app-a.wq.result.1',
+        data: envelope('app-b.wq.result.999'),
+      });
+
+      expect(message?.pattern).toBe('app-a.wq.result.1');
+      expect(message?.subject).toBe('app-a.wq.result.1');
+      expect(message?.params).toEqual({ id: '1' });
+      // The rest of the envelope is the publisher's to write, and arrives as written.
+      expect(message?.id).toBe('forged-1');
+      expect(message?.metadata).toEqual({ claimedBy: 'b' });
+    });
+
+    it('does not run a handler its subject does not match, whatever the envelope names', async () => {
+      // `jobs.v{version}` subscribes the wider `jobs.*`, so the server hands it `jobs.x` too.
+      const message = await deliverOn('jobs.v{version}', { subject: 'jobs.x', data: envelope('jobs.v2') });
+
+      expect(message).toBeNull();
+    });
+
+    it('runs the handler its subject matches, whatever the envelope names', async () => {
+      const message = await deliverOn('jobs.v{version}', { subject: 'jobs.v3', data: envelope('jobs.x') });
+
+      expect(message?.params).toEqual({ version: '3' });
+      expect(message?.pattern).toBe('jobs.v3');
+    });
+
+    it('delivers a message whose envelope pattern is not a string, matched on its subject', async () => {
+      const message = await deliverOn('orders.{id}', {
+        subject: 'orders.8',
+        data: JSON.stringify({
+          id: 'n-1', pattern: 123, data: {}, timestamp: 1,
+        }),
+      });
+
+      expect(message?.params).toEqual({ id: '8' });
+      expect(message?.pattern).toBe('orders.8');
+    });
+
+    it('exposes the wire headers and no stream', async () => {
+      const headers = new Map([['X-Probe', ['a', 'b']]]);
+      const message = await deliverOn('orders.created', {
+        subject: 'orders.created',
+        data: envelope('orders.created'),
+        headers,
+      });
+
+      expect(message?.headers?.get('X-Probe')).toEqual(['a', 'b']);
+      // Core NATS has no streams.
+      expect(message?.stream).toBeUndefined();
+    });
+
+    it('leaves headers undefined on a message that carried none', async () => {
+      const message = await deliverOn('orders.created', { subject: 'orders.created', data: envelope('orders.created') });
+
+      expect(message?.headers).toBeUndefined();
+    });
+
+    it('carries headers through a spread, as an own property like JetStream', async () => {
+      const headers = new Map([['X-Probe', ['a']]]);
+      const message = await deliverOn('orders.created', {
+        subject: 'orders.created',
+        data: envelope('orders.created'),
+        headers,
+      });
+
+      expect(({ ...message } as Message).headers).toBe(headers);
+      expect(Object.keys(message!)).toContain('headers');
+    });
+
+    describe('a message published through publish()', () => {
+      /**
+       * Publishes through the adapter, then delivers exactly what reached the client. The
+       * expectation is what the envelope-reading path gave — `pattern` from the envelope's own
+       * field, `params` from matching it — so this pins "unchanged for publish()".
+       */
+      async function roundTrip(subscription: string, topic: string) {
+        const sent: Array<{ subject: string; data: string; headers?: Record<string, string> }> = [];
+        const a = asAny(adapter);
+        a.connected = true;
+        a.client = {
+          publish: mock(async (subject: string, data: string, headers?: Record<string, string>) => {
+            sent.push({ subject, data, headers });
+          }),
+        };
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await adapter.publish(topic, { n: 1 }, { metadata: { headers: { 'X-Probe': 'p' } } });
+
+        const [frame] = sent;
+        const envelopePattern = (JSON.parse(frame.data) as { pattern: string }).pattern;
+        const message = await deliverOn(subscription, {
+          subject: frame.subject,
+          data: frame.data,
+          headers: new Map(Object.entries(frame.headers ?? {}).map(([name, value]) => [name, [value]])),
+        });
+
+        return {
+          message,
+          envelopePattern,
+          expectedParams: createQueuePatternMatcher(subscription)(envelopePattern).params,
+        };
+      }
+
+      for (const [subscription, topic] of [
+        ['orders.{id}', 'orders.42'],
+        ['{kind}.{id}', 'orders.42'],
+        ['orders.*', 'orders.created'],
+        ['orders.#', 'orders.42.shipped'],
+        ['orders.created', 'orders.created'],
+      ] as const) {
+        it(`shows the same pattern and params as before for ${topic} on ${subscription}`, async () => {
+          const { message, envelopePattern, expectedParams } = await roundTrip(subscription, topic);
+
+          expect(message?.pattern).toBe(envelopePattern);
+          expect(message?.params).toEqual(expectedParams);
+          expect(message?.subject).toBe(topic);
+          expect(message?.headers?.get('X-Probe')).toEqual(['p']);
+        });
+      }
     });
   });
 

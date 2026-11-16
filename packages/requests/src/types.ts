@@ -115,7 +115,13 @@ export type ApiResponse<T = unknown, E extends string = string, R extends string
   | ErrorResponse<E, R>;
 
 /**
- * Base OneBun error class
+ * Base OneBun error class.
+ *
+ * What the Promise API of `@onebun/requests` and the service client reject with: a failure's
+ * `ErrorResponse` becomes the subclass {@link OneBunBaseError.fromErrorResponse} picks, with the
+ * failure's `error`, `code` and `details`.
+ *
+ * @see docs:api/requests.md
  */
 export abstract class OneBunBaseError<
   E extends string = string,
@@ -142,6 +148,14 @@ export abstract class OneBunBaseError<
     };
   }
 
+  /**
+   * The error an `ErrorResponse` stands for: the class named after its `code`, carrying its
+   * `error`, `details` (the same record, not a copy) and `originalError`.
+   *
+   * A `code` without a class of its own keeps its value: `0`, a transport failure, becomes a
+   * {@link TransportError}, and any other code a {@link HttpStatusError} with that code, so a 418
+   * reads as a 418 and a timeout as a transport failure, not as a server failure.
+   */
   static fromErrorResponse<U extends string, V extends string>(
     errorResponse: ErrorResponse<U, V>,
   ): OneBunBaseError<U, V> {
@@ -212,8 +226,15 @@ export abstract class OneBunBaseError<
           errorResponse.details,
           errorResponse.originalError,
         );
+      case TRANSPORT_FAILURE_CODE:
+        return new TransportError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       default:
-        return new InternalServerError<U, V>(
+        return new HttpStatusError<U, V>(
+          errorResponse.code,
           errorResponse.error,
           errorResponse.details,
           errorResponse.originalError,
@@ -316,6 +337,49 @@ export class GatewayTimeoutError<
   R extends string = string,
 > extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.GATEWAY_TIMEOUT;
+}
+
+/**
+ * An error for a status that has no class of its own — a 418, a 405, a 408 — which it keeps as
+ * its `code`.
+ *
+ * The HTTP client also uses it for a failure whose `code` is the status of a response that did
+ * arrive but is not an error status: a `REDIRECT_ERROR` (its 3xx), and a `RESPONSE_PARSE_ERROR`,
+ * `RESPONSE_READ_ERROR`, `RESPONSE_TOO_LARGE` or `RESPONSE_DECODE_ERROR` of a 2xx or 3xx. The
+ * default exception filter answers a code outside 400–599 with HTTP 500.
+ *
+ * @see docs:api/requests.md
+ */
+export class HttpStatusError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
+  public readonly code: number;
+
+  constructor(
+    code: number,
+    error: E,
+    details: Record<string, unknown> = {},
+    originalError?: OneBunError<R>,
+  ) {
+    super(error, details, originalError);
+    this.code = code;
+  }
+}
+
+/**
+ * A request that failed before a complete response arrived: the client-side timeout
+ * (`TIMEOUT_ERROR`), an abort (`ABORT_ERROR`) or a network failure (`FETCH_ERROR`). Its `code` is
+ * {@link TRANSPORT_FAILURE_CODE}, `0`, since no status describes it, and
+ * `getTransportFailureKind(error)` reads the kind.
+ *
+ * @see docs:api/requests.md
+ */
+export class TransportError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
+  public readonly code: number = TRANSPORT_FAILURE_CODE;
 }
 
 /**
@@ -475,7 +539,9 @@ export interface OneBunAuthConfig {
  *
  * - `timeout` — the client-side timeout fired, before the headers arrived or while the body was
  *   being read; the server may still have processed the request. A timeout during the body read
- *   keeps the status that did arrive in `details.statusCode`, with `details.phase: 'body'`.
+ *   keeps the status that did arrive in `details.statusCode`, with `details.phase: 'body'`. A
+ *   timeout with `details.phase: 'request-body'` fired while a `Blob` payload was being read,
+ *   before the first attempt: nothing was sent, so the server never saw the request.
  * - `abort` — the request was aborted deliberately rather than by the timeout
  * - `network` — the connection failed before a response arrived: refused, DNS, TLS, or reset. A
  *   refused connection or a failed lookup proves the server never saw the request; a reset after
@@ -497,7 +563,8 @@ export type TransportFailureKind = 'timeout' | 'abort' | 'network';
 export const TRANSPORT_FAILURE_CODE = 0;
 
 /**
- * Read the transport failure kind off a response, if it is one.
+ * Read the transport failure kind off a failure, if it is one: an `ErrorResponse` (the Effect
+ * API's failure) or the `OneBunBaseError` the Promise API rejects with.
  *
  * Returns `undefined` for every response that came back from a server complete, including 5xx. A
  * response whose body timed out did not: it is a `'timeout'`, and the status that arrived is in
@@ -506,11 +573,13 @@ export const TRANSPORT_FAILURE_CODE = 0;
  * @see docs:api/requests.md
  */
 export function getTransportFailureKind(response: unknown): TransportFailureKind | undefined {
-  if (!isErrorResponse(response) || response.code !== TRANSPORT_FAILURE_CODE) {
+  const failure = response instanceof OneBunBaseError || isErrorResponse(response) ? response : undefined;
+
+  if (failure === undefined || failure.code !== TRANSPORT_FAILURE_CODE) {
     return undefined;
   }
 
-  const kind = response.details?.transport;
+  const kind = failure.details?.transport;
 
   return kind === 'timeout' || kind === 'abort' || kind === 'network' ? kind : undefined;
 }
@@ -595,12 +664,30 @@ export type ResponseType = 'auto' | 'bytes' | 'stream';
 
 /**
  * Request configuration
+ *
+ * @see docs:api/requests.md
  */
 export interface RequestConfig {
   method: HttpMethod;
   url: string;
   headers?: Record<string, string>;
   query?: Record<string, unknown>;
+  /**
+   * The request body, sent for `POST`, `PUT` and `PATCH`:
+   *
+   * - a string as it is, and any other value as `JSON.stringify` makes it, labelled
+   *   `application/json`;
+   * - a `Uint8Array` (a `Buffer` is one), an `ArrayBuffer` or a `Blob` (a `Bun.file()` is one) as
+   *   its bytes, labelled with the `Blob`'s own type, else `application/octet-stream`.
+   *
+   * Exactly one `Content-Type` is sent, matched in any letter case: the request's, else the
+   * client's, else that label. Every attempt, every 307/308 hop and the `onebun` signature carry the
+   * same bytes; a `Blob` is read once, within `timeout`, before the first attempt. A value with a
+   * `toJSON` is a JSON value. A stream (a `ReadableStream`, a Node.js `Readable`, an async generator
+   * object), any other typed array or `DataView`, a `SharedArrayBuffer`, a value `JSON.stringify`
+   * throws on, and a `Blob` whose read fails fail `REQUEST_CONFIG_ERROR` (`details.option: 'data'`)
+   * before anything is sent.
+   */
   data?: unknown;
   timeout?: number;
   retries?: Partial<RetryConfig>;

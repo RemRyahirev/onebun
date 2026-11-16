@@ -13,6 +13,8 @@
  */
 
 import * as realJetStream from '@nats-io/jetstream';
+import { jserrors } from '@nats-io/jetstream/internal';
+import { errors as natsErrors, headers as natsHeaders } from '@nats-io/transport-node';
 import {
   describe,
   it,
@@ -25,6 +27,12 @@ import {
 
 import type { JetStreamAdapterOptions } from '../src/types';
 
+import type { Message, QueuePublishFailureReason } from '@onebun/core';
+import {
+  createQueuePatternMatcher,
+  isLastAttempt,
+  QueuePublishError,
+} from '@onebun/core';
 import { useFakeTimers } from '@onebun/core/testing';
 
 
@@ -34,6 +42,9 @@ import {
   hashReconcileConfig,
 } from '../src/config-stamp';
 import { JetStreamQueueAdapter, createJetStreamQueueAdapter } from '../src/jetstream.adapter';
+
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
 
 // ============================================================================
 // Helpers to access private internals via casting
@@ -91,6 +102,18 @@ function makeApiError(code: number, message: string): AnyRecord {
   return err;
 }
 
+/**
+ * What `js.publish()` rejects with when no stream binds `subject`, built the way the client builds
+ * it: the server's no-responders answer, wrapped in a `RequestError`, wrapped in
+ * `JetStreamNotEnabled` with the text "jetstream is not enabled".
+ */
+function noStreamBindsRejection(subject: string): Error {
+  const noResponders = new natsErrors.NoRespondersError(subject);
+  const request = new natsErrors.RequestError(noResponders.message, { cause: noResponders });
+
+  return new jserrors.JetStreamNotEnabled('jetstream is not enabled', { cause: request });
+}
+
 // ============================================================================
 // Mock factories
 // ============================================================================
@@ -121,6 +144,17 @@ function makeMockJsMsg(overrides: Partial<AnyRecord> = {}): AnyRecord {
     info: { redelivered: false },
     ...overrides,
   };
+}
+
+/**
+ * A body as `publish()` writes it, with the case's own fields on top. The consume loop takes an
+ * object for a OneBun envelope when it carries a `data` key, or a string `id` and a numeric
+ * `timestamp`; this body has all three, so a case that overrides one still delivers.
+ */
+function envelopeJson(fields: AnyRecord = {}): string {
+  return JSON.stringify({
+    id: 'msg-1', pattern: 'test.topic', data: {}, timestamp: 1, metadata: {}, ...fields,
+  });
 }
 
 /**
@@ -709,6 +743,116 @@ describe('JetStreamQueueAdapter', () => {
       await connectedAdapter.disconnect();
 
       expect(a.subscriptions).toHaveLength(0);
+    });
+
+    it('disconnect() resets its own state and rethrows when the client disconnect rejects', async () => {
+      const { adapter: connectedAdapter } = makeConnectedAdapter();
+      const a = asAny(connectedAdapter);
+      const failure = new Error('connection disconnected');
+      a.client.disconnect = mock(() => Promise.reject(failure));
+      a.jsmPending = Promise.resolve(a.jsm);
+
+      await expect(connectedAdapter.disconnect()).rejects.toBe(failure);
+
+      // The client double still answers `isConnected() === true`, so a false here can only
+      // come from the adapter's own flag.
+      expect(connectedAdapter.isConnected()).toBe(false);
+      expect(a.connected).toBe(false);
+      expect(a.js).toBeNull();
+      expect(a.jsm).toBeNull();
+      expect(a.jsmPending).toBeNull();
+    });
+
+    it('disconnect() after a rejected disconnect is a no-op', async () => {
+      const { adapter: connectedAdapter } = makeConnectedAdapter();
+      const a = asAny(connectedAdapter);
+      a.client.disconnect = mock(() => Promise.reject(new Error('connection disconnected')));
+      await connectedAdapter.disconnect().catch(() => undefined);
+
+      await expect(connectedAdapter.disconnect()).resolves.toBeUndefined();
+
+      expect(a.client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('disconnect() during an outage closes the driver connection even though the drain rejects', async () => {
+      // The real NatsClient this time, with only the driver connection substituted: what the
+      // driver does when `disconnect()` lands while it is reconnecting is reject the drain on
+      // the next reconnect attempt and leave the connection open.
+      const outageAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
+      });
+      activeAdapters.push(outageAdapter);
+      const a = asAny(outageAdapter);
+      const drainError = new Error('connection disconnected');
+      let closed = false;
+      const closedSignal = makeDeferred();
+      const nc = {
+        drain: mock(() => Promise.reject(drainError)),
+        close: mock(async () => {
+          closed = true;
+          closedSignal.resolve();
+        }),
+        isClosed: mock(() => closed),
+        closed: mock(() => closedSignal.promise),
+      };
+      a.client.nc = nc;
+      a.connected = true;
+      a.js = {};
+      a.jsm = {};
+      expect(outageAdapter.isConnected()).toBe(true);
+
+      await expect(outageAdapter.disconnect()).rejects.toBe(drainError);
+
+      expect(nc.close).toHaveBeenCalledTimes(1);
+      expect(closed).toBe(true);
+      expect(a.client.getConnection()).toBeNull();
+      expect(a.client.isConnected()).toBe(false);
+      expect(outageAdapter.isConnected()).toBe(false);
+      expect(a.js).toBeNull();
+      expect(a.jsm).toBeNull();
+    });
+
+    it('disconnect() settles when the driver gives up reconnecting while the drain is pending', async () => {
+      // nats-core closes the connection itself once `maxReconnectAttempts` is spent, and never
+      // settles a drain whose flush was still waiting: only another reconnect attempt would have.
+      const givingUpAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
+      });
+      activeAdapters.push(givingUpAdapter);
+      const a = asAny(givingUpAdapter);
+      const gaveUp = new Error('connection refused');
+      let closed = false;
+      let closeWith!: (reason: Error) => void;
+      const closedSignal = new Promise<Error>((resolve) => {
+        closeWith = (reason) => {
+          closed = true;
+          resolve(reason);
+        };
+      });
+      const nc = {
+        drain: mock(() => new Promise<void>(() => undefined)),
+        close: mock(() => Promise.resolve()),
+        isClosed: mock(() => closed),
+        closed: mock(() => closedSignal),
+      };
+      a.client.nc = nc;
+      a.connected = true;
+      a.js = {};
+      a.jsm = {};
+
+      const disconnecting = givingUpAdapter.disconnect();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(Bun.peek.status(disconnecting)).toBe('pending');
+
+      closeWith(gaveUp);
+
+      await expect(disconnecting).rejects.toBe(gaveUp);
+      expect(a.client.getConnection()).toBeNull();
+      expect(a.connected).toBe(false);
+      expect(givingUpAdapter.isConnected()).toBe(false);
+      await expect(givingUpAdapter.disconnect()).resolves.toBeUndefined();
     });
   });
 
@@ -2425,9 +2569,12 @@ describe('ensureConsumer: replicas creating the same consumer at once', () => {
 // ============================================================================
 
 describe('publish() failure reporting', () => {
-  /** The rejection a real broker sends for a subject no stream binds. */
+  /**
+   * The rejection a real broker produces for a subject no stream binds: the client turns the
+   * server's no-responders answer into `JetStreamNotEnabled`, with the request error under it.
+   */
   function jetStreamNotEnabled(): Error {
-    return new Error('jetstream is not enabled');
+    return noStreamBindsRejection('orders.created');
   }
 
   it('names the OneBun pattern and the NATS subject', async () => {
@@ -2498,6 +2645,65 @@ describe('publish() failure reporting', () => {
     }
 
     expect(thrown!.cause).toBe(original);
+  });
+
+  // One per reason, each with the rejection the driver produces for it (provoked on a live server
+  // in publish-failure.integration.test.ts).
+  const rejections: Array<[string, () => Error, QueuePublishFailureReason, string]> = [
+    ['no stream binds the subject', jetStreamNotEnabled, 'rejected', 'no stream on the broker binds that subject'],
+    [
+      'a stream limit',
+      () => new realJetStream.JetStreamApiError({ err_code: 10077, code: 503, description: 'maximum messages exceeded' }),
+      'rejected',
+      'JetStream API error 10077, "maximum messages exceeded"',
+    ],
+    ['a closed connection', () => new natsErrors.ClosedConnectionError(), 'unavailable', 'the connection to NATS is closed'],
+    ['an acknowledgement timeout', () => new natsErrors.TimeoutError(), 'unknown', 'no acknowledgement arrived in time'],
+  ];
+
+  for (const [label, rejection, reason, wording] of rejections) {
+    it(`throws a QueuePublishError "${reason}" for ${label}, naming that cause`, async () => {
+      const { adapter, mockJs } = makeConnectedAdapter();
+      const original = rejection();
+      mockJs.publish = mock(() => Promise.reject(original));
+
+      const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+      expect(thrown).toBeInstanceOf(QueuePublishError);
+      const error = thrown as QueuePublishError;
+      expect(error.reason).toBe(reason);
+      expect(error.safeToRepeat).toBe(reason !== 'unknown');
+      expect(error.pattern).toBe('orders.created');
+      expect(error.cause).toBe(original);
+      expect(error.message).toContain(wording);
+    });
+  }
+
+  it('mentions stream declarations only when no stream binds the subject', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter();
+    mockJs.publish = mock(() => Promise.reject(new natsErrors.TimeoutError()));
+
+    const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+    expect((thrown as Error).message).not.toContain('This application declares');
+    expect((thrown as Error).message).not.toContain('most common cause');
+  });
+
+  it('throws a QueuePublishError "unavailable" before connect(), without reaching the driver', async () => {
+    const adapter = new JetStreamQueueAdapter({ servers: 'nats://localhost:4222', streams: [] });
+
+    const thrown = await adapter.publish('orders.created', { id: 1 }).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(QueuePublishError);
+    expect((thrown as QueuePublishError).reason).toBe('unavailable');
+    expect((thrown as Error).message).toContain('JetStreamQueueAdapter not connected');
+  });
+
+  it('throws a payload JSON cannot serialise as its own TypeError, before anything is sent', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter();
+
+    await expect(adapter.publish('orders.created', { amount: BigInt(1) })).rejects.toBeInstanceOf(TypeError);
+    expect(mockJs.publish).not.toHaveBeenCalled();
   });
 
   it('does not pre-flight against the locally declared streams', async () => {
@@ -3328,7 +3534,7 @@ describe('publish-only adapter', () => {
 
   it('reports a failed publish as declaring no streams at all', async () => {
     const { adapter, mockJs } = makeConnectedAdapter({ streams: [] });
-    mockJs.publish = mock(() => Promise.reject(new Error('jetstream is not enabled')));
+    mockJs.publish = mock(() => Promise.reject(noStreamBindsRejection('events.created')));
 
     let thrown: Error | undefined;
     try {
@@ -3739,7 +3945,7 @@ describe('subscription lifecycle: the pull loop', () => {
   it('nacks a message it pulled but will not process', async () => {
     // A message dropped by pause or unsubscribe used to be abandoned, holding an ack
     // slot until ack_wait expired.
-    const jsMsg = makeMockJsMsg({ data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })) });
+    const jsMsg = makeMockJsMsg({ data: new TextEncoder().encode(envelopeJson()) });
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([jsMsg, jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
@@ -3832,8 +4038,72 @@ describe('poison messages', () => {
     expect(raw.term).toHaveBeenCalled();
   });
 
+  it('delivers what publish(topic, undefined) writes, with data undefined', async () => {
+    // `JSON.stringify` drops `data: undefined`: this is the envelope of a `@Cron` or `@Interval`
+    // method that returns nothing, and it is the framework's own write.
+    const { adapter: publisher, mockJs } = makeConnectedAdapter();
+    const id = await publisher.publish('test.topic', undefined);
+    const [, wire] = asAny(mockJs.publish).mock.calls[0] as [string, Uint8Array];
+    expect(Object.keys(JSON.parse(new TextDecoder().decode(wire)) as object)).not.toContain('data');
+
+    const { errors, seen, raw } = await deliver(makeMockJsMsg({ data: wire }), { ackMode: 'auto' });
+
+    expect(seen).toEqual([undefined]);
+    expect(errors).toEqual([]);
+    expect(raw.ack).toHaveBeenCalled();
+    expect(raw.term).not.toHaveBeenCalled();
+    expect(id).toEqual(expect.any(String));
+  });
+
+  // An object that carries `data` is delivered whatever else it carries or lacks: a stream is an
+  // integration surface, and another producer may wrap its payload as `{ "data": … }`.
+  for (const [label, body, data] of [
+    ['data and nothing else', '{"data":1}', 1],
+    ['data whose value is null', '{"data":null}', null],
+    ['data with an id that is not a string', '{"id":7,"timestamp":1,"data":2}', 2],
+    ['data with a timestamp that is not a number', '{"id":"m","timestamp":"1","data":3}', 3],
+    ['data with metadata that is null', '{"id":"m","timestamp":1,"data":4,"metadata":null}', 4],
+    ['data with metadata that is an array', '{"id":"m","timestamp":1,"data":5,"metadata":[]}', 5],
+    ['data with an attempt that is not a number', '{"id":"m","timestamp":1,"data":6,"attempt":"2"}', 6],
+    ['no data, a string id and a numeric timestamp', '{"id":"m","timestamp":1}', undefined],
+  ] as const) {
+    it(`delivers ${label} to the handler and acknowledges it`, async () => {
+      const { errors, seen, raw } = await deliver(payload(body), { ackMode: 'auto' });
+
+      expect(seen).toEqual([data]);
+      expect(errors).toEqual([]);
+      expect(raw.ack).toHaveBeenCalledTimes(1);
+      expect(raw.term).not.toHaveBeenCalled();
+    });
+  }
+
+  // Neither a `data` key nor a string `id` with a numeric `timestamp`: nothing a OneBun publisher
+  // writes, and nothing that would reach a handler as more than an undefined payload.
+  for (const [label, body] of [
+    ['an empty object', '{}'],
+    ['an object with an id but no timestamp', '{"id":"m"}'],
+    ['an object with a timestamp but no id', '{"timestamp":1}'],
+    ['an object whose id is not a string', '{"id":7,"timestamp":1}'],
+    ['an object whose timestamp is not a number', '{"id":"m","timestamp":"1"}'],
+    ['an array', '[1]'],
+    ['a number', '42'],
+    ['a string', '"x"'],
+  ] as const) {
+    it(`terminates ${label} and reports it, without calling the handler`, async () => {
+      const { errors, seen, raw } = await deliver(payload(body), { ackMode: 'auto' });
+
+      expect(seen).toHaveLength(0);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain('"test.topic"');
+      expect(errors[0].message).toContain('not a OneBun envelope');
+      expect(raw.term).toHaveBeenCalledTimes(1);
+      expect(raw.ack).not.toHaveBeenCalled();
+      expect(raw.nak).not.toHaveBeenCalled();
+    });
+  }
+
   it('leaves a healthy message completely unaffected', async () => {
-    const raw = payload(JSON.stringify({ pattern: 'test.topic', data: { ok: true } }));
+    const raw = payload(envelopeJson({ data: { ok: true } }));
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([raw]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
@@ -3864,7 +4134,7 @@ describe('poison messages', () => {
   it('reports an ack failure as an ack failure, not as a parse failure', async () => {
     // The old catch wrapped both branches, so a throwing ack() was reported — and
     // handled — as if the payload had been unparseable.
-    const raw = payload(JSON.stringify({ pattern: 'test.topic', data: {} }));
+    const raw = payload(envelopeJson());
     raw.ack = mock(() => {
       throw new Error('ack transport failure');
     });
@@ -4214,7 +4484,7 @@ describe('graceful shutdown: in-flight handlers', () => {
   /** A connected adapter whose consumer yields exactly one well-formed envelope. */
   function withOneMessage() {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
     });
     const { adapter } = makeConnectedAdapter();
     const consumer = makeMockConsumer([jsMsg]);
@@ -4446,6 +4716,13 @@ describe('dead-letter queue: max_deliver resolution', () => {
       { consumerConfig: { maxDeliver: 7 } },
     )).toBe(10);
   });
+
+  it('sends retry.attempts: -1 as the server\'s own unlimited max_deliver', async () => {
+    expect(await maxDeliverFor({
+      retry: { attempts: -1 },
+      deadLetter: { queue: DLQ },
+    })).toBe(-1);
+  });
 });
 
 describe('dead-letter queue: subscribe-time validation', () => {
@@ -4492,18 +4769,20 @@ describe('dead-letter queue: disposition', () => {
     deliveryCount: number,
     options: AnyRecord = {},
     seed: Partial<AnyRecord> = {},
+    overrides: Partial<JetStreamAdapterOptions> = {},
   ) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
         id: 'original-id',
         pattern: 'test.topic',
         data: { n: 1 },
+        timestamp: 1,
         metadata: { traceId: 'trace-1' },
       })),
       info: { redelivered: deliveryCount > 1, deliveryCount },
       ...seed,
     });
-    const { adapter, mockJs } = makeConnectedAdapter();
+    const { adapter, mockJs, mockJsm } = makeConnectedAdapter(overrides);
     const consumer = makeMockConsumer([jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
 
@@ -4519,7 +4798,7 @@ describe('dead-letter queue: disposition', () => {
     await new Promise(resolve => setTimeout(resolve, 25));
 
     return {
-      adapter, mockJs, jsMsg, errors, 
+      adapter, mockJs, mockJsm, jsMsg, errors,
     };
   }
 
@@ -4557,7 +4836,7 @@ describe('dead-letter queue: disposition', () => {
 
   async function deliverFailingWithBrokenPublish() {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: true, deliveryCount: 3 },
     });
     const { adapter, mockJs } = makeConnectedAdapter();
@@ -4594,6 +4873,130 @@ describe('dead-letter queue: disposition', () => {
     // The caller's own metadata survives alongside the provenance keys.
     expect(body.metadata.traceId).toBe('trace-1');
   });
+
+  // `max_deliver: -1` is the server's "redeliver until acknowledged". Compared with a bare
+  // `deliveryCount >= maxDeliver`, every delivery looked like the last one, so the first
+  // failure was dead-lettered.
+  describe('unlimited max_deliver', () => {
+    const UNLIMITED = { retry: { attempts: -1 }, deadLetter: { queue: DLQ } };
+
+    function expectRetriedNotDeadLettered(
+      { mockJs, jsMsg }: Awaited<ReturnType<typeof deliverFailing>>,
+    ): void {
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.term).not.toHaveBeenCalled();
+      expect(asAny(mockJs.publish).mock.calls.some((c: unknown[]) => c[0] === DLQ)).toBe(false);
+    }
+
+    it('retries the first failure under retry.attempts: -1 instead of dead-lettering it', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(1, UNLIMITED));
+    });
+
+    it('keeps retrying a later failure under retry.attempts: -1', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(3, UNLIMITED));
+      expectRetriedNotDeadLettered(await deliverFailing(1_000, UNLIMITED));
+    });
+
+    it('sends a nak delay no longer than retry.maxDelay', async () => {
+      // delay 1000 doubled eleven times would be 1024 s; the ceiling is what travels with the nak.
+      const { jsMsg } = await deliverFailing(
+        12,
+        {
+          retry: {
+            attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 30_000, 
+          }, 
+        },
+      );
+
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.nak).toHaveBeenCalledWith(30_000);
+    });
+
+    it('sends the formula below the ceiling unchanged', async () => {
+      const { jsMsg } = await deliverFailing(
+        3,
+        {
+          retry: {
+            attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 30_000, 
+          }, 
+        },
+      );
+
+      expect(jsMsg.nak).toHaveBeenCalledWith(4000);
+    });
+
+    it('applies retry.maxDelay to the default wait of an unlimited subscription with a retry and no delay', async () => {
+      const { jsMsg } = await deliverFailing(1, { retry: { attempts: -1, maxDelay: 40 } });
+
+      expect(jsMsg.nak).toHaveBeenCalledWith(40);
+    });
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+      const consumersGet = asAny(adapter).js.consumers.get;
+
+      await expect(adapter.subscribe('test.topic', async () => undefined, { retry: { maxDelay: Number.NaN } }))
+        .rejects.toThrow(/retry\.maxDelay.*"test\.topic"/);
+
+      // Refused before anything is registered, looked up or created on the server.
+      expect(asAny(adapter).subscriptions).toHaveLength(0);
+      expect(mockJsm.consumers.add).not.toHaveBeenCalled();
+      expect(mockJsm.consumers.info).not.toHaveBeenCalled();
+      expect(mockJsm.streams.info).not.toHaveBeenCalled();
+      expect(consumersGet).not.toHaveBeenCalled();
+    });
+
+    it('treats deadLetter.maxRetries: -1 and retry.attempts: 0 as no limit as well', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(5, { deadLetter: { queue: DLQ, maxRetries: -1 } }));
+      expectRetriedNotDeadLettered(await deliverFailing(5, { retry: { attempts: 0 }, deadLetter: { queue: DLQ } }));
+    });
+
+    it('treats consumerConfig.maxDeliver: -1 as no limit when the subscription sets none', async () => {
+      const failed = await deliverFailing(5, { deadLetter: { queue: DLQ } }, {}, { consumerConfig: { maxDeliver: -1 } });
+
+      expect(callArg(failed.mockJsm.consumers.add, 0, 1).max_deliver).toBe(-1);
+      expectRetriedNotDeadLettered(failed);
+    });
+
+    it('still lets a handler\'s own nack(false) route to the dead-letter queue', async () => {
+      const jsMsg = makeMockJsMsg({
+        data: new TextEncoder().encode(envelopeJson()),
+        info: { redelivered: false, deliveryCount: 1 },
+      });
+      const { adapter, mockJs } = makeConnectedAdapter();
+      const consumer = makeMockConsumer([jsMsg]);
+      asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+      await adapter.subscribe('test.topic', async (message) => {
+        await message.nack(false);
+      }, { ackMode: 'manual', ...UNLIMITED });
+
+      await new Promise(resolve => setTimeout(resolve, 25));
+
+      expect(asAny(mockJs.publish).mock.calls[0][0]).toBe(DLQ);
+      expect(jsMsg.term).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a positive limit', () => {
+    const FIVE = { retry: { attempts: 5 }, deadLetter: { queue: DLQ } };
+
+    it('retries the delivery before the limit', async () => {
+      const { mockJs, jsMsg } = await deliverFailing(4, FIVE);
+
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.term).not.toHaveBeenCalled();
+      expect(asAny(mockJs.publish).mock.calls.some((c: unknown[]) => c[0] === DLQ)).toBe(false);
+    });
+
+    it('dead-letters the delivery that reaches the limit', async () => {
+      const { mockJs, jsMsg } = await deliverFailing(5, FIVE);
+
+      expect(asAny(mockJs.publish).mock.calls[0][0]).toBe(DLQ);
+      expect(jsMsg.term).toHaveBeenCalledTimes(1);
+      expect(jsMsg.nak).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('a handler that nacks and returns normally', () => {
@@ -4604,7 +5007,7 @@ describe('a handler that nacks and returns normally', () => {
   ) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'nack-id', pattern: 'test.topic', data: {},
+        id: 'nack-id', pattern: 'test.topic', data: {}, timestamp: 1,
       })),
       info: { redelivered: false, deliveryCount: 1 },
     });
@@ -4672,7 +5075,7 @@ describe('dead-letter queue: manual nack', () => {
   async function deliverManual(options: AnyRecord) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
-        id: 'manual-id', pattern: 'test.topic', data: {},
+        id: 'manual-id', pattern: 'test.topic', data: {}, timestamp: 1,
       })),
       info: { redelivered: false, deliveryCount: 1 },
     });
@@ -4786,7 +5189,7 @@ describe("ackMode 'none': consumer config", () => {
 describe("ackMode 'none': the loop acknowledges nothing", () => {
   async function deliverUnder(handler: () => Promise<void>) {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -4821,7 +5224,7 @@ describe("ackMode 'none': the loop acknowledges nothing", () => {
     // gated by acknowledgesAutomatically, but a handler calling nack(false) itself
     // reaches the router closure directly — so the closure is what has to be gated.
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter, mockJs } = makeConnectedAdapter();
@@ -4842,16 +5245,16 @@ describe("ackMode 'none': the loop acknowledges nothing", () => {
 // Message.attempt / Message.maxAttempts
 //
 // Both fields were declared and never assigned, so the retry recipe the docs
-// ship — `if (message.attempt && message.attempt >= (message.maxAttempts || 3))`
-// — could never take its terminal branch: every failure fell through to
-// nack(true) until max_deliver ran out.
+// ship — `if (isLastAttempt(message.attempt, message.maxAttempts))` — could
+// never take its terminal branch: every failure fell through to nack(true)
+// until max_deliver ran out.
 // ============================================================================
 
 describe('Message.attempt and Message.maxAttempts', () => {
   /** Delivers one message at the given delivery count and hands back what the handler saw. */
   async function deliveredAt(deliveryCount: number, options: AnyRecord = {}) {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: deliveryCount > 1, deliveryCount },
     });
     const { adapter, mockJsm } = makeConnectedAdapter();
@@ -4898,6 +5301,24 @@ describe('Message.attempt and Message.maxAttempts', () => {
 
     expect(message.attempt).toBe(3);
     expect(message.attempt >= message.maxAttempts).toBe(true);
+  });
+
+  it('reports -1 for a subscription with no attempts limit, whichever value at or below 0 set it', async () => {
+    // One value on every adapter: the memory and Redis adapters resolve the same options to -1.
+    for (const attempts of [-1, 0, -5]) {
+      const { message, cfg } = await deliveredAt(4, { retry: { attempts } });
+
+      expect(message.maxAttempts).toBe(-1);
+      // The wire keeps the value as written; only the message reports the canonical -1.
+      expect(cfg.max_deliver).toBe(attempts);
+      expect(isLastAttempt(message.attempt as number, message.maxAttempts as number)).toBe(false);
+    }
+  });
+
+  it('reports -1 for deadLetter.maxRetries: -1 too', async () => {
+    const { message } = await deliveredAt(2, { deadLetter: { queue: 'dlq.unlimited', maxRetries: -1 } });
+
+    expect(message.maxAttempts).toBe(-1);
   });
 });
 
@@ -5229,12 +5650,16 @@ describe('tryDeleteDurableConsumer', () => {
 
 describe('retry.backoff and retry.delay', () => {
   /** Delivers one message at `deliveryCount`, fails the handler, returns the nak arguments. */
-  async function nakArgsFor(deliveryCount: number, options: AnyRecord = {}): Promise<unknown[]> {
+  async function nakArgsFor(
+    deliveryCount: number,
+    options: AnyRecord = {},
+    overrides: Partial<JetStreamAdapterOptions> = {},
+  ): Promise<unknown[]> {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: deliveryCount > 1, deliveryCount },
     });
-    const { adapter } = makeConnectedAdapter();
+    const { adapter } = makeConnectedAdapter(overrides);
     const consumer = makeMockConsumer([jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
 
@@ -5278,6 +5703,18 @@ describe('retry.backoff and retry.delay', () => {
     expect(await nakArgsFor(1, { retry: { attempts: 3 } })).toEqual([100]);
   });
 
+  it('waits the default 100ms for a consumer with no limit and no retry, never a bare NAK', async () => {
+    // A bare NAK is an immediate redelivery; with no last attempt that is a failing message
+    // handed straight back for ever.
+    const dlq = { deadLetter: { queue: 'test.dlq', maxRetries: -1 } };
+
+    expect(await nakArgsFor(1, dlq)).toEqual([100]);
+    expect(await nakArgsFor(7, dlq)).toEqual([100]);
+    expect(await nakArgsFor(3, {}, { consumerConfig: { maxDeliver: -1 } })).toEqual([100]);
+    // An explicit `delay: 0` is the subscription's own choice and is still honoured.
+    expect(await nakArgsFor(3, { retry: { attempts: -1, delay: 0 } })).toEqual([0]);
+  });
+
   it('does not touch the consumer config — the ladder is not JetStream backoff', async () => {
     // JetStream's own `backoff` REPLACES ack_wait per delivery, so writing the ladder there
     // would cut the handler's acknowledgement window to the base delay.
@@ -5297,7 +5734,7 @@ describe('retry.backoff and retry.delay', () => {
 
   it('is not sent under ackMode: none, where nothing is acknowledged at all', async () => {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -5314,7 +5751,7 @@ describe('retry.backoff and retry.delay', () => {
 
   it('keeps manual nack(true) immediate — it is the handler itself asking, not a policy', async () => {
     const jsMsg = makeMockJsMsg({
-      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      data: new TextEncoder().encode(envelopeJson()),
       info: { redelivered: false, deliveryCount: 1 },
     });
     const { adapter } = makeConnectedAdapter();
@@ -5654,5 +6091,426 @@ describe('workqueue streams: a vanished consumer comes back deliver-all', () => 
     expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(2);
     expect(callArg(mockJsm.consumers.add, 0, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
     expect(callArg(mockJsm.consumers.add, 1, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+  });
+});
+
+// ============================================================================
+// Delivery subject (FB-40)
+//
+// The server routes a message by its subject, and a publisher writes the JSON
+// envelope. `pattern` and `params` are read from the subject; the envelope's own
+// `pattern` field is the publisher's claim and never decides which handler runs or
+// what it captures.
+// ============================================================================
+
+describe('delivery subject: pattern and params follow the subject, not the envelope', () => {
+  /** A message the server delivered on `subject`, whose envelope names `envelopePattern`. */
+  function deliveredOn(subject: string, envelopePattern: string, extra: Partial<AnyRecord> = {}): AnyRecord {
+    return makeMockJsMsg({
+      subject,
+      data: new TextEncoder().encode(JSON.stringify({
+        id: 'forged-1',
+        pattern: envelopePattern,
+        data: { ok: true },
+        timestamp: 1,
+        metadata: { claimedBy: 'b' },
+      })),
+      ...extra,
+    });
+  }
+
+  /**
+   * Subscribes `pattern` and feeds `jsMsg` through the consume loop. Settles on the loop's own
+   * `ack()` — sent after a handler that returned, and for a stray the pattern does not match — so
+   * no timer decides when the message has been handled.
+   */
+  async function consume(
+    pattern: string,
+    jsMsg: AnyRecord,
+    adapter: JetStreamQueueAdapter = makeConnectedAdapter().adapter,
+  ): Promise<Message | null> {
+    const settled = makeDeferred();
+    jsMsg.ack = mock(() => settled.resolve());
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(makeMockConsumer([jsMsg])));
+
+    let received: Message | null = null;
+    await adapter.subscribe(pattern, async (message) => {
+      received = message;
+    }, { group: 'g' });
+    await settled.promise;
+
+    return received;
+  }
+
+  it('captures params from the subject the message arrived on, not from the envelope', async () => {
+    // onebun-FB-53: delivered on `test.a.result.1`, with an envelope claiming `test.b.result.999`.
+    const message = await consume('test.*.result.{id}', deliveredOn('test.a.result.1', 'test.b.result.999'));
+
+    expect(message?.pattern).toBe('test.a.result.1');
+    expect(message?.subject).toBe('test.a.result.1');
+    expect(message?.params).toEqual({ id: '1' });
+    // The rest of the envelope is the publisher's to write, and arrives as written.
+    expect(message?.id).toBe('forged-1');
+    expect(message?.metadata).toEqual({ claimedBy: 'b' });
+  });
+
+  it('does not run a handler its subject does not match, whatever the envelope names', async () => {
+    // `test.v{version}` filters the wider `test.*`, so the server hands it `test.x` too.
+    const jsMsg = deliveredOn('test.x', 'test.v2');
+    const message = await consume('test.v{version}', jsMsg);
+
+    expect(message).toBeNull();
+    // Acknowledged as a stray, like any other message the pattern does not match.
+    expect(jsMsg.ack).toHaveBeenCalledTimes(1);
+    expect(jsMsg.term).not.toHaveBeenCalled();
+  });
+
+  it('runs the handler its subject matches, whatever the envelope names', async () => {
+    const message = await consume('test.v{version}', deliveredOn('test.v3', 'test.x'));
+
+    expect(message?.params).toEqual({ version: '3' });
+    expect(message?.pattern).toBe('test.v3');
+  });
+
+  it('delivers a message whose envelope pattern is not a string, matched on its subject', async () => {
+    const jsMsg = makeMockJsMsg({
+      subject: 'test.orders.8',
+      data: new TextEncoder().encode(JSON.stringify({
+        id: 'n-1', pattern: 123, data: {}, timestamp: 1,
+      })),
+    });
+    const message = await consume('test.orders.{id}', jsMsg);
+
+    expect(message?.params).toEqual({ id: '8' });
+    expect(message?.pattern).toBe('test.orders.8');
+  });
+
+  it('matches on the subject when the envelope carries no pattern at all', async () => {
+    const jsMsg = makeMockJsMsg({
+      subject: 'test.orders.7',
+      data: new TextEncoder().encode(JSON.stringify({ id: 'n-2', data: { n: 1 }, timestamp: 1 })),
+    });
+    const message = await consume('test.orders.{id}', jsMsg);
+
+    expect(message?.params).toEqual({ id: '7' });
+    expect(message?.subject).toBe('test.orders.7');
+  });
+
+  it('reports the stream the server delivered the message from', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', {
+      info: { redelivered: false, deliveryCount: 1, stream: 'TEST_STREAM' },
+    }));
+
+    expect(message?.stream).toBe('TEST_STREAM');
+  });
+
+  it('exposes the wire headers by name, every value in arrival order', async () => {
+    // The driver's own headers object: a Map stand-in has `entries()`, which `MsgHdrs` does not.
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    wire.append('X-Probe', 'a');
+    wire.append('X-Probe', 'b');
+
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(message?.headers?.get('X-Probe')).toEqual(['a', 'b']);
+    expect([...(message?.headers?.keys() ?? [])]).toEqual(['Nats-Msg-Id', 'X-Probe']);
+    // Converted once: every read is the same map.
+    expect(message?.headers).toBe(message?.headers);
+  });
+
+  it('leaves headers undefined on a message that carried none', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic'));
+
+    expect(message?.headers).toBeUndefined();
+  });
+
+  it('converts the headers only when a handler reads them, and only once', async () => {
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    const jsMsg = deliveredOn('test.topic', 'test.topic');
+    let reads = 0;
+    Object.defineProperty(jsMsg, 'headers', {
+      get() {
+        reads += 1;
+
+        return wire;
+      },
+    });
+
+    const message = await consume('test.topic', jsMsg);
+    expect(reads).toBe(0);
+
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(message?.headers?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(reads).toBe(1);
+  });
+
+  it('carries headers through a spread and Object.assign, as an own property like core NATS', async () => {
+    const wire = natsHeaders();
+    wire.set('Nats-Msg-Id', 'outbox-1');
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+
+    // Copied before anything read it: the copy triggers the one conversion.
+    const spread = { ...message } as AnyRecord;
+    expect(spread.headers.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+    expect(Object.keys(message!)).toContain('headers');
+    expect(Object.assign({}, message).headers).toBe(spread.headers);
+    expect(message?.headers).toBe(spread.headers);
+  });
+
+  const locks: Array<[label: string, lock: (target: object) => unknown]> = [
+    ['frozen', (target) => Object.freeze(target)],
+    ['sealed', (target) => Object.seal(target)],
+  ];
+
+  for (const [label, lock] of locks) {
+    it(`still reads headers on a message ${label} before they were first read, as one map`, async () => {
+      // A guard or an interceptor may freeze the message; core NATS returns its map either way.
+      const wire = natsHeaders();
+      wire.set('Nats-Msg-Id', 'outbox-1');
+      const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic', { headers: wire }));
+      lock(message!);
+
+      const first = message?.headers;
+
+      expect(first?.get('Nats-Msg-Id')).toEqual(['outbox-1']);
+      expect(message?.headers).toBe(first);
+      expect(({ ...message } as AnyRecord).headers).toBe(first);
+    });
+  }
+
+  it('accepts an assignment to headers, as the core-NATS message does', async () => {
+    const message = await consume('test.topic', deliveredOn('test.topic', 'test.topic')) as AnyRecord;
+    const replacement = new Map([['X-Probe', ['p']]]);
+
+    message.headers = replacement;
+
+    expect(message.headers).toBe(replacement);
+  });
+
+  describe('a message published through publish()', () => {
+    /**
+     * Publishes through the adapter, then consumes exactly what reached the wire. The expectation
+     * is what the envelope-reading loop gave — `pattern` from the envelope's own field, `params`
+     * from matching it — so this pins "unchanged for publish()" rather than restating the rule.
+     */
+    async function roundTrip(subscription: string, topic: string): Promise<{
+      message: Message | null;
+      envelopePattern: string;
+      expectedParams: Record<string, string>;
+    }> {
+      const { adapter, mockJs } = makeConnectedAdapter();
+      await adapter.publish(topic, { n: 1 }, { messageId: 'rt-1' });
+
+      const [subject, payload] = asAny(mockJs.publish).mock.calls[0] as [string, Uint8Array];
+      const envelopePattern = (JSON.parse(new TextDecoder().decode(payload)) as { pattern: string }).pattern;
+      const message = await consume(subscription, makeMockJsMsg({ subject, data: payload }), adapter);
+
+      return {
+        message,
+        envelopePattern,
+        expectedParams: createQueuePatternMatcher(subscription)(envelopePattern).params,
+      };
+    }
+
+    for (const [subscription, topic] of [
+      ['test.orders.{id}', 'test.orders.42'],
+      ['test.{kind}.{id}', 'test.orders.42'],
+      ['test.orders.*', 'test.orders.created'],
+      ['test.#', 'test.orders.42.shipped'],
+      ['test.topic', 'test.topic'],
+    ] as const) {
+      it(`shows the same pattern and params as before for ${topic} on ${subscription}`, async () => {
+        const { message, envelopePattern, expectedParams } = await roundTrip(subscription, topic);
+
+        expect(message?.pattern).toBe(envelopePattern);
+        expect(message?.params).toEqual(expectedParams);
+        expect(message?.subject).toBe(topic);
+      });
+    }
+
+    it('delivers a publish to a non-literal topic as the NATS wildcard subject it was sent on', async () => {
+      // Documented, not endorsed: `{name}` and `#` name no single subject, and `publish()`
+      // translates them through `toNatsSubject()` like any pattern.
+      const named = await roundTrip('test.orders.{id}', 'test.orders.{id}');
+      expect(named.message?.pattern).toBe('test.orders.*');
+      expect(named.message?.params).toEqual({ id: '*' });
+
+      const multi = await roundTrip('test.#', 'test.events.#');
+      expect(multi.message?.pattern).toBe('test.events.>');
+    });
+  });
+});
+
+describe('native NATS wildcards in a subscription pattern', () => {
+  /**
+   * Subscribes `pattern` and feeds one OneBun envelope delivered on `subject` through the consume
+   * loop. Settles on the loop's own `ack()` — sent after a handler that returned, and for a stray
+   * the pattern does not match — so no timer decides when the message has been handled.
+   */
+  async function consume(
+    pattern: string,
+    subject: string,
+    overrides: Partial<JetStreamAdapterOptions> = {},
+  ): Promise<{ message: Message | null; events: string[] }> {
+    const { adapter } = makeConnectedAdapter(overrides);
+    const events: string[] = [];
+    const settled = makeDeferred();
+    const jsMsg = makeMockJsMsg({
+      subject,
+      data: new TextEncoder().encode(envelopeJson({ pattern: subject })),
+      ack: mock(() => {
+        events.push('ack');
+        settled.resolve();
+      }),
+    });
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(makeMockConsumer([jsMsg])));
+
+    let message: Message | null = null;
+    await adapter.subscribe(pattern, async (received) => {
+      events.push('handler');
+      message = received;
+    }, { group: 'g' });
+    await settled.promise;
+
+    return { message, events };
+  }
+
+  for (const [pattern, subject] of [
+    ['test.>', 'test.a'],
+    ['test.>', 'test.a.b.c'],
+    ['>', 'test.a.b'],
+    ['test.*', 'test.a'],
+    ['test.{tenant}.>', 'test.acme.orders.created'],
+  ] as const) {
+    it(`runs the handler of "${pattern}" for ${subject}, and acknowledges only after it`, async () => {
+      const { message, events } = await consume(pattern, subject);
+
+      expect(events).toEqual(['handler', 'ack']);
+      expect(message?.subject).toBe(subject);
+      expect(message?.params).toEqual(pattern === 'test.{tenant}.>' ? { tenant: 'acme' } : {});
+    });
+  }
+
+  it('runs the handler of a ">" pattern on a workqueue stream before the ack that deletes the task', async () => {
+    const { events } = await consume('jobs.>', 'jobs.render.page', { streams: [JOBS_WORKQUEUE] });
+
+    expect(events).toEqual(['handler', 'ack']);
+  });
+
+  it('sends a native wildcard pattern to the server as its own filter', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+
+    await adapter.subscribe('test.>', async () => undefined, { group: 'g' });
+    await adapter.subscribe('test.*', async () => undefined, { group: 'g' });
+
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('test.>');
+    expect(callArg(mockJsm.consumers.add, 1, 1).filter_subject).toBe('test.*');
+  });
+
+  for (const pattern of ['test.>.created', '>.created', 'test..created', 'test.', 'test.new order']) {
+    it(`refuses "${pattern}", which no filter can express, before any server call`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+
+      const thrown = await attemptSubscribe(adapter, pattern, { group: 'g' });
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toContain(`"${pattern}"`);
+      expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(0);
+      expect(asAny(mockJsm.consumers.info).mock.calls.length).toBe(0);
+    });
+  }
+
+  for (const [pattern, subject, params] of [
+    ['test.v*', 'test.v*', {}],
+    ['test.a*b', 'test.a*b', {}],
+    ['test.new>', 'test.new>', {}],
+    ['test.a>b', 'test.a>b', {}],
+    ['test.{id}>', 'test.1>', { id: '1' }],
+  ] as const) {
+    it(`subscribes the glued "${pattern}" as written and runs its handler for ${subject}`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+      await adapter.subscribe(pattern, async () => undefined, { group: 'g' });
+      // Literal on the server, unless a parameter widens the token to `*`.
+      expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe(pattern === 'test.{id}>' ? 'test.*' : pattern);
+
+      const { message, events } = await consume(pattern, subject);
+
+      expect(events).toEqual(['handler', 'ack']);
+      expect(message?.params).toEqual(params);
+    });
+  }
+
+  it('subscribes a parameter whose name holds whitespace on the one-token filter', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    await adapter.subscribe('test.{a b}', async () => undefined, { group: 'g' });
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('test.*');
+
+    const { message } = await consume('test.{a b}', 'test.a');
+    expect(message?.params).toEqual({ [SPACED_NAME]: 'a' });
+  });
+
+  it('accepts a glued wildcard on a workqueue, and refuses there only what widens', async () => {
+    expect(await attemptSubscribe(makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter, 'jobs.v*', { group: 'workers' }))
+      .toBeUndefined();
+    expect((await attemptSubscribe(
+      makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+      'jobs.{id}>',
+      { group: 'workers' },
+    ))?.message).toMatch(/partial-token/);
+  });
+
+  describe('the workqueue checks read a native wildcard as its framework spelling', () => {
+    const spellings = [['jobs.>', 'jobs.#'], ['jobs.*', 'jobs.{id}']] as const;
+
+    for (const [native, framework] of spellings) {
+      it(`refuses "${native}" without a group exactly as "${framework}"`, async () => {
+        const nativeRefusal = await attemptSubscribe(makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter, native, {});
+        const frameworkRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          framework,
+          {},
+        );
+
+        expect(nativeRefusal!.message).toMatch(/without a group/);
+        expect(nativeRefusal!.message.replace(native, '<pattern>'))
+          .toBe(frameworkRefusal!.message.replace(framework, '<pattern>'));
+      });
+
+      it(`refuses "${native}" under ackMode 'none' exactly as "${framework}"`, async () => {
+        const options = { group: 'workers', ackMode: 'none' };
+        const nativeRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          native,
+          options,
+        );
+        const frameworkRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          framework,
+          options,
+        );
+
+        expect(nativeRefusal!.message).toMatch(/ackMode 'none'/);
+        expect(nativeRefusal!.message.replace(native, '<pattern>'))
+          .toBe(frameworkRefusal!.message.replace(framework, '<pattern>'));
+      });
+
+      it(`accepts "${native}" with a group, on the filter and durable "${framework}" gets`, async () => {
+        const onNative = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+        const onFramework = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+
+        await onNative.adapter.subscribe(native, async () => undefined, { group: 'workers' });
+        await onFramework.adapter.subscribe(framework, async () => undefined, { group: 'workers' });
+
+        const nativeConsumer = callArg(onNative.mockJsm.consumers.add, 0, 1);
+        const frameworkConsumer = callArg(onFramework.mockJsm.consumers.add, 0, 1);
+        expect(nativeConsumer.filter_subject).toBe(frameworkConsumer.filter_subject);
+        expect(nativeConsumer.durable_name).toMatch(/^workers--jobs__--[0-9a-f]{12}$/);
+        expect(nativeConsumer.durable_name).toBe(frameworkConsumer.durable_name);
+        expect(nativeConsumer.deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+      });
+    }
   });
 });

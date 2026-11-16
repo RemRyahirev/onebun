@@ -9,6 +9,7 @@ import {
   executeRequest,
   HttpClient,
   resolveQueryOverload,
+  runRequestPromise,
 } from './client.js';
 import {
   type ApiResponse,
@@ -32,8 +33,11 @@ import {
  * here. Use `HttpClient`, whose `SuccessResponse` carries `statusCode`, for conditional requests.
  *
  * The same goes for `redirect: 'manual'`: a redirect handed back resolves with the body of the
- * `3xx` alone, so neither its status nor its `Location` can be read here. Use `HttpClient` (or the
- * service client, which returns its envelope) to read `statusCode` and `headers.location`.
+ * `3xx` alone, so neither its status nor its `Location` can be read here. Use `HttpClient` to read
+ * `statusCode` and `headers.location`.
+ *
+ * A failure rejects the Promise methods, and fails the `*Effect` methods, with the same
+ * `OneBunBaseError` subclass: the one `OneBunBaseError.fromErrorResponse` picks for its `code`.
  *
  * @see docs:api/requests.md
  */
@@ -308,7 +312,7 @@ class RequestsServiceImpl implements RequestsService {
 
   // Promise wrappers
   async request<T = unknown>(config: RequestConfig): Promise<T> {
-    return await Effect.runPromise(this.requestEffect<T>(config));
+    return await runRequestPromise(this.requestEffect<T>(config));
   }
 
   async get<T = unknown, Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -316,7 +320,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.getEffect<T>(url, queryOrConfig, config));
+    return await runRequestPromise(this.getEffect<T>(url, queryOrConfig, config));
   }
 
   async post<T = unknown, D = unknown>(
@@ -324,7 +328,7 @@ class RequestsServiceImpl implements RequestsService {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.postEffect<T>(url, data, config));
+    return await runRequestPromise(this.postEffect<T>(url, data, config));
   }
 
   async put<T = unknown, D = unknown>(
@@ -332,7 +336,7 @@ class RequestsServiceImpl implements RequestsService {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.putEffect<T>(url, data, config));
+    return await runRequestPromise(this.putEffect<T>(url, data, config));
   }
 
   async patch<T = unknown, D = unknown>(
@@ -340,7 +344,7 @@ class RequestsServiceImpl implements RequestsService {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.patchEffect<T>(url, data, config));
+    return await runRequestPromise(this.patchEffect<T>(url, data, config));
   }
 
   async delete<T = unknown, Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -348,7 +352,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.deleteEffect<T>(url, queryOrConfig, config));
+    return await runRequestPromise(this.deleteEffect<T>(url, queryOrConfig, config));
   }
 
   async head<Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -356,7 +360,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<void> {
-    return await Effect.runPromise(this.headEffect(url, queryOrConfig, config));
+    return await runRequestPromise(this.headEffect(url, queryOrConfig, config));
   }
 
   async options<T = unknown, Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -364,7 +368,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<T> {
-    return await Effect.runPromise(this.optionsEffect<T>(url, queryOrConfig, config));
+    return await runRequestPromise(this.optionsEffect<T>(url, queryOrConfig, config));
   }
 
   async updateConfig(newConfig: Partial<RequestsOptions>): Promise<void> {
@@ -422,7 +426,7 @@ export const requestsService = {
     query?: Q,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.GET,
         url,
@@ -454,7 +458,7 @@ export const requestsService = {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.POST,
         url,
@@ -486,7 +490,7 @@ export const requestsService = {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.PUT,
         url,
@@ -518,7 +522,7 @@ export const requestsService = {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.PATCH,
         url,
@@ -550,7 +554,7 @@ export const requestsService = {
     query?: Q,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.DELETE,
         url,
@@ -582,7 +586,7 @@ export const requestsService = {
     query?: Q,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<void>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<void>({
         method: HttpMethod.HEAD,
         url,
@@ -614,7 +618,7 @@ export const requestsService = {
     query?: Q,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(
+    await runRequestPromise(
       executeRequest<T>({
         method: HttpMethod.OPTIONS,
         url,
@@ -642,7 +646,7 @@ export const requestsService = {
    * Execute a request with full configuration (Promise interface)
    */
   request: async <T = unknown>(config: RequestConfig): Promise<ApiResponse<T>> =>
-    await Effect.runPromise(executeRequest<T>(config)),
+    await runRequestPromise(executeRequest<T>(config)),
 
   /**
    * Execute a request with full configuration (Effect interface)

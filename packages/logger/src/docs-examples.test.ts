@@ -29,25 +29,24 @@ import {
   shutdownLogger,
   type SyncLogger,
 } from '../src';
+import { captureLogStreams, type StreamCapture } from '../tests/stream-capture';
 
 // Mock console to suppress logger output during tests
+let capture: StreamCapture;
 let logSpy: ReturnType<typeof spyOn>;
 let infoSpy: ReturnType<typeof spyOn>;
 let warnSpy: ReturnType<typeof spyOn>;
 let errorSpy: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
-  logSpy = spyOn(console, 'log').mockImplementation(() => undefined);
-  infoSpy = spyOn(console, 'info').mockImplementation(() => undefined);
-  warnSpy = spyOn(console, 'warn').mockImplementation(() => undefined);
-  errorSpy = spyOn(console, 'error').mockImplementation(() => undefined);
+  capture = captureLogStreams();
+  ({
+    logSpy, infoSpy, warnSpy, errorSpy, 
+  } = capture);
 });
 
 afterEach(() => {
-  logSpy.mockRestore();
-  infoSpy.mockRestore();
-  warnSpy.mockRestore();
-  errorSpy.mockRestore();
+  capture.restore();
 });
 
 // --- Helpers: read what the logger actually wrote --------------------------------

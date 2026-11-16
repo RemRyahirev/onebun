@@ -10,6 +10,7 @@ import {
 
 
 import { InMemoryQueueAdapter } from './adapters/memory.adapter';
+import { QueuePublishError } from './publish-error';
 import {
   QueueServiceProxy,
   QUEUE_NOT_ENABLED_ERROR_MESSAGE,
@@ -130,6 +131,37 @@ describe('QueueServiceProxy', () => {
 
     expect(() => proxy.getScheduler()).toThrow(QUEUE_NOT_READY_ERROR_MESSAGE);
     expect(() => proxy.getJobs()).toThrow(QUEUE_NOT_READY_ERROR_MESSAGE);
+  });
+
+  test('refuses a publish after the queue stopped with a QueuePublishError "unavailable", keeping the message', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    const real = new QueueService({ adapter: 'memory' });
+    await real.initialize(adapter);
+    await real.start();
+    const proxy = new QueueServiceProxy();
+    proxy.setDelegate(real);
+    await real.stop();
+    proxy.setDelegate(null);
+
+    const single = await proxy.publish('late.event', {}).catch((error: unknown) => error);
+    const batch = await proxy.publishBatch([{ pattern: 'late.batch', data: {} }]).catch((error: unknown) => error);
+
+    for (const [error, pattern] of [[single, 'late.event'], [batch, 'late.batch']] as const) {
+      expect(error).toBeInstanceOf(QueuePublishError);
+      expect((error as QueuePublishError).reason).toBe('unavailable');
+      expect((error as QueuePublishError).safeToRepeat).toBe(true);
+      expect((error as QueuePublishError).pattern).toBe(pattern);
+      expect((error as Error).message).toBe(QUEUE_STOPPED_ERROR_MESSAGE);
+    }
+  });
+
+  test('refuses a publish on a queue that was never enabled with a plain Error, not a publish outcome', async () => {
+    const proxy = new QueueServiceProxy();
+
+    const error = await proxy.publish('nowhere', {}).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(QueuePublishError);
   });
 
   test('keeps the not-enabled message for a proxy that was never told a queue is coming', () => {

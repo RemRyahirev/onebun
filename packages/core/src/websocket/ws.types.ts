@@ -165,7 +165,10 @@ export interface GatewayMetadata {
   path: string;
   /** Namespace for isolating gateways */
   namespace?: string;
-  /** Authentication hook run during the upgrade, when the gateway declares one. */
+  /**
+   * Authentication hook run during the upgrade, and when a Socket.IO CONNECT moves a connection to
+   * this gateway, when the gateway declares one.
+   */
   authenticate?(context: WsAuthContext): WsAuthResult | Promise<WsAuthResult>;
   /** List of handlers in this gateway */
   handlers: WsHandlerMetadata[];
@@ -191,9 +194,14 @@ export interface WebSocketGatewayOptions {
    * This is what sets the flag the built-in guards read.
    *
    * Return `false` to refuse the upgrade, `true` to accept the client as authenticated, or
-   * an object to accept it and attach an identity. Omit the option entirely to keep the
-   * previous behaviour, where every client connects unauthenticated and authorization is
-   * left to guards or to an `@OnConnect` handler.
+   * an object to accept it and attach an identity. Without the option every client connects
+   * unauthenticated and authorization is left to guards or to an `@OnConnect` handler.
+   *
+   * A Socket.IO CONNECT that moves a connection here from another gateway runs the hook too, with
+   * the same token and a request carrying the upgrade's URL and headers, and the connection's
+   * `auth` and `metadata` become what it returns; a refusal answers the CONNECT with a
+   * `connect_error` and leaves the connection where it was. A gateway without the option refuses
+   * such a move from a gateway that has one.
    *
    * @see docs:api/websocket.md
    */
@@ -208,7 +216,11 @@ export interface WebSocketGatewayOptions {
 export interface WsAuthContext {
   /** Bearer token from `?token=` or the `Authorization` header, when present. */
   token?: string;
-  /** The upgrade request, for anything the token does not carry (cookies, headers, IP). */
+  /**
+   * The upgrade request, for anything the token does not carry (cookies, headers, query
+   * parameters). For a Socket.IO CONNECT that moves the connection to this gateway: a request with
+   * the upgrade request's URL and headers.
+   */
   request: Request;
 }
 
@@ -216,7 +228,8 @@ export interface WsAuthContext {
  * What an `authenticate` hook may return.
  *
  * Three outcomes, because a gateway usually needs all of them:
- * - `false` — refuse the upgrade (HTTP 401).
+ * - `false` — refuse the upgrade (HTTP 401), or the Socket.IO CONNECT that moves a connection to
+ *   the gateway (`connect_error` with message `Unauthorized`).
  * - `null` — accept the client as ANONYMOUS. It connects, `authenticated` stays false, and
  *   `WsAuthGuard` denies it on any handler that requires authentication. This is what a
  *   gateway serving both public and private events returns for a client with no token.
@@ -330,7 +343,10 @@ export interface PatternMatch {
 // ============================================================================
 
 /**
- * Execution context for WebSocket guards
+ * Execution context for WebSocket guards and interceptors. On a room join or leave,
+ * `getRoomName()` is the room it changes.
+ *
+ * @see docs:api/guards.md
  */
 export interface WsExecutionContext {
   /** Transport discriminant for type narrowing in universal handlers */
@@ -345,6 +361,18 @@ export interface WsExecutionContext {
   getHandler(): WsHandlerMetadata;
   /** Get pattern match params */
   getPatternParams(): Record<string, string>;
+  /**
+   * The room a client's `join` or `leave` changes — the one the gateway adds the client to or
+   * removes it from, resolved from the message the way `@RoomName()` receives it — on a guard or
+   * interceptor of a room join or leave, an `@OnJoinRoom` or `@OnLeaveRoom` handler's or the
+   * gateway-level one deciding a join no handler matches. `undefined` on `@OnMessage`,
+   * `@OnConnect` and `@OnDisconnect`. A guard deciding by room reads it here, never from
+   * `getData()`: the data is what the client sent, and a `join:<room>` event names the room only
+   * when the data does not.
+   *
+   * @see docs:api/websocket.md
+   */
+  getRoomName(): string | undefined;
 }
 
 /**

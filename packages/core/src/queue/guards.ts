@@ -60,19 +60,24 @@ export class MessageExecutionContextImpl implements MessageExecutionContext {
 // ============================================================================
 
 /**
- * Guard that checks for the presence of an authorization token
+ * Guard that admits a message whose `metadata.authorization` is a non-empty string.
+ *
+ * It checks presence only: any value passes, whatever its scheme, and nothing decodes or verifies
+ * it. The publisher writes the field and the broker does not authenticate it, so this is a filter
+ * and a starter example, not an authorization decision. When the sender's identity has to be
+ * trusted, verify a signature or token in a guard of your own.
  *
  * @example
  * ```typescript
- * @UseMessageGuards(MessageAuthGuard)
+ * @UseMessageGuards(MessageAuthorizationPresenceGuard)
  * @Subscribe('orders.*')
  * async handleOrder(message: Message<OrderData>) {
- *   // Only messages with authorization token will be processed
+ *   // Only messages that carry a non-empty `metadata.authorization` reach here
  * }
  * ```
  * @see docs:api/queue.md
  */
-export class MessageAuthGuard implements MessageGuard {
+export class MessageAuthorizationPresenceGuard implements MessageGuard {
   canActivate(context: ExecutionContext): boolean {
     // `@UseGuards` reaches HTTP routes and WebSocket handlers too. This guard reads message
     // metadata, so anywhere else it denies rather than throwing on an absent accessor.
@@ -208,14 +213,14 @@ export class MessageTraceGuard implements MessageGuard {
  * @example
  * ```typescript
  * const allGuards = new MessageAllGuards([
- *   MessageAuthGuard,
+ *   MessageAuthorizationPresenceGuard,
  *   new MessageServiceGuard(['payment-service']),
  * ]);
  *
  * @UseMessageGuards(allGuards)
  * @Subscribe('secure.*')
  * async handleSecureEvent(message: Message<EventData>) {
- *   // Requires both auth and service check to pass
+ *   // Requires both the authorization value and the service check to pass
  * }
  * ```
  *
@@ -267,13 +272,13 @@ export class MessageAllGuards implements MessageGuard {
  * ```typescript
  * const anyGuard = new MessageAnyGuard([
  *   new MessageServiceGuard(['internal-service']),
- *   MessageAuthGuard,
+ *   MessageAuthorizationPresenceGuard,
  * ]);
  *
  * @UseMessageGuards(anyGuard)
  * @Subscribe('events.*')
  * async handleEvent(message: Message<EventData>) {
- *   // Requires either service check OR auth to pass
+ *   // Requires either the service check OR the authorization value to pass
  * }
  * ```
  *

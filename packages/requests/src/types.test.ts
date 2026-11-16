@@ -23,6 +23,10 @@ import {
   ForbiddenError,
   UnauthorizedError,
   BadRequestError,
+  getTransportFailureKind,
+  HttpStatusError,
+  TRANSPORT_FAILURE_CODE,
+  TransportError,
 } from './types.js';
 
 describe('types helpers', () => {
@@ -102,9 +106,39 @@ describe('types helpers', () => {
       OneBunBaseError.fromErrorResponse({ success: false, error: 'e', code: HttpStatusCode.GATEWAY_TIMEOUT })
         instanceof GatewayTimeoutError,
     ).toBe(true);
-    // default -> InternalServerError
-    const def = OneBunBaseError.fromErrorResponse({ success: false, error: 'e', code: 599 });
-    expect(def instanceof InternalServerError).toBe(true);
+    // A code without a class of its own keeps its value: up to 0.8 it became an
+    // InternalServerError with code 500, so a 418 read as a 500 and a timeout as a server error
+    const teapot = OneBunBaseError.fromErrorResponse({
+      success: false, error: 'TEAPOT', code: 418, details: { brew: 'tea' },
+    });
+    expect(teapot).toBeInstanceOf(HttpStatusError);
+    expect(teapot).not.toBeInstanceOf(InternalServerError);
+    expect(teapot.toErrorResponse()).toEqual({
+      success: false, error: 'TEAPOT', code: 418, details: { brew: 'tea' }, originalError: undefined,
+    });
+    expect(OneBunBaseError.fromErrorResponse({ success: false, error: 'e', code: 599 }).code).toBe(599);
+
+    const timeout = OneBunBaseError.fromErrorResponse({
+      success: false, error: 'TIMEOUT_ERROR', code: TRANSPORT_FAILURE_CODE, details: { transport: 'timeout' },
+    });
+    expect(timeout).toBeInstanceOf(TransportError);
+    expect(timeout.code).toBe(TRANSPORT_FAILURE_CODE);
+    expect(getTransportFailureKind(timeout)).toBe('timeout');
+  });
+
+  it('passes the details record through by reference', () => {
+    const details = { upstream: 'record' };
+    const error = OneBunBaseError.fromErrorResponse({
+      success: false, error: 'e', code: 418, details, 
+    });
+
+    expect(error.details).toBe(details);
+  });
+
+  it('reads the transport kind off an error only when its code is 0', () => {
+    expect(getTransportFailureKind(new TransportError('FETCH_ERROR', { transport: 'network' }))).toBe('network');
+    expect(getTransportFailureKind(new InternalServerError('X', { transport: 'network' }))).toBeUndefined();
+    expect(getTransportFailureKind(new HttpStatusError(418, 'X', { transport: 'timeout' }))).toBeUndefined();
   });
 
   it('OneBunBaseError.withContext creates error chain in details', () => {

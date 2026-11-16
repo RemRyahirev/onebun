@@ -350,7 +350,7 @@ export class ChatGateway extends BaseWebSocketGateway {
 |--------|------|---------|-------------|
 | `path` | `string` | `'/'` | WebSocket connection path |
 | `namespace` | `string` | - | Distinguishes gateways that share a path. See [Which gateway a connection belongs to](#which-gateway-a-connection-belongs-to) |
-| `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
+| `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade, and at a Socket.IO CONNECT that moves a connection to this gateway. See below |
 
 ### Which gateway serves a path
 
@@ -437,16 +437,159 @@ The CONNECT packet decides, and `@OnConnect` runs when it arrives rather than at
 ::: warning
 A Socket.IO client that never sends a CONNECT packet never gets `@OnConnect`. OneBun's own
 `WsClient` sends it as soon as the handshake arrives, carrying its `namespace` option.
-
-Switching to a gateway that declares an `authenticate` hook is refused with a Socket.IO
-`connect_error`: the hook gates the upgrade, and by CONNECT time there is no upgrade request left
-to run it against. Reach such a gateway with `?namespace=` so the hook runs where it belongs. The
-transport stays open, so the client may name another namespace.
 :::
 
 Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
 gateway's `authenticate` hook runs for it, exactly as for a native client: a hook that returns
 `false` refuses the Socket.IO connection.
+
+#### Moving to another namespace
+
+A CONNECT that names another gateway's namespace moves the connection there. A standard
+`socket.io-client` does this on every connection that does not put `?namespace=` in its query:
+`io('https://host/admin', { query: { token } })` upgrades on the shared path — bound to the first
+registered gateway — and then sends `40/admin,`.
+
+Who the connection is on the new gateway is that gateway's decision:
+
+- **The new gateway has an `authenticate` hook.** It runs at the CONNECT with what the upgrade
+  gave the first gateway's hook: the same `token`, and a `request` with the upgrade request's URL —
+  query included — and headers, cookies included. `client.auth` and `client.metadata` become what
+  it returns — fresh objects, on the live connection and in storage; nothing the first gateway's
+  hook or handlers set remains. A hook that returns `false`, throws, or has not answered within 10
+  seconds refuses the CONNECT with a Socket.IO `connect_error` whose message is `Unauthorized` —
+  what a refused upgrade answers as HTTP 401 — and the move does not happen.
+- **The new gateway has no hook, and the first gateway has one.** The CONNECT is refused with a
+  `connect_error` naming the namespace. Reach such a gateway with `?namespace=`, so it is the
+  gateway bound at upgrade.
+- **Neither gateway has a hook.** The connection moves as it is: `client.auth` and
+  `client.metadata` are what the upgrade parsed — `client.auth` is `{ authenticated: false, token }`,
+  or `null` without a token — plus whatever a handler of the first gateway wrote to them before the
+  CONNECT.
+
+What one gateway's `authenticate` hook grants never reaches another gateway's guards, nor the
+handler bodies and what they await: a gateway with a hook replaces the identity only once the
+other gateway is done, and one without a hook is never reached from a gateway with a hook. Two
+limits. The rule covers what hooks grant, not what handlers write: a handler that sets
+`client.auth` itself — a `login` message, say — grants it to every gateway without a hook that the
+connection moves to afterwards. And work a handler leaves running without awaiting it is not
+waited for — see below.
+
+```typescript
+@WebSocketGateway({
+  path: '/ws',
+  namespace: 'public',
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    return user ? { userId: user.id } : null;
+  },
+})
+export class PublicGateway extends BaseWebSocketGateway {}
+
+@WebSocketGateway({
+  path: '/ws',
+  namespace: 'admin',
+  // Runs at upgrade for `?namespace=admin`, and at a CONNECT that moves a connection here.
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    if (!user?.permissions.includes('admin')) return false; // connect_error "Unauthorized"
+    return { userId: user.id, permissions: user.permissions };
+  },
+})
+export class AdminGateway extends BaseWebSocketGateway {
+  @UseWsGuards(new WsPermissionGuard('admin'))
+  @OnMessage('audit')
+  handleAudit(@Client() client: WsClientData) {
+    return { event: 'audit:ok', data: { by: client.auth?.userId } };
+  }
+}
+```
+
+A refused CONNECT changes nothing: the connection stays on its gateway with its identity and its
+rooms, and the transport stays open, so the client may name another namespace. The move is all or
+nothing, and while it is being decided the connection belongs to the first gateway:
+
+1. **While the new gateway's hook decides,** an EVENT packet is served by the first gateway, with
+   the first identity, whatever namespace it names. A standard Socket.IO client holds its emits
+   until the CONNECT is answered and never sends one.
+2. **Once the hook has allowed the move,** the first gateway takes no new message from the
+   connection: EVENT packets are held, belonging to neither gateway yet. The move waits for every
+   message the first gateway is still serving — guards and handler bodies, a join waiting on its
+   guards included, which is waited for rather than cancelled — and only then swaps the identity.
+   If they have not settled within 10 seconds the CONNECT is refused with `connect_error`
+   `The connection could not be moved`, as it is when the client record cannot be written; the
+   record is then put back as it was. A move holds at most 100 EVENT packets. One more while it
+   still waits on the first gateway refuses it with `connect_error`
+   `Too many messages arrived while the connection was being moved`; one more once it can no longer
+   be refused — while it is recorded and the old rooms are removed — closes the connection with that
+   reason.
+3. **When it is decided,** the held packets are served in the order they arrived: by the new
+   gateway after a move, by the first gateway after a refusal. A closed connection's are dropped.
+   If the move fails after the connection changed hands — the rooms it left cannot be removed from
+   storage — the CONNECT is answered with `connect_error` `The connection could not be moved` and the
+   connection is closed.
+
+The wait covers what a message's guards and handler await. Work a handler starts without awaiting
+it — a promise it leaves running, a timer — is not waited for: once the identity is swapped, such
+work reads the new `client.auth` and `client.metadata`, and what it writes to them lands on the new
+gateway's identity.
+
+A second CONNECT while one is decided is refused with a `connect_error`. A hook call that has not
+answered within its 10 seconds keeps running; until it settles, a further CONNECT that would call
+the hook is refused without calling it. A CONNECT naming a gateway that needs no hook is served.
+
+Between two gateways without a hook nothing waits: the move lands as soon as it is decided. A
+message the first gateway was still serving runs no further guard and no handler body once the
+move has taken the connection away from it — it is answered with the `FORBIDDEN` error frame,
+`message` `Message cancelled: the connection moved to another gateway`. That check is not tied to
+moves without a hook: no guard or handler body of a gateway runs once a move has taken the
+connection away from it. A close is not a move: the message of a connection that closed runs its
+guards and handler as it would have.
+
+When the move happens, the connection arrives on the new gateway in no room: every room joined
+before the move is left in the same step as the move — storage, `client.rooms` and pub/sub
+subscriptions alike — and a server-side `joinRoom()` still writing at that moment is taken back,
+also when it runs on another instance sharing Redis storage. Rooms joined under one gateway's
+guards, or under none, never reach another gateway's rooms. On a move between
+gateways without a hook, joins still waiting on the first gateway's guards are cancelled and
+answered with a `FORBIDDEN` error frame. Rooms the client needs on the new gateway it joins again
+there, under that gateway's guards; a join made while the move is still removing the old rooms
+waits for it on the instance holding the connection. With shared Redis storage, a server-side
+`joinRoom()` the new gateway makes from another instance in that time can be removed with the old
+rooms — the client is then not in that room. A connection that closes before the move is answered
+gets no `@OnConnect` on the new gateway.
+
+To have what the hook reads at a move, a Socket.IO connection keeps its upgrade request's URL and
+headers in memory until its first CONNECT is served — and only when a gateway with a namespace and
+an `authenticate` hook is one it could move to. They are never written to storage. Until then
+the connection's EVENT packets are also counted while they are served, so that a move can wait
+for them.
+
+::: tip Migrating gateways reached by a CONNECT
+A gateway that a Socket.IO client reaches by a CONNECT and that guards on `client.auth` —
+`WsAuthGuard`, `WsPermissionGuard` — needs its own `authenticate` hook: a move from a gateway with
+a hook to one without is refused. This includes the standard `io('/<namespace>')` client: without
+`?namespace=` in its query it upgrades onto the default gateway — the sole one, or the first
+registered — and when that one has a hook and `<namespace>`'s gateway has none, the CONNECT is
+refused. Give that gateway its own hook, or connect with `?namespace=<namespace>` (`query:
+{ namespace: '<namespace>' }`) so the upgrade binds the connection to it directly.
+:::
+
+<llm-only>
+
+- On Socket.IO a connection's identity on a gateway is that gateway's own hook's answer. When
+  generating gateways a client reaches with `io('/<namespace>')`, give every gateway that guards on
+  `client.auth` its own `authenticate` hook; never rely on the hook of the gateway the connection
+  was bound to at upgrade.
+- `client.auth` and `client.metadata` are replaced by fresh objects when a CONNECT moves the
+  connection to a gateway with a hook. Read them in the handler; do not cache them from before the
+  CONNECT.
+- The move waits only for what a handler awaits. Background work a handler starts without awaiting
+  it sees the new gateway's identity after the move; await it, or capture what it needs first.
+- Between two hook-less gateways identity moves as it is, including whatever a handler wrote to
+  `client.auth`. Do not authenticate in message handlers by assigning `client.auth`; use the hook.
+
+</llm-only>
 
 ### Authentication
 
@@ -474,7 +617,9 @@ Three outcomes, because a gateway usually needs all of them:
 | `true` | The client is authenticated, with no identity attached |
 | `{ userId, permissions, metadata }` | The client is authenticated and the identity reaches `client.auth` |
 
-The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, headers, the peer address. A hook that throws refuses the upgrade.
+The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, other headers, query parameters. A hook that throws refuses the upgrade.
+
+On Socket.IO the hook also runs when a CONNECT moves a connection to its gateway from another one, with the same token and a request carrying the upgrade's URL and headers; a refusal there answers the CONNECT with a `connect_error` instead of a 401. See [Moving to another namespace](#moving-to-another-namespace).
 
 ::: tip Setting `client.auth` in `@OnConnect`
 Without `authenticate`, the framework parses the token into `client.auth` as `{ authenticated: false, token }`, and nothing else sets `authenticated` to `true`. Setting `client.auth.authenticated` yourself in an `@OnConnect` handler also lets the client past `WsAuthGuard`, but `authenticate` is the supported way to do it.
@@ -523,9 +668,11 @@ handleJoinRoom(
 }
 ```
 
+The handler runs after the client has joined. A guard on it runs before: a denial keeps the client out of the room and answers with a `FORBIDDEN` error frame — see [Room joins and leaves](#room-joins-and-leaves).
+
 ### @OnLeaveRoom
 
-Handles room leave events.
+Handles room leave events. The handler runs after the client has left the room; a guard on it can skip the handler, never keep the client in the room.
 
 <!-- typecheck: skip -->
 ```typescript
@@ -622,6 +769,76 @@ Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissio
 `WsAuthGuard` and `WsPermissionGuard` read what the gateway's [`authenticate`](#authentication) hook attached to the client. Without that hook no client is authenticated and no client has permissions, so both deny everyone — the guards check an identity, they do not establish one.
 
 Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically.
+
+`@UseWsGuards` is read from the method that declares the handler, so an overriding method does not inherit it from the base method; only a `@UseGuards` on the base method carries over to the override — see [Guards — On an overriding method](/api/guards#on-an-overriding-method).
+
+### Room joins and leaves
+
+A guard decides whether the client joins a room. It runs before the room changes, so a client it denies is not added to the room at all — not in storage, not subscribed, not in `client.rooms` — receives none of the room's broadcasts, and gets the `FORBIDDEN` error frame a denied `@OnMessage` gets. A join asks the guards of the `@OnJoinRoom` handlers whose pattern matches the room, and the gateway-level guards — `@UseGuards` on the gateway class or on a class it extends — on every join, whether or not a handler matches.
+
+```typescript
+@WebSocketGateway({
+  path: '/ws',
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    return user ? { userId: user.id, permissions: user.permissions } : null;
+  },
+})
+export class LoungeGateway extends BaseWebSocketGateway {
+  // Asked before the join: without `rooms:vip` the client stays out of every `vip:*` room.
+  @UseWsGuards(new WsPermissionGuard('rooms:vip'))
+  @OnJoinRoom('vip:*')
+  handleVipJoin(@Client() client: WsClientData, @RoomName() room: string) {
+    // Runs after the join, so the joining client is excluded by id.
+    this.emitToRoom(room, 'user:joined', { userId: client.auth?.userId }, [client.id]);
+
+    return { event: 'room:joined', data: { room } };
+  }
+}
+```
+
+Gateway-level guards also decide the rooms no handler declares — a room the server fills itself, such as one per user. A guard that decides by room reads it from `getRoomName()`. A class-level guard is asked before `@OnLeaveRoom` handlers as well: a denial there skips the handler body, and the leave itself still happens.
+
+```typescript
+// `user:<id>` rooms are filled by the server alone. `getRoomName()` is the room the join would
+// add the client to, however the client spelled it; on a message handler it is undefined.
+const noUserRoomJoins = createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:'));
+
+@WebSocketGateway({
+  path: '/inbox',
+  async authenticate({ token }) {
+    const user = token ? await verifyToken(token) : null;
+    return user ? { userId: user.id, permissions: user.permissions } : null;
+  },
+})
+// Asked on every client join of this gateway, and before each of its handlers.
+@UseGuards(WsAuthGuard, noUserRoomJoins)
+export class InboxGateway extends BaseWebSocketGateway {
+  @OnConnect()
+  async handleConnect(@Client() client: WsClientData) {
+    // A server-side join asks no guard: only the server puts a client in its `user:<id>` room.
+    await this.joinRoom(client.id, `user:${client.auth?.userId}`);
+  }
+
+  @OnJoinRoom('thread:{threadId}')
+  handleThreadJoin(@RoomName() room: string) {
+    return { event: 'thread:joined', data: { room } };
+  }
+}
+```
+
+The rules behind it:
+
+- The guards come from every `@OnJoinRoom` handler whose pattern matches the room, and are asked in declaration order. A handler's list starts with the gateway-level guards, so with several matching handlers they are asked once per handler, each time with that handler's context. One denial keeps the client out and none of those handlers runs. When all allow, the client joins, then the handlers run — no guard is asked again for them.
+- A room no `@OnJoinRoom` handler matches is decided by the gateway-level guards alone, in the same order, once each. On a gateway without gateway-level guards such a join asks no guard and goes ahead.
+- A guard or interceptor of a join or a leave reads the room from `getRoomName()`: the room the gateway adds the client to or removes it from, the one `@RoomName()` injects. The gateway takes it from the message — the data when it is a string, else the data's `room` field when that is not empty, else what follows `join:` / `leave:` in the event — so `getData()`, which is whatever the client sent, does not tell which room is joined: `join:user:42` with `{ room: '' }`, `5` or `{}` joins `user:42`, and `join:lobby` with `'user:42'` joins `user:42` too. Never look for the room in `getData()`. On `@OnMessage`, `@OnConnect` and `@OnDisconnect` `getRoomName()` is `undefined`.
+- For a join no handler matches, the guard's context describes a handler that does not exist: `getHandler()` is `{ type: 'joinRoom', handler: '', params: [], guards }` — an empty `handler` name, no `pattern`, the gateway-level guards — and `getPatternParams()` is `{}`. A guard tells such a join by the empty `handler` name and its room by `getRoomName()`. A gateway-level guard written for `@OnMessage` handlers must handle this context: one that denies or throws on it keeps clients out of every room no handler matches.
+- The guard sees the client before the join: `client.rooms` does not list the room yet. A `WsRoomGuard` naming the room being joined therefore denies every join to it.
+- The guard covers the client's own `join` message only. A server-side `joinRoom(clientId, room)` — from a handler or a service — adds the client without asking any guard.
+- A `leave` never waits for a join. It takes effect at once and cancels any join of the same room still waiting on its guards, so a `join` followed by a `leave` ends with the client out of the room however long the guards take, or if they never answer. A server-side `leaveRoom(clientId, room)` cancels such a join the same way when it runs on the instance holding the connection; with several instances sharing Redis storage, a `leaveRoom()` on another instance does not, and the join lands once its guards allow it.
+- A join that will not happen any more — cancelled by a leave, or by a Socket.IO move to another gateway — is answered at once with the same `error` frame (`code: 'FORBIDDEN'`, `message` naming the reason), so an ack id never goes unanswered; the guards' later verdict is ignored. A join from a connection that closed meanwhile is dropped and asks no further guard.
+- A guard on `@OnLeaveRoom` never keeps a client in a room. The leave happens first; a denial skips the handler and sends no frame.
+- A `join` or `leave` whose room is not a string names no room and is ignored, like any other malformed message.
 
 ## Interceptors
 

@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+
 import type { ServiceClientOptions, ControllerClient } from './service-client.types';
 import type {
   ControllerDefinition,
@@ -5,9 +7,17 @@ import type {
   ServiceDefinition,
 } from './service-definition';
 
-import { HttpClient, type HttpMethod as RequestsHttpMethod } from '@onebun/requests';
+import {
+  type ApiResponse,
+  HttpClient,
+  type HttpMethod as RequestsHttpMethod,
+} from '@onebun/requests';
 
-import { ParamType } from '../types';
+import {
+  HttpMethod,
+  ParamType,
+  type ParamMetadata,
+} from '../types';
 
 /**
  * A `:name` token in a route template, in the router's own grammar: the name runs from the colon
@@ -19,69 +29,35 @@ import { ParamType } from '../types';
 const PATH_TOKEN = /:([^/]+)/g;
 
 /**
- * Characters that end a path segment when a WHATWG URL parser reads an `http(s)` URL. The
- * backslash is on the list because special schemes treat it exactly like `/`.
+ * Values that change the route however they are sent: an empty segment, "this directory" and "the
+ * parent directory". `encodeURIComponent` leaves `.` as it is, and spelling a dot as `%2E` does not
+ * help either, because a WHATWG URL parser reads `%2e` in any case as a dot when it resolves dot
+ * segments.
  */
-const SEGMENT_TERMINATORS = ['/', '\\', '?', '#'] as const;
-
-/** ASCII tab and newline: a WHATWG URL parser deletes them wherever they occur. */
-const URL_STRIPPED_ANYWHERE = /[\t\n\r]/g;
+const ROUTE_CHANGING_SEGMENTS: ReadonlySet<string> = new Set(['', '.', '..']);
 
 /**
- * The highest code unit a WHATWG URL parser trims from both ends of the URL: U+0020, space. The C0
- * controls (U+0000 to U+001F) are everything below it.
+ * The methods whose body the HTTP client sends: `POST`, `PUT` and `PATCH`, the same list it keeps
+ * itself. With any other method it drops the body unsent.
  */
-const URL_TRIMMED_MAX_CODE_UNIT = 0x20;
-
-/** Segments a URL parser treats as "this directory" and "the parent directory", or an empty one. */
-const ROUTE_CHANGING_SEGMENTS = new Set(['', '.', '..']);
+const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set([HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH]);
 
 /**
- * `text` without its trailing C0 controls and spaces.
+ * The text that replaces one `:name` token: the value percent-encoded with `encodeURIComponent`,
+ * or a `TypeError` for a value that cannot be sent as that one segment.
  *
- * A scan from the end rather than an end-anchored regex over the same range: a backtracking engine
- * retries that pattern from every position of a run that does not reach the end, so 100 000 spaces
- * followed by `x` took seconds. `trimEnd()` is no substitute either: it keeps most C0 controls
- * (U+0000, U+0001, ...) and trims Unicode spaces such as U+00A0 that the parser keeps.
- */
-function trimUrlEnd(text: string): string {
-  let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) <= URL_TRIMMED_MAX_CODE_UNIT) {
-    end--;
-  }
-
-  return text.slice(0, end);
-}
-
-/**
- * The segment a URL parser will actually see for `text`, for the dot-segment check.
+ * Encoding is what keeps the value inside its segment. `/`, `\`, `?`, `#` and `%` in it are sent as
+ * `%2F`, `%5C`, `%3F`, `%23` and `%25`, so the router matches the declared route and decodes the
+ * segment exactly once: the handler receives the value as it was passed. That includes text that
+ * looks encoded already. `'%2e%2e'` is sent as `%252e%252e` and arrives as `'%2e%2e'`, never as
+ * `..`, and a value the caller encoded first arrives still encoded.
  *
- * Before it looks for `.` and `..` the parser deletes every ASCII tab and newline anywhere in the
- * URL, and trims C0 controls and spaces from the end of the URL, which is where this segment sits
- * when the call has no query. So `'.\t.'` and `'.. '` arrive as `..`. It also accepts `%2e` for
- * a dot in any case and in any position, which decoding covers. A value that is not valid
- * percent-encoding is checked as written: it cannot decode to a dot segment.
- *
- * `text` is caller input of any length, so every step here is linear in it.
- */
-function effectivePathSegment(text: string): string {
-  const parsed = trimUrlEnd(text.replace(URL_STRIPPED_ANYWHERE, ''));
-
-  try {
-    return decodeURIComponent(parsed);
-  } catch {
-    return parsed;
-  }
-}
-
-/**
- * The text that replaces one `:name` token, or a `TypeError` for a value that would make the
- * request reach a different route than the one the endpoint declares.
- *
- * The value is sent unencoded, so a caller who percent-encodes it first gets exactly what they
- * encoded. What is refused: an unencoded `/`, `?`, `#` or `\` ends the segment, and `..`, `.` or an
- * empty segment moves the path up a level or onto a sibling route. The request would carry this
- * client's credentials to that route. The refusal happens before any request is made.
+ * The refusals happen before any request is made:
+ * - `null` and `undefined`, which would be sent as the text `null` / `undefined`;
+ * - `''`, `.` and `..`, which no encoding can send (see {@link ROUTE_CHANGING_SEGMENTS}). The request
+ *   would reach the sibling or the parent route, carrying this client's credentials there;
+ * - a string with an unpaired UTF-16 surrogate, which has no UTF-8 encoding. Sent as is, the URL
+ *   parser would replace it with U+FFFD, so the handler would receive a different value.
  */
 function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown): string {
   const route = `${endpoint.httpMethod} ${endpoint.path}`;
@@ -94,42 +70,198 @@ function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown
   }
 
   const text = String(value);
-  const terminator = SEGMENT_TERMINATORS.find((character) => text.includes(character));
-  if (terminator !== undefined) {
+  if (ROUTE_CHANGING_SEGMENTS.has(text)) {
+    const reading = text === '' ? 'is empty' : `is the dot segment "${text}"`;
     throw refuse(
-      `contains ${JSON.stringify(terminator)}, which ends a path segment, so the request would reach a ` +
-      `different route than ${route}. Percent-encode the value (encodeURIComponent) to send it as data`,
+      `${reading}, which would take the request to a different route than ${route} however it is encoded. ` +
+      'Send such a value as a @Query parameter or in the @Body',
     );
   }
 
-  const segment = effectivePathSegment(text);
-  if (ROUTE_CHANGING_SEGMENTS.has(segment)) {
-    const reading = segment === '' ? 'is empty' : `is read by the URL parser as the dot segment "${segment}"`;
-    throw refuse(`${reading}, so the request would reach a different route than ${route}`);
+  try {
+    return encodeURIComponent(text);
+  } catch {
+    // `encodeURIComponent` throws a URIError only for an unpaired surrogate.
+    throw refuse('contains an unpaired UTF-16 surrogate, which has no percent-encoding');
   }
+}
 
-  return text;
+/** The parameter types a caller supplies. See {@link clientParams}. */
+type ClientParamType = ParamType.PATH | ParamType.QUERY | ParamType.BODY;
+
+type ClientParam = ParamMetadata & { type: ClientParamType };
+
+function isClientParam(param: ParamMetadata): param is ClientParam {
+  return param.type === ParamType.PATH || param.type === ParamType.QUERY || param.type === ParamType.BODY;
 }
 
 /**
- * Build request parameters from endpoint metadata and arguments
+ * The handler parameters a generated call takes arguments for: its `@Param`, `@Query` and `@Body`
+ * parameters, in the order the handler declares them. Argument `n` of the call is entry `n`.
+ *
+ * Every other decorated parameter is a view over the SERVER's request: `@Header`, `@Cookie`,
+ * `@Req`, `@Res`, a `createHttpParamDecorator` extractor, a file or a form field. The client sends
+ * nothing for them, so they take no argument. An undecorated parameter is not in the metadata at
+ * all, and takes none either.
+ *
+ * Counting only these three types is what makes the call's arguments the list a caller can see,
+ * and the list a typed contract would expose: walking every decorated parameter against `args[i]`
+ * would let a server-only one declared before a client one take an argument and shift the rest, so
+ * `(@Header a, @Query q)` called as `m('hello')` would send no query.
+ */
+function clientParams(endpoint: EndpointMetadata): ClientParam[] {
+  return (endpoint.params ?? []).filter(isClientParam).sort((a, b) => a.index - b.index);
+}
+
+/**
+ * The query string of a call, `?` included, or `''` when it sends no query value.
+ *
+ * Built here rather than handed to the HTTP client as a record, because that client appends
+ * `String(value)` once per key: `['a', 'b']` would go out as `tags=a%2Cb` and the handler would
+ * receive `'a,b'`. An array is sent as one `name[]` key per element instead, which the server's query
+ * parser reads back as an array. The `[]` suffix is what keeps a one-element array an array: a
+ * repeated key alone gives an array only from the second value on, so `['a']` would arrive as `'a'`.
+ *
+ * Every other value is sent as the HTTP client sends it, one key with `String(value)`. `null` and
+ * `undefined` are not sent, and neither are the `null` and `undefined` elements of an array, so an
+ * empty array sends nothing and the handler receives `undefined`. Values are encoded with
+ * `URLSearchParams`, as the HTTP client encodes them, so a single value goes out exactly as the HTTP
+ * client would send it.
+ */
+function queryStringFor(query: ReadonlyMap<string, unknown>): string {
+  const search = new URLSearchParams();
+
+  for (const [name, value] of query) {
+    if (Array.isArray(value)) {
+      for (const element of value) {
+        if (element !== undefined && element !== null) {
+          search.append(`${name}[]`, String(element));
+        }
+      }
+    } else if (value !== undefined && value !== null) {
+      search.append(name, String(value));
+    }
+  }
+
+  const text = search.toString();
+
+  return text === '' ? '' : `?${text}`;
+}
+
+/**
+ * The name of a `@Body` value that is bytes or a stream, which JSON has no form for, or `undefined`
+ * for any other value.
+ *
+ * `JSON.stringify` makes `{"0":1,"1":2}` of a typed array and `{}` of an `ArrayBuffer`, a
+ * `SharedArrayBuffer`, a `DataView`, a `Blob` (a `Bun.file()` is one) and a stream — a
+ * `ReadableStream`, a Node.js `Readable`, an async generator object. The handler would receive
+ * that object instead of what the value holds, so such a body is refused.
+ *
+ * Bytes are refused whatever else they are, so a Node.js `Buffer` is refused too: it is a
+ * `Uint8Array`, and its `toJSON` (`{ type: 'Buffer', data: [...] }`) is not the bytes. Any other
+ * value with a `toJSON` method says how it serializes and stays JSON — `URLSearchParams`,
+ * `FormData`, and a stream-like object that declares one.
+ */
+function bytesOrStreamTypeOf(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+
+  const bytes = ArrayBuffer.isView(value) ||
+    value instanceof ArrayBuffer ||
+    value instanceof SharedArrayBuffer ||
+    value instanceof Blob;
+  const stream = typeof (value as { toJSON?: unknown }).toJSON !== 'function' && (
+    value instanceof ReadableStream ||
+    value instanceof Readable ||
+    Object.prototype.toString.call(value) === '[object AsyncGenerator]'
+  );
+  if (!bytes && !stream) {
+    return undefined;
+  }
+
+  // An async generator's `constructor` is not a function: its tag names it
+  const owner: unknown = (value as { constructor?: unknown }).constructor;
+
+  return typeof owner === 'function' && owner.name !== ''
+    ? owner.name
+    : Object.prototype.toString.call(value).slice('[object '.length, -1);
+}
+
+/**
+ * The bytes of a call's body: the `@Body` value as JSON, or `undefined` when it sends none.
+ *
+ * Serialized here, because the HTTP client sends a string as it is and skips a falsy value: it
+ * would send `'hello'` as the bare text `hello`, which the server's `req.json()` cannot parse, so
+ * the handler would receive `undefined`, and it would send no body at all for `0`, `false`, `''` or
+ * `null`. As JSON, every one of them reaches `@Body()` as it was passed. The text is handed on as a string, so the
+ * HTTP client sends (and signs) exactly these bytes, under its default
+ * `Content-Type: application/json`. A `custom` auth interceptor therefore sees this text as
+ * `config.data`, not the value.
+ *
+ * `undefined` sends no body, and so does any value `JSON.stringify` has no text for (a function, a
+ * symbol). Refused with a `TypeError` naming the call, before any request is made:
+ * - bytes and streams ({@link bytesOrStreamTypeOf}), which JSON has no form for. The handler's
+ *   `@Body` is parsed JSON, so bytes are sent through `HttpClient`, which sends a `Uint8Array`, an
+ *   `ArrayBuffer` or a `Blob` as its bytes;
+ * - a value `JSON.stringify` throws on, a BigInt or a cyclic object.
+ *
+ * Called only for a method in {@link BODY_CARRYING_METHODS}, the ones whose body is sent.
+ *
+ * @param position - The `@Body` parameter's position among the call's arguments, from 0
+ */
+function jsonBodyFor(endpoint: EndpointMetadata, value: unknown, position: number): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const bytesOrStream = bytesOrStreamTypeOf(value);
+  if (bytesOrStream !== undefined) {
+    // A Buffer's toJSON gives { type: 'Buffer', data: [...] }; other bytes and streams have none
+    const sentAs = typeof (value as { toJSON?: unknown }).toJSON === 'function'
+      ? 'the JSON of its toJSON()'
+      : ArrayBuffer.isView(value) && !(value instanceof DataView) ? '{"0":…}' : '{}';
+
+    throw new TypeError(
+      `${endpoint.controller}.${endpoint.method}: the @Body argument (argument ${position + 1}) is a ${bytesOrStream}, ` +
+      `which has no JSON form: it would be sent as ${sentAs}, and the handler would receive that object. ` +
+      'A service-client body is JSON. To send bytes, call ' +
+      `${endpoint.httpMethod} ${endpoint.path} through HttpClient (createHttpClient), which sends a Uint8Array, ` +
+      'an ArrayBuffer or a Blob as its bytes; read a stream into a Uint8Array first. Nothing was sent.',
+    );
+  }
+
+  try {
+    // Typed `string`, but it is `undefined` for a function or a symbol.
+    const json: string | undefined = JSON.stringify(value);
+
+    return json;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+
+    throw new TypeError(
+      `${endpoint.controller}.${endpoint.method}: the @Body value cannot be sent as JSON (${reason}). Nothing was sent.`,
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * The URL and the body of one call: path values encoded into the route template, the query string
+ * appended to it, and the body serialized as JSON. Every refusal happens here, before any request.
  */
 function buildRequestParams(
   endpoint: EndpointMetadata,
   args: unknown[],
-): { url: string; body?: unknown; query?: Record<string, unknown> } {
+): { url: string; body?: string } {
   let body: unknown;
-  let query: Record<string, unknown> | undefined;
+  let bodyPosition = 0;
+  const query = new Map<string, unknown>();
   const pathValues = new Map<string, unknown>();
 
-  const params = endpoint.params || [];
-
-  // Sort params by index to match with args
-  const sortedParams = [...params].sort((a, b) => a.index - b.index);
-
-  for (let i = 0; i < sortedParams.length; i++) {
-    const param = sortedParams[i];
-    const value = args[i];
+  // Arguments past the last client parameter are dropped.
+  clientParams(endpoint).forEach((param, position) => {
+    const value = args[position];
 
     switch (param.type) {
       case ParamType.PATH:
@@ -139,39 +271,31 @@ function buildRequestParams(
         break;
       case ParamType.BODY:
         body = value;
+        bodyPosition = position;
         break;
       case ParamType.QUERY:
-        query = query || {};
         if (param.name) {
-          query[param.name] = value;
+          query.set(param.name, value);
         }
         break;
-      case ParamType.CUSTOM:
-        // An extractor is a view over the SERVER's request — there is nothing for a caller to
-        // pass, so it consumes no argument here.
-        //
-        // It does still occupy a slot in this loop, because the loop walks `sortedParams[i]`
-        // against `args[i]`. That is pre-existing: HEADER, REQUEST and RESPONSE fall into the
-        // same shape below, so a handler that declares one of them before a QUERY already reads
-        // the wrong argument. Fixing it needs a counter compacted over client-relevant types
-        // only, which is a change to how every generated call is made — see the work item.
-        break;
-
-      // HEADER, REQUEST, RESPONSE are not typically used in client calls
-      default:
-        break;
     }
-  }
+  });
 
   // One pass over the template with a function replacer: each token is replaced by exact name,
   // and the returned text is inserted as is (a string replacement would expand `$&` and `$1`).
   // A token with no @Param behind it is left as it was.
-  const url = endpoint.path.replace(
+  const path = endpoint.path.replace(
     PATH_TOKEN,
     (token: string, name: string) => (pathValues.has(name) ? pathSegmentFor(endpoint, name, pathValues.get(name)) : token),
   );
 
-  return { url, body, query };
+  // A GET, DELETE, HEAD, OPTIONS or ALL call sends no body, whatever it is handed, so it is handed
+  // none. The value is not serialized: one JSON cannot represent (a BigInt) must not fail a call
+  // that never sends it. And a `custom` auth interceptor sees
+  // `config.data` as `undefined`, which is what is sent.
+  const sent = BODY_CARRYING_METHODS.has(endpoint.httpMethod) ? jsonBodyFor(endpoint, body, bodyPosition) : undefined;
+
+  return { url: `${path}${queryStringFor(query)}`, body: sent };
 }
 
 /**
@@ -225,6 +349,37 @@ function createNameProxy<TEntry, TValue>(
   });
 }
 
+/** The keys of the success envelope the server builds around a handler's return value. */
+const SUCCESS_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['success', 'result', 'traceId']);
+
+/**
+ * Whether a body is the server's success envelope: `success: true` and nothing but `result` and
+ * `traceId` beside it. `result` is absent when the handler returned `undefined`, because
+ * `JSON.stringify` drops an `undefined` property, so `{ "success": true }` is the envelope of a
+ * `void` handler.
+ */
+function isSuccessEnvelope(body: unknown): body is { success: true; result?: unknown } {
+  return typeof body === 'object' &&
+    body !== null &&
+    (body as { success?: unknown }).success === true &&
+    Object.keys(body).every((key) => SUCCESS_ENVELOPE_KEYS.has(key));
+}
+
+/**
+ * The value the handler returned, out of what the HTTP client resolved.
+ *
+ * `request()` rejects on every failure, so it resolves a success, and its `result` is the body the
+ * server sent. The server wraps every value a handler returns into `{ success: true, result }`,
+ * on every route, so that `result` is the value. A handler that returned a `Response` of its own
+ * sent its body as it is: a success envelope (`this.success(value, 201)`) resolves its `result`,
+ * and any other body resolves whole.
+ */
+function handlerValue(response: ApiResponse<unknown>): unknown {
+  const body = response.success ? response.result : undefined;
+
+  return isSuccessEnvelope(body) ? body.result : body;
+}
+
 /**
  * Create a proxy for controller methods
  */
@@ -234,16 +389,21 @@ function createControllerProxy(
 ): ControllerClient {
   return createNameProxy(
     controllerDef.methods,
-    (endpoint) => async (...args: unknown[]) => {
-      const { url, body, query } = buildRequestParams(endpoint, args);
+    (endpoint) => async (...args: unknown[]): Promise<unknown> => {
+      const { url, body } = buildRequestParams(endpoint, args);
 
-      return await httpClient.request({
+      // The query string is already in `url` and the body is JSON text, so the HTTP client sends
+      // both as they are. It only appends a query key of its own (an API key in query mode). A
+      // `custom` auth interceptor sees exactly these: the call's query in `config.url`, not in
+      // `config.query`, and the text in `config.data`.
+      const response = await httpClient.request({
         // Cast to RequestsHttpMethod to handle enum type difference between @onebun/core and @onebun/requests
         method: endpoint.httpMethod as unknown as RequestsHttpMethod,
         url,
         data: body,
-        query,
       });
+
+      return handlerValue(response);
     },
     (methodName) => new Error(`Method "${methodName}" not found in controller "${controllerDef.name}"`),
   );
@@ -257,13 +417,17 @@ function createControllerProxy(
  * - Controller and method names, at run time only: reading one the definition does not have
  *   throws. The return type is `Record<string, ControllerClient>`, so any name compiles.
  * - Nothing checks the types of the arguments or the result. Each method is
- *   `(...args: any[]) => Promise<any>`. Arguments are matched by position to every decorated
- *   parameter of the handler, but only the `@Param`, `@Query` and `@Body` values are sent: an
- *   argument in the position of a `@Header`, `@Req` or any other parameter is dropped, and so are
- *   extra arguments. Path values are sent as text, and a missing one is refused (see below).
- * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
- *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
- *   or 5xx response rejects.
+ *   `(...args: any[]) => Promise<unknown>`. The arguments are the handler's `@Param`, `@Query` and
+ *   `@Body` parameters, one each, in the order the handler declares them. A `@Header`, `@Cookie`,
+ *   `@Req`, custom-extractor, file or form-field parameter takes no argument, wherever it is
+ *   declared. Extra
+ *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused;
+ *   a query array arrives as an array, and the body as JSON (see below).
+ * - The promise resolves with the value the handler returned. A failure rejects with the
+ *   `OneBunBaseError` subclass its status names, carrying the callee's `error`, `code` and
+ *   `details`: a `ConflictError` the handler threw arrives as a `ConflictError` with its 409.
+ *   A status without a class of its own is an `HttpStatusError` with that `code`, and a timeout
+ *   or a refused connection a `TransportError` with code `0`.
  *
  * @param definition - Service definition created by createServiceDefinition()
  * @param options - Client options including URL, timeout, retries, etc.
@@ -282,13 +446,28 @@ function createControllerProxy(
  *   retries: { max: 3, delay: 100, backoff: 'exponential' },
  * });
  *
- * // Calls GET /users/:id on UsersController.getById. `response` is `any`.
- * const response = await usersClient.UsersController.getById('123');
+ * // Calls GET /users/:id on UsersController.getById. `user` is `unknown`: annotate or check it.
+ * const user = await usersClient.UsersController.getById('123');
  * ```
  *
- * A path parameter value that would change the route is refused with a `TypeError` before any
- * request is made: `null`, `undefined`, a value containing `/`, `?`, `#` or `\`, and a value the
- * URL parser reads as `''`, `.` or `..` (including `%2e` spellings).
+ * Each path parameter value is converted to text and percent-encoded with `encodeURIComponent`,
+ * so the handler's `@Param` receives exactly the value passed here, `/`, `?`, `#`, `%` and all. Do
+ * not encode it yourself: `encodeURIComponent('a/b')` passed here arrives as `'a%2Fb'`. A value no
+ * encoding can send as one segment is refused with a `TypeError` before any request is made:
+ * `null`, `undefined`, `''`, `.`, `..`, and a string with an unpaired UTF-16 surrogate.
+ *
+ * A `@Query` array is sent as one `name[]=element` key per element, so the handler receives an
+ * array, a one-element one included. An empty array,
+ * `null` and `undefined` send no value. On a `POST`, `PUT` or `PATCH` endpoint the `@Body` value is
+ * always sent as JSON, so a string, `0`, `false`, `''` and `null` reach the handler as they were
+ * passed; `undefined`
+ * sends no body, and a value `JSON.stringify` throws on is refused with a `TypeError` before any
+ * request is made. So is a value that is bytes or a stream (a typed array, a `Buffer` included, an
+ * `ArrayBuffer`, a `Blob`, a `ReadableStream`, ...), which JSON has no form for: send bytes through `HttpClient`,
+ * which sends a `Uint8Array`, an `ArrayBuffer` or a `Blob` as its bytes. With any other method no
+ * body is sent, and the value is neither serialized nor
+ * checked. A `custom` auth interceptor sees what is sent: the query string in `config.url`, and in
+ * `config.data` the JSON text of the body, or `undefined`.
  *
  * The client and each `client.<Controller>` behave as plain values: they can be awaited and
  * returned from an `async` factory (`then` reads as `undefined`), serialized, converted to a

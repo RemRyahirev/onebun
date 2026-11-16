@@ -8,13 +8,13 @@ description: System architecture overview. Module hierarchy, DI container, reque
 
 **DI Resolution Order**:
 1. Module imports resolved first (depth-first). A module is published as built only when its own initialization finishes, so one met again while it is still being built — an import cycle, a self-import included — throws `OneBunModuleImportCycleError` naming the cycle in import order. See [Decorators — @Module()](/api/decorators#module)
-2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core, or creating it threw). A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all, because waiting would turn an implementation that injects its consumer into a cycle. It gets `undefined`, with a warning, when a provider of the module could have filled it
+2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core). A constructor that throws never leaves the queue that way: it ends the boot at the throw with `ServiceConstructionError(serviceName, moduleName, cause)` — the original error as `cause`, its type and message in the message, its frames as the stack — whether or not anything injects the provider. A framework error thrown from a constructor (`OneBunBootstrapError`, or `name` starting with `OneBun`) propagates unwrapped. A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all, because waiting would turn an implementation that injects its consumer into a cycle. It gets `undefined`, with a warning, when a provider of the module could have filled it
 3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
-1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
-2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all`)
+1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service, sequentially, one module at a time: every imported module before the module that imports it (depth-first post-order over the modules as they were built: the deepest import first, `@Global()` modules — built up front by the root — among the first, a module shared by several importers once, where it was first built, the root module last), and within a module in dependency order. So a service's hook always finds the hooks of everything it injects completed, from its own module or an imported one. Called for all providers, even standalone ones not injected anywhere. A throwing hook stops the pass: the importing modules' hooks never run (the destroy hooks still run over everything built)
+2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all` within a module), after the service hooks of the whole tree; controllers are not injectable, so their order across modules carries no dependency
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
 4. Shutdown signal (or `app.stop()`) → every route answers `503 Service Unavailable` while the listener deliberately stays open, in-flight requests are drained (budget: half of `shutdownTimeout`, 7500ms by default), then the HTTP listener is closed
 5. Listener already closed → `beforeApplicationDestroy(signal?)` called
@@ -49,7 +49,7 @@ The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry 
 **Module Metadata Storage**:
 - Custom WeakMap-based metadata system in `packages/core/src/decorators/metadata.ts`, two layers: a module-private store for the framework's own keys, and the GLOBAL Reflect Metadata API
 - The global polyfill is a complete Reflect Metadata API (all nine functions, per-property keys, prototype walk) plus reflect-metadata's provider registry under `Symbol.for('@reflect-metadata:registry')`. It is installed only when no implementation is there; one already present (reflect-metadata imported first, an older copy of core) is kept as is. A reflect-metadata 0.2.x loaded LATER by a third-party library (tsyringe, `@simplewebauthn/server`) registers its store in that registry and keeps reading what was decorated before it; a later 0.1.x fills nothing. No dependency on reflect-metadata
-- DI reads OWN `design:paramtypes` (`getOwnMetadata`, no prototype walk) in `getConstructorParamTypes`, `diagnoseDecoratorMetadata` and the `@Controller` wrapper copy. A class that declares no constructor (`length === 0` and no own `design:paramtypes` array) under an ancestor that takes dependencies is built without them, and the module logs a warning once per class naming the ancestor and its types. An explicit `constructor()` records `[]` only on a DECORATED class; an undecorated class with a zero-length constructor (`constructor() { super(new Dep()); }`, or parameters that all have defaults) records nothing and cannot be told from one with no constructor, so the warning is worded for both ("declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded)") and the fix it gives is to declare the constructor and, on an undecorated class, add a decorator too. So is an UNDECORATED class that declares constructor parameters under such an ancestor (`length > 0`, no types emitted, e.g. a guard subclass): it gets its own warning telling it to add a decorator, and is never handed the ancestor's types. Both warnings name the decorator of the class's kind: `@Middleware()` for middleware, `@Controller()` / `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise
+- DI reads OWN `design:paramtypes` (`getOwnMetadata`, no prototype walk) in `getConstructorParamTypes`, `diagnoseDecoratorMetadata` and the `@Controller` wrapper copy, and decides constructor inheritance itself in `traceConstructorMetadata` (decorators.ts). A class runs an inherited constructor when it is DECORATED (a OneBun class decorator recorded it in a WeakSet: `@Service()`, `@Controller()` original and wrapper, `@Middleware()`, `@WebSocketGateway()`), has `length === 0` and has no constructor metadata of its own in any of the four sources (`design:paramtypes` array — `[]` included — in the global or module store, `META_CONSTRUCTOR_PARAMS`, `META_INJECT_TOKENS`, `META_OPTIONAL_PARAMS`). Such a class takes ALL FOUR from the nearest ancestor that has any, walking through further classes of the same kind; `getConstructorParamTypes`, `isOptionalParam` and `getInjectToken` all read that source, so the child never gets the parent's types without its `@Inject`/`@Optional` entries. A decorated class records `[]` for an explicit `constructor()`, so it never inherits; an undecorated class records nothing for a constructor it declares, so it never inherits either, and the walk stops at an undecorated class in between. When the walk stops and an ancestor above takes dependencies, the module logs one warning per class naming the class that stopped it and the fix for its shape (undecorated without parameters: "declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded)" — give it a decorator; undecorated with parameters: "declares a constructor with parameters, but no types were emitted" — add a decorator, never handed the ancestor's types; decorated but stopped in between: names the undecorated class). Each names the decorator of the kind: `@Middleware()` for middleware, `@Controller()` / `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise. A `DependencyResolutionError` for a parameter of an inherited constructor leads its suggestions with "<Class> declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from <Parent> (...)"
 - `META_CONTROLLERS` Map — controller metadata (routes, path, middleware, guards)
 - `META_CONSTRUCTOR_PARAMS` Map — explicit constructor dependencies (@Inject, @Service)
 - String keys via `defineMetadata()`: `onebun:params`, `onebun:middleware`, `onebun:http_guards`, `onebun:controller_http_guards`, `onebun:interceptors`, `onebun:controller_interceptors`, `onebun:exception_filters`, `onebun:controller_exception_filters`, `onebun:responseSchemas`, `onebun:sse`
@@ -128,8 +128,9 @@ The framework uses TypeScript metadata to detect dependencies:
 
 ```typescript
 // Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true),
-// the class's OWN entry — a subclass never borrows its parent's
-const designTypes = Reflect.getOwnMetadata('design:paramtypes', target);
+// the OWN entry of the class whose constructor runs: the class itself, or — for a
+// decorated class that declares no constructor — the ancestor that declares it
+const designTypes = Reflect.getOwnMetadata('design:paramtypes', source);
 
 // Fallback: Custom metadata storage (WeakMap-based, in decorators/metadata.ts)
 // Populated by @Service(), @Inject(), and other decorators via META_CONSTRUCTOR_PARAMS Map
@@ -356,20 +357,29 @@ if (metadata.imports) {
 // Phase 2: Create this module's services with DI
 this.createServicesWithDI(metadata);
 
-// Phase 3: Call onModuleInit() on services that implement it
-// (sequentially in dependency order — dependencies complete before dependents)
-// Recursively traverses ALL modules in the import tree (depth-first)
-await this.callServicesOnModuleInit(); // root + all descendants
+// Phase 3: Call onModuleInit() on services that implement it, sequentially,
+// across ALL modules in the import tree: every imported module before the module
+// that imports it (deepest first), the root module last. Within a module, in
+// dependency order. Either way a dependency's hook completes before its dependents'.
+for (const importedModule of this.collectDescendantModules()) {
+  await importedModule.callServicesOnModuleInit();
+}
+await this.callServicesOnModuleInit(); // the root module's own services, last
 
 // Phase 4: Create controllers with injected services (all modules)
 this.createControllersWithDI();
 
-// Phase 5: Call onModuleInit() on controllers that implement it (all modules)
+// Phase 5: Call onModuleInit() on controllers that implement it (all modules),
+// once every service hook of the tree has completed
 await this.callControllersOnModuleInit();
 
 // Phase 6: After all modules ready, call onApplicationInit() (before HTTP server)
 await this.callOnApplicationInit();
 ```
+
+Phase 3 runs the root module's own services last, so a root service's `onModuleInit` always
+finds the hooks of the services it injects from imports completed — see
+[Initialization Across Modules](/api/services#initialization-across-modules).
 
 **Shutdown Phase:**
 
@@ -509,12 +519,14 @@ export class BaseService {
 
 // Lifecycle hooks are optional - implement the interface to use:
 // onModuleInit is called for ALL providers, even standalone services
-// not injected anywhere. Hooks run sequentially in dependency order.
+// not injected anywhere. Hooks run sequentially in dependency order,
+// imported modules' services before those of the module importing them.
 @Service()
 class MyService extends BaseService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     // Called after construction and DI injection
-    // All dependencies' onModuleInit have already completed
+    // All dependencies' onModuleInit have already completed,
+    // whether they come from this module or from an imported one
   }
 }
 ```
@@ -688,16 +700,18 @@ const usersClient = createServiceClient(UsersServiceDefinition, {
   url: 'http://localhost:3001',
 });
 
-// Sends GET /users/123. The key is the controller class name
-const response = await usersClient.UsersController.findById('123');
-
-// `response` is `any`: the HTTP client's envelope around the server's `{ success, result }` body
-const user = response.result.result;
+// Sends GET /users/123 and resolves with what the handler returned: { id: '123', name: 'Ada' }.
+// The key is the controller class name
+const user = await usersClient.UsersController.findById('123');
 ```
 
 The client checks controller and method names at run time: a name the definition lacks throws when
 it is read. It does not check types. Any name compiles, arguments are `any[]`, and the result is
-`any`. See [What the client checks](/api/requests#service-client-typing).
+`unknown`. See [What the client checks](/api/requests#service-client-typing).
+
+A failure rejects with the error class its status names: a `ConflictError` the callee's handler
+throws arrives as a `ConflictError`, with its `code`, `error` and `details`. See
+[What a call resolves and rejects with](/api/requests#service-client-results).
 
 <llm-only>
 

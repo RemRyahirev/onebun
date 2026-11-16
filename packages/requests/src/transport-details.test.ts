@@ -15,10 +15,16 @@ import {
 import { Effect, Either } from 'effect';
 
 import { createHttpClient, HttpClient } from './client.js';
-import { markTransportDetails, withoutTransportDetails } from './transport-details.js';
 import {
+  isHttpClientFailure,
+  markTransportDetails,
+  withoutTransportDetails,
+} from './transport-details.js';
+import {
+  ConflictError,
   type ErrorResponse,
   InternalServerError,
+  NotFoundError,
   OneBunBaseError,
 } from './types.js';
 
@@ -192,13 +198,19 @@ describe('the error records the client registers', () => {
     expect((forCaller(failure) as ErrorResponse).details).not.toHaveProperty('details');
   });
 
-  it('an upstream OneBun error envelope is propagated whole: it is the error, not a transport detail', async () => {
+  it('an upstream OneBun error envelope is the error: its name and code go on, its details do not', async () => {
     const failure = await failureOf(client.getEffect('/envelope'));
 
-    expect(forCaller(failure)).toMatchObject({
+    // The callee wrote them for this application, which reads them whole...
+    expect(failure.details).toEqual({ expected: 1, actual: 2 });
+    // ...and not for this application's caller
+    expect(forCaller(failure)).toEqual({
+      success: false,
+      name: 'ConflictError',
       error: 'REVISION_CONFLICT',
       code: 409,
-      details: { expected: 1, actual: 2 },
+      details: {},
+      retryCount: 0,
     });
   });
 
@@ -229,11 +241,41 @@ describe('the error records the client registers', () => {
   });
 });
 
+describe('isHttpClientFailure', () => {
+  it('recognises what the Promise API rejects with, for a failure with and without transport details', async () => {
+    const httpError = await client.get('/missing').catch((error: unknown) => error);
+    const envelope = await client.get('/envelope').catch((error: unknown) => error);
+    // An empty JSON body: the client's own text, nothing withheld, still the client's failure
+    const emptyBody = await client.get('/empty-json').catch((error: unknown) => error);
+
+    expect(httpError).toBeInstanceOf(NotFoundError);
+    expect(envelope).toBeInstanceOf(ConflictError);
+    expect([httpError, envelope, emptyBody].map(isHttpClientFailure)).toEqual([true, true, true]);
+  });
+
+  it('recognises an Effect failure and an error built around its record', async () => {
+    const failure = await failureOf(client.getEffect('/missing'));
+
+    expect(isHttpClientFailure(failure)).toBe(true);
+    expect(isHttpClientFailure(OneBunBaseError.fromErrorResponse(failure))).toBe(true);
+  });
+
+  it('does not recognise an error the application wrote, or one around a copy of the record', async () => {
+    const failure = await failureOf(client.getEffect('/missing'));
+
+    expect(isHttpClientFailure(new NotFoundError('USER_NOT_FOUND', { id: 1 }))).toBe(false);
+    expect(isHttpClientFailure(new NotFoundError('USER_NOT_FOUND', { ...failure.details }))).toBe(false);
+    expect(isHttpClientFailure(new Error('plain'))).toBe(false);
+    expect([undefined, null, 'HTTP_ERROR', 404, { details: null }].map(isHttpClientFailure))
+      .toEqual([false, false, false, false, false]);
+  });
+});
+
 describe('withoutTransportDetails', () => {
-  it('reaches the failure req() nests under details.originalError', async () => {
+  it('reaches the details of the error the Promise API rejects with', async () => {
     const thrown = await client.req('GET', '/missing', { token: 'URL-SECRET' }).catch((error: unknown) => error);
 
-    expect(thrown).toBeInstanceOf(InternalServerError);
+    expect(thrown).toBeInstanceOf(NotFoundError);
     const whole = JSON.stringify((thrown as OneBunBaseError).toErrorResponse());
     const shown = JSON.stringify((thrown as OneBunBaseError).toErrorResponse(), withoutTransportDetails);
 
@@ -242,7 +284,69 @@ describe('withoutTransportDetails', () => {
     expect(shown).not.toContain('COOKIE-SECRET');
     expect(shown).not.toContain('URL-SECRET');
     expect(shown).not.toContain('BODY-SECRET');
-    expect(shown).toContain('"error":"HTTP_ERROR"');
+    expect(JSON.parse(shown)).toEqual({
+      success: false,
+      error: 'HTTP_ERROR',
+      code: 404,
+      details: { duration: expect.any(Number), method: 'GET' },
+    });
+  });
+
+  it('reaches the rejection of a refused connectAddress and of a bytes or stream call, and a stream read', async () => {
+    const refused = await client.get('/moved', { token: 'URL-SECRET' }, { connectAddress: 'a.test' })
+      .catch((error: unknown) => error);
+    const bytes = await client.get('/missing', { token: 'URL-SECRET' }, { responseType: 'bytes' })
+      .catch((error: unknown) => error);
+    const streamed = await client.get('/missing', { token: 'URL-SECRET' }, { responseType: 'stream' })
+      .catch((error: unknown) => error);
+    // The call resolves at the headers; the decoder rejects the body at the first read
+    const corrupt = await client.get<ReadableStream<Uint8Array>>('/corrupt-gzip', undefined, {
+      responseType: 'stream',
+      maxResponseBytes: 1024,
+    });
+    const readFailure = corrupt.success
+      ? await corrupt.result.getReader().read().then(() => undefined, (error: unknown) => error)
+      : undefined;
+    const shown = (error: unknown): unknown =>
+      JSON.parse(JSON.stringify((error as OneBunBaseError).toErrorResponse(), withoutTransportDetails));
+
+    expect(refused).toBeInstanceOf(InternalServerError);
+    expect(bytes).toBeInstanceOf(NotFoundError);
+    expect(streamed).toBeInstanceOf(NotFoundError);
+    expect(readFailure).toBeInstanceOf(OneBunBaseError);
+    expect([refused, bytes, streamed, readFailure].map(isHttpClientFailure)).toEqual([true, true, true, true]);
+    expect(shown(refused)).toEqual({
+      success: false,
+      error: 'REQUEST_CONFIG_ERROR',
+      code: 500,
+      details: { option: 'connectAddress', reason: 'not-an-ip', value: 'a.test' },
+    });
+    for (const failure of [bytes, streamed]) {
+      expect(JSON.stringify(shown(failure))).not.toMatch(/COOKIE-SECRET|URL-SECRET|BODY-SECRET/);
+      expect(shown(failure)).toMatchObject({ error: 'HTTP_ERROR', code: 404, details: { method: 'GET' } });
+    }
+    expect(shown(readFailure)).toEqual({
+      success: false,
+      error: 'RESPONSE_DECODE_ERROR',
+      code: 200,
+      details: { reason: 'corrupt-body', encoding: 'gzip', statusCode: 200 },
+    });
+  });
+
+  it('reaches the failure req() with an errors map nests under details.originalError', async () => {
+    const thrown = await client.req('GET', '/missing', { token: 'URL-SECRET' }, {
+      errors: { upstream: { error: 'UPSTREAM_DOWN', message: 'Upstream is down' } },
+    }).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(InternalServerError);
+    const whole = JSON.stringify((thrown as OneBunBaseError).toErrorResponse());
+    const shown = JSON.stringify((thrown as OneBunBaseError).toErrorResponse(), withoutTransportDetails);
+
+    expect(whole).toContain('COOKIE-SECRET');
+    expect(shown).not.toContain('COOKIE-SECRET');
+    expect(shown).not.toContain('URL-SECRET');
+    expect(shown).not.toContain('BODY-SECRET');
+    expect(JSON.parse(shown).details.originalError).toMatchObject({ error: 'HTTP_ERROR', code: 404 });
   });
 
   it('reaches the record as the details of an error built from it', async () => {

@@ -42,6 +42,15 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
+      # The packages ship their .ts sources, so an application compiles them against its own
+      # bun-types, @types/node and lib, and skipLibCheck does not apply to .ts. The step above
+      # only proves they compile against the repo's typings; this one packs them as npm publish
+      # does and compiles them in a scratch consumer under every pinned combination of those
+      # typings. 0.8.2's @onebun/requests passed the step above and failed in applications on
+      # @types/node 26 or lib DOM; this step fails on that code.
+      - name: Consumer type check
+        run: bun run typecheck:consumer
+
       # --max-warnings=0 because the Definition of Done asks for "no errors AND no
       # warnings"; without the flag eslint exits 0 on warnings and half the gate is void.
       - name: Lint

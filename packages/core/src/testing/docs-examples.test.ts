@@ -22,6 +22,7 @@ import {
   Module,
   Param,
 } from '../decorators/decorators';
+import { ServiceConstructionError } from '../errors/dependency-errors';
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
 import { BaseService, Service } from '../module/service';
@@ -409,6 +410,60 @@ describe('docs/testing.md — TestingModule', () => {
       expect(response.status).toBe(200);
     } finally {
       await module?.close();
+    }
+  });
+
+  /**
+   * @source docs:testing.md#setoptionsoptions
+   */
+  it('setOptions — without envSchema, a constructor reading this.config rejects compile() with its own error', async () => {
+    // From docs: "ServiceConstructionError: Failed to create service UserService in module
+    // _TestingAppModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions."
+    const notInitialized = 'Configuration not initialized. Provide envSchema in ApplicationOptions.';
+
+    @Service()
+    class ConfiguredUserService extends BaseService {
+      readonly dbUrl: unknown;
+
+      constructor() {
+        super();
+        this.dbUrl = this.config.get('database.url');
+      }
+    }
+
+    @Controller('/configured-users')
+    class ConfiguredUserController extends BaseController {
+      constructor(private readonly userService: ConfiguredUserService) {
+        super();
+      }
+
+      @Get('/')
+      getUrl() {
+        return this.userService.dbUrl;
+      }
+    }
+
+    // With a dependent, and without one: through 0.8.x the first was a DependencyResolutionError on
+    // the controller and the second compiled without the service.
+    for (const options of [
+      { controllers: [ConfiguredUserController], providers: [ConfiguredUserService] },
+      { providers: [ConfiguredUserService] },
+    ]) {
+      const error = await TestingModule.create(options).compile().then(
+        async (compiled) => {
+          await compiled.close();
+
+          return undefined;
+        },
+        (rejection: unknown) => rejection as Error,
+      );
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(String(error)).toBe(
+        'ServiceConstructionError: Failed to create service ConfiguredUserService in module _TestingAppModule: ' +
+          `Error: ${notInitialized}`,
+      );
+      expect((error!.cause as Error).message).toBe(notInitialized);
     }
   });
 });

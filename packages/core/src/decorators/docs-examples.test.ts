@@ -39,6 +39,7 @@ import {
   Module,
   OneBunApplication,
   OneBunModule,
+  Optional,
   Param,
   ParamType,
   Post,
@@ -1041,7 +1042,122 @@ describe('Reflect Metadata and Other Libraries (docs/api/decorators.md)', () => 
   /**
    * @source docs:api/decorators.md#reflect-metadata-interop
    */
-  it('reads constructor types own: a subclass is injected only when it declares the constructor again', () => {
+  it('reads constructor types own: an undecorated subclass with a constructor of its own gets none of its parent\'s', () => {
+    @Service()
+    class AuditLog extends BaseService {}
+
+    @Service()
+    class TokenStore extends BaseService {}
+
+    @Service()
+    class BaseAuthGuard {
+      constructor(readonly tokens: TokenStore, readonly audit?: AuditLog) {}
+    }
+
+    // From docs: under the global walk this guard's `audit` slot would receive the base's TokenStore.
+    class AuditingGuard extends BaseAuthGuard {
+      constructor(audit: AuditLog) {
+        super(new TokenStore(), audit);
+      }
+    }
+
+    const reflect = globalThis.Reflect as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+    expect(reflect.getMetadata('design:paramtypes', AuditingGuard)).toEqual([TokenStore, AuditLog]);
+    expect(getConstructorParamTypes(AuditingGuard)).toBeUndefined();
+  });
+});
+
+describe('Inherited Constructors (docs/api/decorators.md)', () => {
+  /**
+   * @source docs:api/decorators.md#inherited-constructors
+   */
+  it('injects a decorated class that declares no constructor with the dependencies of the one it inherits', () => {
+    @Service()
+    class Clock extends BaseService {}
+
+    @Service()
+    class ReportSink extends BaseService {}
+
+    @Service()
+    class Scheduler extends BaseService {
+      constructor(
+        readonly clock: Clock,
+        @Optional() readonly reports?: ReportSink,
+      ) {
+        super();
+      }
+    }
+
+    @Service()
+    class NightlyScheduler extends Scheduler {}
+
+    @Service()
+    class ManualScheduler extends Scheduler {
+      constructor() {
+        super(new Clock());
+      }
+    }
+
+    // From docs: the two getConstructorParamTypes answers.
+    expect(getConstructorParamTypes(NightlyScheduler)).toEqual([Clock, ReportSink]);
+    expect(getConstructorParamTypes(ManualScheduler)).toBeUndefined();
+
+    // ReportSink is not provided: it stays optional in the subclass.
+    @Module({ providers: [Clock, Scheduler, NightlyScheduler, ManualScheduler] })
+    class SchedulingModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const module = createModule(SchedulingModule, {}, recorder.layer);
+    const clock = module.getServiceByClass(Clock) as Clock;
+    const nightly = module.getServiceByClass(NightlyScheduler) as NightlyScheduler;
+    const manual = module.getServiceByClass(ManualScheduler) as ManualScheduler;
+
+    expect(nightly.clock).toBe(clock);
+    expect(nightly.reports).toBeUndefined();
+    expect(manual.clock).toBeInstanceOf(Clock);
+    expect(manual.clock).not.toBe(clock);
+    expect(recorder.messages('warn').filter((message) => message.includes('constructor'))).toEqual([]);
+  });
+
+  /**
+   * @source docs:api/decorators.md#inherited-constructors
+   */
+  it('fails the boot for a dependency of the inherited constructor that no module provides, and says so', () => {
+    @Service()
+    class Clock extends BaseService {}
+
+    @Service()
+    class ReportSink extends BaseService {}
+
+    @Service()
+    class Scheduler extends BaseService {
+      constructor(
+        readonly clock: Clock,
+        @Optional() readonly reports?: ReportSink,
+      ) {
+        super();
+      }
+    }
+
+    @Service()
+    class NightlyScheduler extends Scheduler {}
+
+    @Module({ providers: [NightlyScheduler] })
+    class NoClockModule {}
+
+    // From docs: the DependencyResolutionError's first suggestion, quoted.
+    expect(() => createModule(NoClockModule)).toThrow(
+      'NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor '
+      + 'it inherits from Scheduler (Clock, ReportSink). Provide Clock, mark that parameter @Optional() in Scheduler, '
+      + 'or declare a constructor in NightlyScheduler that does not take it.',
+    );
+  });
+
+  /**
+   * @source docs:api/decorators.md#inherited-constructors
+   */
+  it('names the class that stops the inheritance: undecorated, or undecorated in between', () => {
     @Service()
     class Clock extends BaseService {}
 
@@ -1052,38 +1168,25 @@ describe('Reflect Metadata and Other Libraries (docs/api/decorators.md)', () => 
       }
     }
 
-    @Service()
-    class NightlyScheduler extends Scheduler {}
+    // Undecorated: nothing tells whether it declares a constructor, so it inherits nothing.
+    class UndecoratedScheduler extends Scheduler {}
 
     @Service()
-    class HourlyScheduler extends Scheduler {
-      // Not useless: declaring it is what makes Bun emit this class's own design:paramtypes.
-      // eslint-disable-next-line @typescript-eslint/no-useless-constructor
-      constructor(clock: Clock) {
-        super(clock);
-      }
-    }
+    class Leaf extends UndecoratedScheduler {}
 
-    expect(getConstructorParamTypes(Scheduler)).toEqual([Clock]);
-    expect(getConstructorParamTypes(NightlyScheduler)).toBeUndefined();
-    expect(getConstructorParamTypes(HourlyScheduler)).toEqual([Clock]);
-
-    @Module({ providers: [Clock, Scheduler, NightlyScheduler, HourlyScheduler] })
-    class SchedulingModule {}
+    @Module({ providers: [Clock, Leaf] })
+    class ChainModule {}
 
     const recorder = makeRecordingLoggerLayer();
-    const module = createModule(SchedulingModule, {}, recorder.layer);
-    const clock = module.getServiceByClass(Clock) as Clock;
+    const module = createModule(ChainModule, {}, recorder.layer);
 
-    expect((module.getServiceByClass(Scheduler) as Scheduler).clock).toBe(clock);
-    expect((module.getServiceByClass(NightlyScheduler) as NightlyScheduler).clock).toBeUndefined();
-    expect((module.getServiceByClass(HourlyScheduler) as HourlyScheduler).clock).toBe(clock);
-
-    // From docs: the module says so at startup, naming the class, its parent and the types.
-    const warnings = recorder.messages('warn').filter((message) => message.includes('declares no constructor'));
+    expect((module.getServiceByClass(Leaf) as Leaf).clock).toBeUndefined();
+    const warnings = recorder.messages('warn').filter((message) => message.startsWith('Leaf declares no constructor'));
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toStartWith('NightlyScheduler declares no constructor of its own');
-    expect(warnings[0]).toContain('If it inherits the constructor of Scheduler, which takes (Clock)');
+    expect(warnings[0]).toStartWith(
+      'Leaf declares no constructor of its own, but it is built with no constructor arguments: UndecoratedScheduler, '
+      + 'which it extends, carries no decorator',
+    );
   });
 });
 

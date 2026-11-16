@@ -13,6 +13,7 @@ import {
 import type { Message } from '../types';
 
 import { useFakeTimers } from '../../testing/test-utils';
+import { QueuePublishError } from '../publish-error';
 
 import { InMemoryQueueAdapter, createInMemoryQueueAdapter } from './memory.adapter';
 
@@ -113,6 +114,38 @@ describe('InMemoryQueueAdapter', () => {
       await adapter.publish('events.order.payment.completed', { type: 'payment' });
 
       expect(received.length).toBe(2);
+    });
+
+    it('matches a trailing ">" as the multi-level wildcard, and still delivers the literal topic it spells', async () => {
+      await adapter.connect();
+
+      const received: Array<{ topic: string; params: Record<string, string> }> = [];
+      await adapter.subscribe('events.>', async (message) => {
+        received.push({ topic: message.pattern, params: message.params });
+      });
+
+      await adapter.publish('events.user.created', {});
+      await adapter.publish('events.>', {});
+      await adapter.publish('events', {});
+
+      expect(received).toEqual([
+        { topic: 'events.user.created', params: {} },
+        { topic: 'events.>', params: {} },
+      ]);
+    });
+
+    it('reads a ">" anywhere but the last token as a literal character', async () => {
+      await adapter.connect();
+
+      const received: string[] = [];
+      await adapter.subscribe('events.>.created', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('events.user.created', {});
+      await adapter.publish('events.>.created', {});
+
+      expect(received).toEqual(['events.>.created']);
     });
 
     it('should return message ID on publish', async () => {
@@ -269,6 +302,71 @@ describe('InMemoryQueueAdapter', () => {
       await adapter.publish('orders.9', { total: 1 });
 
       expect(Object.keys(received[0].metadata)).not.toContain('params');
+    });
+  });
+
+  describe('delivery subject', () => {
+    it('reports the published topic as the subject, the same value as pattern', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.123', { total: 10 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].subject).toBe('orders.123');
+      // Unchanged for a published message: the topic, and what the subscription captured from it.
+      expect(received[0].pattern).toBe('orders.123');
+      expect(received[0].params).toEqual({ id: '123' });
+    });
+
+    it('has no stream and no transport headers', async () => {
+      // An in-process bus has neither; `metadata.headers` is still the publisher's record.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.created', {}, { metadata: { headers: { probe: 'p' } } });
+
+      expect(received[0].stream).toBeUndefined();
+      expect(received[0].headers).toBeUndefined();
+      expect(received[0].metadata.headers).toEqual({ probe: 'p' });
+    });
+
+    it('keeps the subject across retries and for a delayed message', async () => {
+      const fakeTimers = useFakeTimers();
+
+      try {
+        await adapter.connect();
+
+        const subjects: Array<string | undefined> = [];
+        let retried!: () => void;
+        const secondAttempt = new Promise<void>((resolve) => {
+          retried = resolve;
+        });
+        await adapter.subscribe('orders.*', async (message) => {
+          subjects.push(message.subject);
+
+          if (subjects.length === 1) {
+            throw new Error('retry me');
+          }
+          retried();
+        }, { retry: { attempts: 2, delay: 0 } });
+
+        await adapter.publish('orders.late', {}, { delay: 50 });
+        fakeTimers.advanceTime(200);
+        await secondAttempt;
+
+        expect(subjects).toEqual(['orders.late', 'orders.late']);
+      } finally {
+        fakeTimers.restore();
+      }
     });
   });
 
@@ -863,9 +961,482 @@ describe('InMemoryQueueAdapter', () => {
     });
   });
 
+  describe('retry without an attempts limit', () => {
+    let advanceTime: (ms: number) => void;
+    let getTimerCount: () => number;
+    let restore: () => void;
+
+    /** Lets the retry that a fired timer started run to its next await point and reschedule. */
+    const settle = async (): Promise<void> => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+
+    /** Fires `rounds` retry timers of `delayMs` each, letting every redelivery finish in between. */
+    const runRetries = async (rounds: number, delayMs: number): Promise<void> => {
+      for (let round = 0; round < rounds; round += 1) {
+        advanceTime(delayMs);
+        await settle();
+      }
+    };
+
+    beforeEach(() => {
+      const fakeTimers = useFakeTimers();
+      advanceTime = fakeTimers.advanceTime;
+      getTimerCount = fakeTimers.getTimerCount;
+      restore = fakeTimers.restore;
+    });
+
+    afterEach(() => {
+      restore();
+    });
+
+    it('keeps redelivering a failing message under attempts: -1, reporting maxAttempts -1', async () => {
+      await adapter.connect();
+
+      const seen: Array<{ attempt?: number; maxAttempts?: number }> = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        seen.push({ attempt: message.attempt, maxAttempts: message.maxAttempts });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await runRetries(24, 10);
+
+      // Well past the default of 1 and any cap a test would pick by accident: no attempt is the last.
+      expect(seen).toHaveLength(25);
+      expect(seen.map((entry) => entry.attempt)).toEqual(Array.from({ length: 25 }, (_, index) => index + 1));
+      expect(seen.every((entry) => entry.maxAttempts === -1)).toBe(true);
+    });
+
+    it('reads attempts: 0 and any other negative value as no limit as well', async () => {
+      await adapter.connect();
+
+      const calls: Record<string, number> = { zero: 0, negative: 0 };
+      const reported = new Set<number | undefined>();
+
+      await adapter.subscribe('orders.zero', async (message) => {
+        calls.zero += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 0, delay: 10 } });
+
+      await adapter.subscribe('orders.negative', async (message) => {
+        calls.negative += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -5, delay: 10 } });
+
+      await adapter.publish('orders.zero', { orderId: 1 });
+      await adapter.publish('orders.negative', { orderId: 2 });
+      await runRetries(9, 10);
+
+      expect(calls).toEqual({ zero: 10, negative: 10 });
+      expect([...reported]).toEqual([-1]);
+    });
+
+    it('stops as soon as the handler succeeds', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      let processed = 0;
+      adapter.on('onMessageProcessed', () => {
+        processed += 1;
+      });
+
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        if (calls < 7) {
+          throw new Error('transient');
+        }
+      }, { retry: { attempts: -1, delay: 10 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await runRetries(20, 10);
+
+      expect(calls).toBe(7);
+      expect(processed).toBe(1);
+    });
+
+    it('resolves publish() after the first delivery and still reaches the other subscriptions', async () => {
+      // An endless retry chain awaited inside `publish()` would never let it resolve, and would
+      // hold the message back from every subscription after the failing one.
+      await adapter.connect();
+
+      let failing = 0;
+      let healthy = 0;
+
+      await adapter.subscribe('orders.created', async () => {
+        failing += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 10 } });
+
+      await adapter.subscribe('orders.created', async () => {
+        healthy += 1;
+      });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+
+      expect(failing).toBe(1);
+      expect(healthy).toBe(1);
+
+      await runRetries(3, 10);
+
+      expect(failing).toBe(4);
+      expect(healthy).toBe(1);
+    });
+
+    it('yields to the event loop between attempts even with a zero delay', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 0 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      // Reaching this line at all is the claim: a zero-delay chain of awaited retries would spin
+      // in microtasks and never hand control back.
+      expect(calls).toBe(1);
+
+      await runRetries(5, 1);
+
+      expect(calls).toBe(6);
+    });
+
+    it('cancels the pending retry on unsubscribe, so no timer outlives the subscription', async () => {
+      await adapter.connect();
+      const timersBefore = getTimerCount();
+
+      let calls = 0;
+      const subscription = await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 60_000 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await runRetries(2, 60_000);
+      expect(calls).toBe(3);
+      expect(getTimerCount()).toBe(timersBefore + 1);
+
+      await subscription.unsubscribe();
+
+      // Gone at once, not when it next fires: a pending timer keeps the process alive.
+      expect(getTimerCount()).toBe(timersBefore);
+
+      await runRetries(3, 60_000);
+      expect(calls).toBe(3);
+    });
+
+    it('cancels the pending retry on disconnect, so no timer outlives the adapter', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 60_000 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await runRetries(2, 60_000);
+      expect(calls).toBe(3);
+
+      await adapter.disconnect();
+
+      // Nothing left at all — the delayed-message interval is gone too.
+      expect(getTimerCount()).toBe(0);
+
+      await runRetries(3, 60_000);
+      expect(calls).toBe(3);
+    });
+
+    it('arms no retry for a handler that fails after its subscription was removed', async () => {
+      await adapter.connect();
+      const timersBefore = getTimerCount();
+
+      let release!: () => void;
+      let calls = 0;
+      const subscription = await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 60_000 } });
+
+      const published = adapter.publish('orders.created', { orderId: 1 });
+      await settle();
+
+      // Removed while the handler is still running; its failure lands afterwards.
+      await subscription.unsubscribe();
+      release();
+      await published;
+
+      expect(calls).toBe(1);
+      expect(getTimerCount()).toBe(timersBefore);
+    });
+
+    it('arms no retry for a handler that fails after the adapter disconnected', async () => {
+      await adapter.connect();
+
+      let release!: () => void;
+      await adapter.subscribe('orders.created', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 60_000 } });
+
+      const published = adapter.publish('orders.created', { orderId: 1 });
+      await settle();
+
+      await adapter.disconnect();
+      release();
+      await published;
+
+      expect(getTimerCount()).toBe(0);
+    });
+
+    it('holds the retries of a paused subscription until resume()', async () => {
+      await adapter.connect();
+      const timersBefore = getTimerCount();
+
+      let calls = 0;
+      const subscription = await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 10 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await runRetries(2, 10);
+      expect(calls).toBe(3);
+
+      subscription.pause();
+      await runRetries(10, 10);
+
+      // The retry that came due is held: not delivered, and not re-armed either.
+      expect(calls).toBe(3);
+      expect(getTimerCount()).toBe(timersBefore);
+
+      subscription.resume();
+      await runRetries(1, 1);
+      expect(calls).toBe(4);
+
+      // And the ladder carries on from there.
+      await runRetries(2, 10);
+      expect(calls).toBe(6);
+    });
+
+    it('drops the held retries of a paused subscription that is unsubscribed', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      const subscription = await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, delay: 10 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      subscription.pause();
+      await runRetries(1, 10);
+
+      await subscription.unsubscribe();
+      subscription.resume();
+      await runRetries(5, 10);
+
+      expect(calls).toBe(1);
+    });
+
+    it('delivers a later publish before the pending retry of an earlier one', async () => {
+      // The retry waits on its own timer, outside `publish()`, so message order is not kept.
+      await adapter.connect();
+
+      const order: number[] = [];
+      let failNext = true;
+      await adapter.subscribe('orders.created', async (message) => {
+        order.push((message.data as { orderId: number }).orderId);
+        if (failNext) {
+          failNext = false;
+          throw new Error('handler exploded');
+        }
+      }, { retry: { attempts: -1, delay: 0 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await adapter.publish('orders.created', { orderId: 2 });
+      await runRetries(1, 1);
+
+      expect(order).toEqual([1, 2, 1]);
+    });
+
+    it('caps a retry wait at the longest delay a timer honours', async () => {
+      // Bun fires a timer above 2^31 - 1 ms after 1 ms instead, so an uncapped exponential
+      // ladder would end up retrying every millisecond. The delayed-message interval runs on the
+      // real clock here, so advancing the fake one by weeks costs one timer, not millions.
+      restore();
+      await adapter.connect();
+      const timers = useFakeTimers();
+      const longestTimer = 2 ** 31 - 1;
+
+      let calls = 0;
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, backoff: 'exponential', delay: 2 ** 40 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      expect(calls).toBe(1);
+
+      timers.advanceTime(longestTimer - 1);
+      await settle();
+      expect(calls).toBe(1);
+
+      timers.advanceTime(1);
+      await settle();
+      expect(calls).toBe(2);
+
+      timers.advanceTime(longestTimer);
+      await settle();
+      expect(calls).toBe(3);
+    });
+
+    it('caps the wait of a capped retry the same way', async () => {
+      restore();
+      await adapter.connect();
+      const timers = useFakeTimers();
+
+      let calls = 0;
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 2, delay: 2 ** 40 } });
+
+      const published = adapter.publish('orders.created', { orderId: 1 });
+      await settle();
+      expect(calls).toBe(1);
+
+      timers.advanceTime(2 ** 31 - 1);
+      await published;
+      expect(calls).toBe(2);
+    });
+
+    it('leaves a positive attempts awaited inside publish(), exactly as a capped retry runs', async () => {
+      // The boundary of the change: only a subscription with no limit retries in the background.
+      restore();
+      await adapter.connect();
+
+      const reported: Array<number | undefined> = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        reported.push(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, delay: 0 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+
+      expect(reported).toEqual([3, 3, 3]);
+    });
+
+    it('waits at most retry.maxDelay between attempts of an exponential backoff', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.capped', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 50, 
+        }, 
+      });
+
+      await adapter.publish('orders.capped', { orderId: 1 });
+      // Uncapped, the second wait alone would be 2000 ms and the third 4000 ms.
+      await runRetries(6, 50);
+
+      expect(calls).toBe(7);
+    });
+
+    it('waits at most retry.maxDelay on a capped-attempts linear backoff', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.capped-linear', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: 4, backoff: 'linear', delay: 1000, maxDelay: 20, 
+        }, 
+      });
+
+      const published = adapter.publish('orders.capped-linear', { orderId: 2 });
+      for (let round = 0; round < 4; round += 1) {
+        await settle();
+        advanceTime(20);
+      }
+      await settle();
+
+      // Asserted before awaiting publish(): without the ceiling the waits are 1, 2 and 3 s and
+      // the call count is 1 here, which fails this expectation instead of hanging the test.
+      expect(calls).toBe(4);
+      await published;
+    });
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      await adapter.connect();
+
+      for (const maxDelay of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(adapter.subscribe('orders.bad', async () => undefined, { retry: { maxDelay } }))
+          .rejects.toThrow(/retry\.maxDelay.*"orders\.bad"/);
+      }
+    });
+
+    it('registers nothing when it refuses an invalid retry.maxDelay', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await expect(adapter.subscribe('orders.refused', async () => {
+        calls += 1;
+      }, { retry: { maxDelay: -1 } })).rejects.toThrow();
+
+      expect((adapter as unknown as { subscriptions: unknown[] }).subscriptions).toHaveLength(0);
+      await adapter.publish('orders.refused', { orderId: 1 });
+      expect(calls).toBe(0);
+    });
+  });
+
   describe('error handling', () => {
     it('should throw when publishing without connecting', async () => {
       await expect(adapter.publish('test', { data: 'test' })).rejects.toThrow();
+    });
+
+    it('throws a QueuePublishError "unavailable" for a publish before connect()', async () => {
+      const error = await adapter.publish('orders.created', { id: 1 }).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+      const publishError = error as QueuePublishError;
+      expect(publishError.reason).toBe('unavailable');
+      expect(publishError.safeToRepeat).toBe(true);
+      expect(publishError.pattern).toBe('orders.created');
+      expect(publishError.message).toContain('InMemoryQueueAdapter not connected');
+    });
+
+    it('throws the same after disconnect()', async () => {
+      await adapter.connect();
+      await adapter.disconnect();
+
+      const error = await adapter.publish('orders.created', { id: 1 }).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+      expect((error as QueuePublishError).reason).toBe('unavailable');
+    });
+
+    it('does not throw a handler\'s failure from publish()', async () => {
+      await adapter.connect();
+      await adapter.subscribe('orders.created', async () => {
+        throw new Error('handler failed');
+      });
+
+      await expect(adapter.publish('orders.created', { id: 1 })).resolves.toBeString();
     });
 
     it('should throw when subscribing without connecting', async () => {

@@ -159,24 +159,27 @@ export function createHttpGuard(
 // ============================================================================
 
 /**
- * Guard that requires a valid Bearer token in the Authorization header.
- * Does NOT validate the token — only checks that the header is present.
- * Combine with a custom middleware or guard to validate the token itself.
+ * Guard that admits a request whose `Authorization` header starts with `Bearer `.
+ *
+ * It checks presence only: the token after the scheme is never decoded, verified or checked for
+ * expiry, so `Authorization: Bearer anything` passes. It is a starter example, not authentication —
+ * production code verifies the token in a guard of its own that injects the verifying service; see
+ * docs:api/guards.md, "Production Authentication".
  *
  * @see docs:api/guards.md
  *
  * @example
  * ```typescript
- * @UseGuards(AuthGuard)
+ * @UseGuards(BearerPresenceGuard)
  * @Get('/profile')
  * getProfile() { ... }
  * ```
  */
-export class AuthGuard implements Guard {
+export class BearerPresenceGuard implements Guard {
   canActivate(context: ExecutionContext): boolean {
     // HTTP-only: on a queue or WebSocket handler there is no request to read a header from,
-    // so this denies rather than passing or throwing. Use `MessageAuthGuard` / `WsAuthGuard`
-    // there — see docs:api/guards.md, "One decorator, three transports".
+    // so this denies rather than passing or throwing. Use `MessageAuthorizationPresenceGuard` /
+    // `WsAuthGuard` there — see docs:api/guards.md, "One decorator, three transports".
     if (!isHttpContext(context)) {
       return false;
     }
@@ -188,43 +191,29 @@ export class AuthGuard implements Guard {
 }
 
 /**
- * Fallback roles extractor — reads comma-separated roles from the `x-user-roles` header.
+ * Guard that requires every listed role to be among the roles `rolesExtractor` returns for the
+ * current request (AND, not OR).
  *
- * The header arrives from the CALLER and nothing here verifies it, so on this fallback
- * `RolesGuard` reports what a request claims rather than what it is: `curl -H 'Authorization:
- * Bearer anything' -H 'x-user-roles: admin'` passes both built-in guards. Pass a `rolesExtractor`
- * reading a verified identity instead — that is the supported way to use the guard.
+ * It compares and does nothing else: where the roles come from is the extractor's decision, and
+ * both constructor arguments are required. The extractor has to read a VERIFIED identity — the
+ * one a verifying guard ahead of this one recorded on the request context — and never a request
+ * header, which the caller writes. See docs:api/guards.md, "Production Authentication".
  *
- * If a deployed application already depends on the header, the middleware in front of it must
- * OVERWRITE the header on every request (`headers.set`), never fill it in only when absent: an
- * absent-only write leaves a forged value exactly where it was.
- */
-function defaultRolesExtractor(ctx: HttpExecutionContext): string[] {
-  const rolesHeader = ctx.getRequest().headers.get('x-user-roles');
-
-  return rolesHeader ? rolesHeader.split(',').map((r) => r.trim()) : [];
-}
-
-/**
- * Guard that requires all specified roles to be present on the request.
- *
- * Supply a `rolesExtractor` that reads a VERIFIED identity — a claim off a token your own code
- * decoded. With none, roles come from the comma-separated `x-user-roles` request header, which
- * the caller sends and nobody checks; see `defaultRolesExtractor` for what that costs.
+ * The constructor throws a `TypeError` when `rolesExtractor` is not a function, so a call that
+ * gets past the type checker fails with a message naming the fix. Pass the guard as an instance:
+ * `@UseGuards(RolesGuard)` makes the framework construct it with no arguments on every request,
+ * and each one answers 500 without reaching the handler.
  *
  * @see docs:api/guards.md
  *
  * @example
  * ```typescript
- * // All specified roles must be present
- * @UseGuards(new RolesGuard(['admin', 'moderator']))
+ * // VerifiedTokenGuard verified the token and ran updateRequestContext({ user })
+ * const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+ *
+ * @UseGuards(VerifiedTokenGuard, new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser))
  * @Delete('/users/:id')
  * deleteUser() { ... }
- *
- * // Custom roles extractor
- * @UseGuards(new RolesGuard(['admin'], (ctx) => ctx.getRequest().headers.get('x-roles')?.split('|') ?? []))
- * @Get('/admin')
- * adminPanel() { ... }
  * ```
  */
 export class RolesGuard implements Guard {
@@ -233,14 +222,27 @@ export class RolesGuard implements Guard {
 
   constructor(
     roles: string[],
-    rolesExtractor: (ctx: HttpExecutionContext) => string[] = defaultRolesExtractor,
+    rolesExtractor: (ctx: HttpExecutionContext) => string[],
   ) {
+    // The type already requires the extractor. This catches what slips past it — an `any`, a
+    // JavaScript caller, or the class handed to `@UseGuards(RolesGuard)`, which the framework
+    // constructs with no arguments — with a message that names the fix rather than a TypeError
+    // about calling `undefined` from inside `canActivate`.
+    if (typeof rolesExtractor !== 'function') {
+      throw new TypeError(
+        'RolesGuard requires a rolesExtractor as its second argument: a function returning the roles '
+        + 'of the verified caller, e.g. `() => getRequestContext()?.user?.roles ?? []`. Pass an INSTANCE, '
+        + 'not the class: `@UseGuards(new RolesGuard([\'admin\'], rolesExtractor))`. '
+        + `Received: ${String(rolesExtractor)}`,
+      );
+    }
+
     this.roles = roles;
     this.rolesExtractor = rolesExtractor;
   }
 
   canActivate(context: ExecutionContext): boolean {
-    // HTTP-only, same rule as AuthGuard: the extractor takes a request.
+    // HTTP-only, same rule as BearerPresenceGuard: the extractor takes a request.
     if (!isHttpContext(context)) {
       return false;
     }

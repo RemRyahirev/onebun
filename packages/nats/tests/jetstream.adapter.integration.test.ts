@@ -18,11 +18,26 @@ import {
 
 
 import type { Message } from '@onebun/core';
-import { matchQueuePattern } from '@onebun/core';
-import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
+import {
+  BaseController,
+  Controller,
+  Cron,
+  Interval,
+  Module,
+  OnQueueError,
+  OneBunApplication,
+  Subscribe,
+  matchQueuePattern,
+} from '@onebun/core';
+import {
+  createNatsContainer,
+  makeMockLoggerLayer,
+  type TestContainer,
+} from '@onebun/core/testing';
 
 import { hashReconcileConfig } from '../src/config-stamp';
 import { JetStreamQueueAdapter } from '../src/jetstream.adapter';
+import { NatsQueueAdapter } from '../src/nats.adapter';
 import { toNatsSubject } from '../src/subject';
 
 /** Mirrors the adapter's durable naming so the test does not hardcode a digest. */
@@ -43,6 +58,8 @@ function asAny(obj: unknown): AnyRecord {
 
 const CONTAINER_BOOT_MS = 120_000;
 const CASE_TIMEOUT_MS = 30_000;
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
 const POLL_DEADLINE_MS = 10_000;
 const POLL_INTERVAL_MS = 25;
 
@@ -732,6 +749,375 @@ describe('JetStreamQueueAdapter Integration', () => {
     expect(received.map(d => d.n).sort((a, b) => a - b)).toEqual([1, 3, 4, 5, 6]);
   }, CASE_TIMEOUT_MS);
 
+  it('publishes a messageId that a core-NATS observer of the same subject still receives', async () => {
+    // onebun-FB-39. The id travels as the Nats-Msg-Id header, and a NatsQueueAdapter watching the
+    // subject — a way to observe a workqueue without a second, overlapping consumer — receives
+    // the message with that header on it. Such a message used to end the observer's
+    // subscription, so the id-less publish after it is the one that proves the observer lived.
+    const js = makeAdapter('ITEST_OBSERVED', ['observed.>']);
+    await js.connect();
+    const observer = new NatsQueueAdapter({ servers: nats.url });
+
+    try {
+      await observer.connect();
+      const seen: number[] = [];
+      await observer.subscribe<{ n: number }>('observed.#', async (message) => {
+        seen.push(message.data.n);
+      }, { ackMode: 'none' });
+      // subscribe() only queues the SUB on the observer's connection. The publishes below travel
+      // on another one, so without this round trip they can reach the server first and miss it.
+      await asAny(observer).client.getConnection().flush();
+
+      await js.publish('observed.one', { n: 1 }, { messageId: 'outbox-1' });
+      await js.publish('observed.two', { n: 2 });
+      await pollUntil(() => seen.length === 2);
+
+      expect(seen).toEqual([1, 2]);
+    } finally {
+      await observer.disconnect();
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('takes pattern, params and stream from the delivery, and an envelope cannot redirect them', async () => {
+    // onebun-FB-53: a client allowed to publish on `forge.a.>` writes an envelope naming
+    // `forge.b.result.999`. The server routes by subject, so only the subscription covering
+    // `forge.a.result.1` receives it, and what it reads must be the subject, not the claim.
+    const js = makeAdapter('ITEST_FORGE', ['forge.>']);
+    await js.connect();
+
+    const wild: Array<Message<unknown>> = [];
+    const onlyB: Array<Message<unknown>> = [];
+    await js.subscribe('forge.*.result.{id}', async (message) => {
+      wild.push(message);
+    }, { group: 'itest-forge-wild' });
+    await js.subscribe('forge.b.result.{id}', async (message) => {
+      onlyB.push(message);
+    }, { group: 'itest-forge-only-b' });
+
+    const envelope = {
+      id: 'forged-1', pattern: 'forge.b.result.999', data: {}, timestamp: Date.now(), metadata: { claimedBy: 'b' },
+    };
+    await asAny(js).js.publish(
+      'forge.a.result.1',
+      new TextEncoder().encode(JSON.stringify(envelope)),
+      { msgID: 'forged-1' },
+    );
+    // Published through the adapter: the values a handler reads are the ones it always read.
+    await js.publish('forge.b.result.2', {}, { messageId: 'honest-2' });
+
+    await pollUntil(() => wild.length === 2 && onlyB.length === 1);
+
+    const forged = wild.find(message => message.id === 'forged-1')!;
+    expect(forged.subject).toBe('forge.a.result.1');
+    expect(forged.pattern).toBe('forge.a.result.1');
+    expect(forged.params).toEqual({ id: '1' });
+    expect(forged.stream).toBe('ITEST_FORGE');
+    expect(forged.headers?.get('Nats-Msg-Id')).toEqual(['forged-1']);
+    // The envelope's own claims still arrive as the publisher wrote them.
+    expect(forged.metadata).toEqual({ claimedBy: 'b' });
+
+    const honest = wild.find(message => message.id === 'honest-2')!;
+    expect(honest.pattern).toBe('forge.b.result.2');
+    expect(honest.subject).toBe('forge.b.result.2');
+    expect(honest.params).toEqual({ id: '2' });
+
+    // The application-B-only subscription saw the honest message and nothing else.
+    expect(onlyB.map(message => message.subject)).toEqual(['forge.b.result.2']);
+    expect(onlyB[0].params).toEqual({ id: '2' });
+  }, CASE_TIMEOUT_MS);
+
+  describe('a message published with undefined data', () => {
+    // `JSON.stringify` drops `data: undefined`, so these envelopes carry no `data` key at all —
+    // and they are the framework's own writes, which the consume loop has to deliver.
+
+    it('delivers publish(topic, undefined) to the handler with data undefined', async () => {
+      const js = makeAdapter('ITEST_NODATA', ['nodata.>']);
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const received: Array<Message<unknown>> = [];
+      await js.subscribe('nodata.direct', async (message) => {
+        received.push(message);
+      }, { group: 'itest-nodata' });
+
+      const id = await js.publish('nodata.direct', undefined);
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].id).toBe(id);
+      expect(received[0].data).toBeUndefined();
+      expect(received[0].subject).toBe('nodata.direct');
+      expect(typeof received[0].timestamp).toBe('number');
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('dead-letters a message without data, and the dead-letter reader receives it', async () => {
+      // The republish writes `message.data` — `undefined` again — so the dead letter is a
+      // data-less envelope too. Refusing it would lose the one copy the queue exists to keep.
+      const js = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [
+          { name: 'ITEST_NODATA_SRC', subjects: ['nodatasrc.>'] },
+          { name: 'ITEST_NODATA_DLQ', subjects: ['nodatadlq.>'] },
+        ],
+      });
+      adapter = js;
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const parked: Array<Message<unknown>> = [];
+      await js.subscribe('nodatadlq.parked', async (message) => {
+        parked.push(message);
+      }, { group: 'itest-nodata-dlq-reader' });
+
+      let attempts = 0;
+      await js.subscribe('nodatasrc.one', async () => {
+        attempts += 1;
+        throw new Error('always fails');
+      }, { group: 'itest-nodata-dlq', deadLetter: { queue: 'nodatadlq.parked', maxRetries: 1 } });
+
+      await js.publish('nodatasrc.one', undefined);
+      await pollUntil(() => parked.length === 1);
+
+      expect(attempts).toBe(1);
+      expect(parked[0].data).toBeUndefined();
+      expect(parked[0].metadata['dlq.originalPattern']).toBe('nodatasrc.one');
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('redelivers a data-less message whose handler throws, and the retry reads data undefined too', async () => {
+      // A redelivery is the same stored message, so it passes the same envelope check again —
+      // a refusal there would turn the retry into a termination.
+      const streamName = 'ITEST_NODATA_RETRY';
+      const group = 'itest-nodata-retry';
+      const js = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects: ['nodataretry.>'] }],
+        consumerConfig: { ackWait: 1_000_000_000 },
+      });
+      adapter = js;
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const seen: Array<{ attempt?: number; data: unknown }> = [];
+      await js.subscribe('nodataretry.one', async (message) => {
+        seen.push({ attempt: message.attempt, data: message.data });
+        if (message.attempt === 1) {
+          throw new Error('first attempt fails');
+        }
+      }, { group, retry: { attempts: 3, delay: 50 } });
+
+      await js.publish('nodataretry.one', undefined);
+      await pollUntil(() => seen.length === 2);
+
+      // The second attempt succeeded and was acknowledged: nothing is left in flight.
+      const jsm = asAny(js).jsm as AnyRecord;
+      await pollUntil(async () => {
+        const info = await jsm.consumers.info(streamName, durableNameFor(group, 'nodataretry.one'));
+
+        return info.num_ack_pending === 0 && info.num_pending === 0;
+      });
+
+      expect(seen).toEqual([{ attempt: 1, data: undefined }, { attempt: 2, data: undefined }]);
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers every tick of a @Cron and an @Interval job whose method returns nothing', async () => {
+      // The decorated method is the data provider, so a method that returns nothing publishes
+      // `undefined` on every tick. Each tick must reach the subscriber; one that was refused
+      // would surface through @OnQueueError instead.
+      const runs = { cron: 0, interval: 0 };
+      const delivered: Record<'cron' | 'interval', Array<Message<unknown>>> = { cron: [], interval: [] };
+      const errors: Error[] = [];
+
+      @Controller('/nodata-ticks')
+      class TickController extends BaseController {
+        @Cron('* * * * * *', { pattern: 'nodatatick.cron', name: 'itest-nodata-cron' })
+        everySecond(): void {
+          runs.cron += 1;
+        }
+
+        @Interval(200, { pattern: 'nodatatick.interval', name: 'itest-nodata-interval' })
+        everyFewMilliseconds(): void {
+          runs.interval += 1;
+        }
+
+        @Subscribe('nodatatick.cron', { group: 'itest-nodata-cron' })
+        async onCronTick(message: Message<unknown>): Promise<void> {
+          delivered.cron.push(message);
+        }
+
+        @Subscribe('nodatatick.interval', { group: 'itest-nodata-interval' })
+        async onIntervalTick(message: Message<unknown>): Promise<void> {
+          delivered.interval.push(message);
+        }
+
+        @OnQueueError()
+        onQueueError(error: Error): void {
+          errors.push(error);
+        }
+      }
+
+      @Module({ controllers: [TickController] })
+      class TickModule {}
+
+      const app = new OneBunApplication(TickModule, {
+        port: 0,
+        loggerLayer: makeMockLoggerLayer(),
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        queue: {
+          adapter: JetStreamQueueAdapter,
+          options: {
+            servers: nats.url,
+            streams: [{ name: 'ITEST_NODATA_TICKS', subjects: ['nodatatick.>'] }],
+          },
+        },
+      });
+      await app.start();
+
+      try {
+        await pollUntil(() => delivered.cron.length >= 2 && delivered.interval.length >= 2);
+      } finally {
+        await app.stop();
+      }
+
+      expect(runs.cron).toBeGreaterThanOrEqual(2);
+      expect(runs.interval).toBeGreaterThanOrEqual(2);
+      for (const message of [...delivered.cron, ...delivered.interval]) {
+        expect(message.data).toBeUndefined();
+      }
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+  });
+
+  describe('payloads another producer publishes raw', () => {
+    // Published raw, each on its own subject, then a framework message as the sync point. One
+    // consumer delivers the stream in sequence order, so once the sync message is handled every
+    // payload before it has been dealt with. The server's terminated advisory is what proves
+    // `term()` — an ack and a term both settle the message, only a term announces itself.
+
+    async function deliverRaw(
+      streamName: string,
+      prefix: string,
+      payloads: ReadonlyArray<readonly [label: string, raw: string]>,
+      expectTerminated: number,
+    ): Promise<{ errors: Error[]; handled: Array<Message<unknown>>; terminated: number }> {
+      const js = makeAdapter(streamName, [`${prefix}.>`]);
+      await js.connect();
+
+      const errors: Error[] = [];
+      js.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const connection = asAny(js).client.getConnection();
+      let terminated = 0;
+      const advisories = connection.subscribe(`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.${streamName}.>`, {
+        callback() {
+          terminated += 1;
+        },
+      });
+      await connection.flush();
+
+      const handled: Array<Message<unknown>> = [];
+      await js.subscribe(`${prefix}.*`, async (message) => {
+        handled.push(message);
+      }, { group: `itest-${prefix}` });
+
+      const synced = (): boolean => handled.some(message => message.subject === `${prefix}.sync`);
+
+      try {
+        const encoder = new TextEncoder();
+        for (const [index, [, raw]] of payloads.entries()) {
+          await asAny(js).js.publish(`${prefix}.${index}`, encoder.encode(raw));
+        }
+        await js.publish(`${prefix}.sync`, { sync: true });
+
+        await pollUntil(() => synced() && terminated === expectTerminated).catch((cause: unknown) => {
+          const subjects = handled.map(message => message.subject);
+          throw new Error(
+            `handled ${JSON.stringify(subjects)}, ${terminated} terminated, errors ${JSON.stringify(errors.map(e => e.message))}`,
+            { cause },
+          );
+        });
+      } finally {
+        advisories.unsubscribe();
+      }
+
+      return { errors, handled, terminated };
+    }
+
+    it('terminates JSON that is not a OneBun envelope, and reports each one', async () => {
+      // Neither a `data` key nor a string `id` with a numeric `timestamp`. Pinned so the shape
+      // admitted for `publish(topic, undefined)` admits nothing more than that.
+      const payloads = [
+        ['an empty object', '{}'],
+        ['an object from another producer', '{"hello":"world"}'],
+        ['an object with an id but no timestamp', '{"id":"m"}'],
+        ['an object with a timestamp but no id', '{"timestamp":1}'],
+        ['an object whose id is not a string', '{"id":7,"timestamp":1}'],
+        ['an object whose timestamp is not a number', '{"id":"m","timestamp":"1"}'],
+        ['an array', '[1]'],
+        ['a number', '42'],
+        ['a string', '"x"'],
+        ['null', 'null'],
+        ['text that is not JSON', 'not json'],
+      ] as const;
+
+      const { errors, handled, terminated } = await deliverRaw('ITEST_FOREIGN_REFUSED', 'foreignrefused', payloads, payloads.length);
+
+      expect(handled.map(message => message.subject)).toEqual(['foreignrefused.sync']);
+      expect(terminated).toBe(payloads.length);
+      expect(errors).toHaveLength(payloads.length);
+      for (const [index] of payloads.entries()) {
+        expect(errors[index].message).toContain(`"foreignrefused.${index}"`);
+      }
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers an object that carries data whatever its other fields, and a data-less one with an id and timestamp', async () => {
+      // A stream is an integration surface: another producer that wraps its payload as
+      // `{ "data": … }` is delivered, and the consume loop fills in what it left out.
+      const payloads = [
+        ['data and nothing else', '{"data":1}'],
+        ['data whose value is null', '{"data":null}'],
+        ['data with an id that is not a string', '{"id":7,"timestamp":1,"data":2}'],
+        ['data with a timestamp that is not a number', '{"id":"m","timestamp":"1","data":3}'],
+        ['data with metadata that is null', '{"id":"m","timestamp":1,"data":4,"metadata":null}'],
+        ['data with metadata that is an array', '{"id":"m","timestamp":1,"data":5,"metadata":[]}'],
+        ['data with an attempt that is not a number', '{"id":"m","timestamp":1,"data":6,"attempt":"2"}'],
+        ['no data, a string id and a numeric timestamp', '{"id":"m","timestamp":1}'],
+      ] as const;
+
+      const { errors, handled, terminated } = await deliverRaw('ITEST_FOREIGN_DELIVERED', 'foreigndelivered', payloads, 0);
+
+      expect(handled.map(message => message.subject)).toEqual([
+        ...payloads.map((_, index) => `foreigndelivered.${index}`),
+        'foreigndelivered.sync',
+      ]);
+      expect(handled.slice(0, payloads.length).map(message => message.data)).toEqual([1, null, 2, 3, 4, 5, 6, undefined]);
+
+      // A `{ "data": … }`-only payload gets a generated id and the time of receipt.
+      expect(handled[0].id).toEqual(expect.any(String));
+      expect(handled[0].timestamp).toBeGreaterThan(1);
+      expect(handled[0].metadata).toEqual({});
+
+      expect(terminated).toBe(0);
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+  });
+
   it('counts attempts across real redeliveries', async () => {
     // The server is the only thing that can increment a delivery count, so the 1, 2, 3
     // progression the documented retry recipe branches on needs a real broker to prove.
@@ -1183,6 +1569,41 @@ describe('JetStreamQueueAdapter Integration', () => {
       expect(consumer.config.deliver_policy).toBe(DeliverPolicy.All);
     }, CASE_TIMEOUT_MS);
 
+    it('hands a data-less task to its worker, and only the acknowledgement deletes it', async () => {
+      // `publish(topic, undefined)` on a workqueue: a termination there deletes the task before any
+      // handler sees it, so the task must still be stored while its handler runs.
+      const streamName = 'ITEST_WQ_NODATA';
+      const group = 'itest-wq-nodata';
+      const producer = makeStreamAdapter(streamName, ['wqnodata.>']);
+      await producer.connect();
+
+      await producer.publish('wqnodata.run', undefined);
+      expect(await storedMessages(producer, streamName)).toBe(1);
+
+      const worker = makeStreamAdapter(streamName, ['wqnodata.>']);
+      await worker.connect();
+
+      const errors: Error[] = [];
+      worker.on('onError', (error) => {
+        errors.push(error);
+      });
+
+      const received: Array<Message<unknown>> = [];
+      let storedWhileHandling = -1;
+      await worker.subscribe('wqnodata.run', async (message) => {
+        storedWhileHandling = await storedMessages(producer, streamName);
+        received.push(message);
+        await message.ack();
+      }, { group, ackMode: 'manual' });
+
+      await pollUntil(() => received.length === 1);
+      expect(storedWhileHandling).toBe(1);
+      expect(received[0].data).toBeUndefined();
+
+      await pollUntil(async () => await storedMessages(producer, streamName) === 0);
+      expect(errors).toEqual([]);
+    }, CASE_TIMEOUT_MS);
+
     it('hands a restarted worker of the same group what was published while it was offline', async () => {
       const streamName = 'ITEST_WQ_OFFLINE';
       const group = 'itest-wq-offline';
@@ -1333,6 +1754,334 @@ describe('JetStreamQueueAdapter Integration', () => {
       // And a limits stream keeps both after the ack.
       expect(await storedMessages(producer, streamName)).toBe(2);
     }, CASE_TIMEOUT_MS);
+  });
+
+  describe('native NATS wildcards in a subscription pattern', () => {
+    const opened: JetStreamQueueAdapter[] = [];
+
+    afterEach(async () => {
+      for (const created of opened.splice(0)) {
+        if (created.isConnected()) {
+          await created.disconnect();
+        }
+      }
+    });
+
+    function makeStreamAdapter(
+      streamName: string,
+      subjects: string[],
+      retention: 'workqueue' | 'limits',
+    ): JetStreamQueueAdapter {
+      const created = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects, retention }],
+      });
+      opened.push(created);
+
+      return created;
+    }
+
+    async function storedMessages(observer: JetStreamQueueAdapter, streamName: string): Promise<number> {
+      const info = await (asAny(observer).jsm as AnyRecord).streams.info(streamName);
+
+      return info.state.messages as number;
+    }
+
+    async function consumerFilters(observer: JetStreamQueueAdapter, streamName: string): Promise<string[]> {
+      const filters: string[] = [];
+      for await (const info of await (asAny(observer).jsm as AnyRecord).consumers.list(streamName)) {
+        filters.push(info.config.filter_subject as string);
+      }
+
+      return filters;
+    }
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      const tag = retention === 'limits' ? 'L' : 'W';
+
+      it(`delivers every message a ">" pattern covers to the handler on a ${retention} stream`, async () => {
+        const streamName = `ITEST_NATIVE_GT_${tag}`;
+        const root = `nativegt${tag}`;
+        const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+        await worker.connect();
+
+        const received: Array<Message<{ n: number }>> = [];
+        const storedWhileHandling: number[] = [];
+        await worker.subscribe<{ n: number }>(`${root}.>`, async (message) => {
+          storedWhileHandling.push(await storedMessages(worker, streamName));
+          received.push(message);
+          await message.ack();
+        }, { group: `itest-native-gt-${tag}`, ackMode: 'manual' });
+
+        await worker.publish(`${root}.a`, { n: 1 });
+        await worker.publish(`${root}.a.b`, { n: 2 });
+
+        await pollUntil(() => received.length === 2);
+        expect(received.map(message => message.subject).sort()).toEqual([`${root}.a`, `${root}.a.b`]);
+        // A native wildcard names nothing, so it captures nothing.
+        expect(received.map(message => message.params)).toEqual([{}, {}]);
+        // The filter the server applies is the pattern itself.
+        expect(await consumerFilters(worker, streamName)).toEqual([`${root}.>`]);
+
+        if (retention === 'workqueue') {
+          // Each task was still stored while its handler ran: only the handler's ack deleted it.
+          expect(storedWhileHandling.every(count => count >= 1)).toBe(true);
+          await pollUntil(async () => await storedMessages(worker, streamName) === 0);
+        } else {
+          expect(await storedMessages(worker, streamName)).toBe(2);
+        }
+      }, CASE_TIMEOUT_MS);
+
+      it(`delivers one token to a "*" pattern and leaves deeper subjects alone on a ${retention} stream`, async () => {
+        const streamName = `ITEST_NATIVE_STAR_${tag}`;
+        const root = `nativestar${tag}`;
+        const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+        await worker.connect();
+
+        const received: Array<Message<{ n: number }>> = [];
+        await worker.subscribe<{ n: number }>(`${root}.*`, async (message) => {
+          received.push(message);
+          await message.ack();
+        }, { group: `itest-native-star-${tag}`, ackMode: 'manual' });
+
+        await worker.publish(`${root}.a.b`, { n: 2 });
+        await worker.publish(`${root}.a`, { n: 1 });
+
+        await pollUntil(() => received.length === 1);
+        expect(received[0].subject).toBe(`${root}.a`);
+        expect(received[0].params).toEqual({});
+
+        // The deeper subject was never this consumer's: on a workqueue it is still waiting.
+        await pollUntil(async () => await storedMessages(worker, streamName) === (retention === 'workqueue' ? 1 : 2));
+        expect(received).toHaveLength(1);
+      }, CASE_TIMEOUT_MS);
+    }
+
+    it('delivers to a ">"-only pattern every subject the stream binds', async () => {
+      const streamName = 'ITEST_NATIVE_ALL';
+      const worker = makeStreamAdapter(streamName, ['nativeall.>'], 'workqueue');
+      await worker.connect();
+
+      const received: string[] = [];
+      await worker.subscribe('>', async (message) => {
+        received.push(message.subject ?? '');
+      }, { group: 'itest-native-all' });
+
+      await worker.publish('nativeall.x', { n: 1 });
+      await worker.publish('nativeall.x.y', { n: 2 });
+
+      await pollUntil(() => received.length === 2);
+      expect(received.sort()).toEqual(['nativeall.x', 'nativeall.x.y']);
+      await pollUntil(async () => await storedMessages(worker, streamName) === 0);
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers the same subjects to ">" and "#", and the same tokens to "*" and "{name}"', async () => {
+      const streamName = 'ITEST_NATIVE_PARITY';
+      const worker = makeStreamAdapter(streamName, ['nativeparity.>'], 'limits');
+      await worker.connect();
+
+      const seen: Record<string, Array<{ subject?: string; params: Record<string, string> }>> = {
+        native: [], framework: [], star: [], named: [],
+      };
+      const record = (key: string) => async (message: Message<unknown>): Promise<void> => {
+        seen[key].push({ subject: message.subject, params: message.params });
+      };
+
+      await worker.subscribe('nativeparity.>', record('native'), { group: 'parity-native' });
+      await worker.subscribe('nativeparity.#', record('framework'), { group: 'parity-framework' });
+      await worker.subscribe('nativeparity.*', record('star'), { group: 'parity-star' });
+      await worker.subscribe('nativeparity.{id}', record('named'), { group: 'parity-named' });
+
+      await worker.publish('nativeparity.a', { n: 1 });
+      await worker.publish('nativeparity.a.b', { n: 2 });
+
+      await pollUntil(() => seen.native.length === 2 && seen.framework.length === 2
+        && seen.star.length === 1 && seen.named.length === 1);
+
+      const subjects = (key: string): string[] => seen[key].map(entry => entry.subject ?? '').sort();
+      expect(subjects('native')).toEqual(['nativeparity.a', 'nativeparity.a.b']);
+      expect(subjects('framework')).toEqual(subjects('native'));
+      expect(seen.star).toEqual([{ subject: 'nativeparity.a', params: {} }]);
+      expect(seen.named).toEqual([{ subject: 'nativeparity.a', params: { id: 'a' } }]);
+    }, CASE_TIMEOUT_MS);
+
+    it('gives ">" and "#" in one group a single durable, as the same pattern twice would be', async () => {
+      const streamName = 'ITEST_NATIVE_DURABLE';
+      const worker = makeStreamAdapter(streamName, ['nativedurable.>'], 'workqueue');
+      await worker.connect();
+
+      await worker.subscribe('nativedurable.>', async () => undefined, { group: 'itest-native-durable' });
+      await worker.subscribe('nativedurable.#', async () => undefined, { group: 'itest-native-durable' });
+
+      expect(await consumerFilters(worker, streamName)).toEqual(['nativedurable.>']);
+    }, CASE_TIMEOUT_MS);
+
+    for (const pattern of ['nativebad.>.run', '>.nativebad', 'nativebad..run', 'nativebad.', 'nativebad.new run']) {
+      it(`refuses "${pattern}", which can never receive a message, at subscribe(), naming it, and creates no consumer`, async () => {
+        const streamName = 'ITEST_NATIVE_INVALID';
+        const worker = makeStreamAdapter(streamName, ['nativebad.>'], 'limits');
+        await worker.connect();
+
+        let thrown: Error | undefined;
+        try {
+          await worker.subscribe(pattern, async () => undefined, { group: 'itest-native-invalid' });
+        } catch (error) {
+          thrown = error as Error;
+        }
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown!.message).toContain(`"${pattern}"`);
+        expect(await consumerFilters(worker, streamName)).toEqual([]);
+      }, CASE_TIMEOUT_MS);
+    }
+
+    /** A parameter name may hold whitespace: the name never reaches the wire, which carries `*`. */
+    for (const { retention, cases } of [
+      {
+        retention: 'limits' as const,
+        cases: [
+          {
+            pattern: 'wsL.p.{a b}', group: 'itest-ws', publish: ['wsL.p.a'], delivered: 'wsL.p.a', params: { [SPACED_NAME]: 'a' },
+          },
+          {
+            pattern: 'wsL.r.{a b}', group: undefined, publish: ['wsL.r.a'], delivered: 'wsL.r.a', params: { [SPACED_NAME]: 'a' },
+          },
+          {
+            pattern: 'wsL.q.v{a b}', group: 'itest-ws', publish: ['wsL.q.x', 'wsL.q.v1'], delivered: 'wsL.q.v1', params: { [SPACED_NAME]: '1' },
+          },
+        ],
+      },
+      {
+        retention: 'workqueue' as const,
+        cases: [
+          {
+            pattern: 'wsW.p.{a b}', group: 'itest-ws', publish: ['wsW.p.a'], delivered: 'wsW.p.a', params: { [SPACED_NAME]: 'a' },
+          },
+        ],
+      },
+    ]) {
+      const root = retention === 'limits' ? 'wsL' : 'wsW';
+
+      for (const {
+        pattern, group, publish, delivered, params,
+      } of cases) {
+        it(`delivers to "${pattern}"${group ? '' : ' without a group'} on a ${retention} stream, capturing into the spaced name`, async () => {
+          const streamName = `ITEST_WS_${retention.toUpperCase()}`;
+          const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+          await worker.connect();
+
+          const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+          await worker.subscribe(pattern, async (message) => {
+            received.push({ subject: message.subject, params: message.params });
+          }, group === undefined ? undefined : { group });
+
+          for (const subject of publish) {
+            await worker.publish(subject, { subject });
+          }
+
+          await pollUntil(() => received.length >= 1);
+          expect(received).toEqual([{ subject: delivered, params }]);
+        }, CASE_TIMEOUT_MS);
+      }
+    }
+
+    it('refuses the partial-token "wsW.q.v{a b}" on a workqueue stream, as any partial-token pattern', async () => {
+      const worker = makeStreamAdapter('ITEST_WS_WORKQUEUE', ['wsW.>'], 'workqueue');
+      await worker.connect();
+
+      let thrown: Error | undefined;
+      try {
+        await worker.subscribe('wsW.q.v{a b}', async () => undefined, { group: 'itest-ws' });
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toMatch(/partial-token/);
+    }, CASE_TIMEOUT_MS);
+
+    /**
+     * A wildcard glued into a token is a literal token on the server: the subscription receives the
+     * one subject it spells, and none of the subjects the in-process matcher's sub-token `*` would
+     * also accept. A `{name}` beside it widens the filter to `*` and narrows back in process.
+     */
+    const glued: Array<{ tail: string; delivered: string; params: Record<string, string>; neighbours: string[] }> = [
+      {
+        tail: 'a*b', delivered: 'a*b', params: {}, neighbours: ['aqb'],
+      },
+      {
+        tail: 'v*', delivered: 'v*', params: {}, neighbours: ['v1'],
+      },
+      {
+        tail: '*a', delivered: '*a', params: {}, neighbours: ['ba'],
+      },
+      {
+        tail: '**', delivered: '**', params: {}, neighbours: ['ab'],
+      },
+      {
+        tail: 'foo>', delivered: 'foo>', params: {}, neighbours: ['fooz'],
+      },
+      {
+        tail: 'a>b', delivered: 'a>b', params: {}, neighbours: ['ab'],
+      },
+      {
+        tail: '>>', delivered: '>>', params: {}, neighbours: ['a'],
+      },
+      {
+        tail: '{id}>', delivered: '1>', params: { id: '1' }, neighbours: ['1'],
+      },
+    ];
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      const tag = retention === 'limits' ? 'L' : 'W';
+
+      glued.forEach(({
+        tail, delivered, params, neighbours,
+      }, index) => {
+        const root = `glued${tag}.${index}`;
+        const widens = tail.includes('{');
+
+        if (retention === 'workqueue' && widens) {
+          it(`refuses the partial-token "${root}.${tail}" on a workqueue stream`, async () => {
+            const worker = makeStreamAdapter(`ITEST_GLUED_${tag}`, [`glued${tag}.>`], retention);
+            await worker.connect();
+
+            let thrown: Error | undefined;
+            try {
+              await worker.subscribe(`${root}.${tail}`, async () => undefined, { group: 'itest-glued' });
+            } catch (error) {
+              thrown = error as Error;
+            }
+
+            expect(thrown?.message).toMatch(/partial-token/);
+          }, CASE_TIMEOUT_MS);
+
+          return;
+        }
+
+        it(`delivers to "${root}.${tail}" the literal subject "${root}.${delivered}" on a ${retention} stream`, async () => {
+          const streamName = `ITEST_GLUED_${tag}`;
+          const worker = makeStreamAdapter(streamName, [`glued${tag}.>`], retention);
+          await worker.connect();
+
+          const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+          await worker.subscribe(`${root}.${tail}`, async (message) => {
+            received.push({ subject: message.subject, params: message.params });
+          }, { group: 'itest-glued' });
+
+          expect(await consumerFilters(worker, streamName))
+            .toContain(widens ? `${root}.*` : `${root}.${tail}`);
+
+          for (const neighbour of neighbours) {
+            await worker.publish(`${root}.${neighbour}`, { neighbour });
+          }
+          await worker.publish(`${root}.${delivered}`, { delivered });
+
+          // Stream order: once the subject published last is in, every earlier one was decided.
+          await pollUntil(() => received.length >= 1);
+          expect(received).toEqual([{ subject: `${root}.${delivered}`, params }]);
+        }, CASE_TIMEOUT_MS);
+      });
+    }
   });
 
   describe('replicas booting at the same time', () => {

@@ -48,7 +48,6 @@
     "packages/nats/src/config-stamp.ts:StampDecision -> api/queue.md",
     "packages/nats/src/config-stamp.ts:StampMetadata -> api/queue.md",
     "packages/nats/src/jetstream.adapter.ts:createJetStreamQueueAdapter -> api/queue.md",
-    "packages/nats/src/nats-client.ts:NatsClient -> api/queue.md",
     "packages/nats/src/nats-client.ts:createNatsClient -> api/queue.md",
     "packages/nats/src/nats.adapter.ts:createNatsQueueAdapter -> api/queue.md",
     "packages/nats/src/types.ts:JetStreamAdapterOptions -> api/queue.md",

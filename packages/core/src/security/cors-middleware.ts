@@ -92,6 +92,18 @@ function isOriginAllowed(
 }
 
 /**
+ * Set every one of `headers` on `response`, replacing a header of the same name.
+ *
+ * `forEach` rather than `entries()`: this package ships its sources, and under TypeScript 5.x an
+ * application with lib DOM but not DOM.Iterable has a `Headers` without `entries()`.
+ */
+function copyHeaders(headers: Headers, response: OneBunResponse): void {
+  headers.forEach((value, key) => {
+    response.headers.set(key, value);
+  });
+}
+
+/**
  * Built-in CORS middleware.
  *
  * Handles preflight `OPTIONS` requests and sets appropriate CORS response
@@ -218,9 +230,7 @@ export class CorsMiddleware extends BaseMiddleware {
       if (this.options.preflightContinue) {
         const response = await next();
         // Copy CORS headers onto the response from next()
-        for (const [key, value] of headers.entries()) {
-          response.headers.set(key, value);
-        }
+        copyHeaders(headers, response);
 
         return response;
       }
@@ -230,9 +240,7 @@ export class CorsMiddleware extends BaseMiddleware {
 
     // For non-OPTIONS requests — let the handler run, then attach CORS headers
     const response = await next();
-    for (const [key, value] of headers.entries()) {
-      response.headers.set(key, value);
-    }
+    copyHeaders(headers, response);
 
     return response;
   }

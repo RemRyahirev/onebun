@@ -118,12 +118,13 @@ async function run(steps: string[]): Promise<Record<string, unknown>> {
     const testing = await import('../../testing');
     const compiled = await testing.TestingModule.create({
       controllers: [early.EarlyController],
-      providers: [early.EarlyDep, early.EarlyConsumer, late.LateConsumer],
+      providers: [early.EarlyDep, early.EarlyConsumer, late.LateConsumer, early.Child],
     }).compile();
     try {
       out.injected = {
         early: compiled.get(early.EarlyConsumer).dep instanceof early.EarlyDep,
         late: compiled.get(late.LateConsumer).dep instanceof early.EarlyDep,
+        child: compiled.get(early.Child).dep instanceof early.EarlyDep,
       };
       const response = await compiled.inject('GET', '/early');
       out.http = response.status;

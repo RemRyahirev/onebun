@@ -23,13 +23,14 @@ import {
   expect,
   beforeAll,
   beforeEach,
+  afterAll,
   afterEach,
 } from 'bun:test';
 import { drizzle as drizzleBunSql } from 'drizzle-orm/bun-sql';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
-import type { PostgreSQLConnectionOptions } from '../src/types';
+import type { PostgreSQLConnectionOptions, PostgreSQLTransactionOptions } from '../src/types';
 
 import {
   BaseController,
@@ -46,6 +47,7 @@ import {
   resetRegistrations,
   Service as ServiceDecorator,
 } from '@onebun/core';
+import type { TestContainer } from '@onebun/core/testing';
 
 import {
   DrizzleModule,
@@ -2089,6 +2091,228 @@ describe('transaction() semantics (docs/api/drizzle.md)', () => {
   }, 5000);
 });
 
+/**
+ * @source docs:api/drizzle.md#isolation-level-and-access-mode
+ */
+describe('transaction() options (docs/api/drizzle.md)', () => {
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleTransactionError } = require('../src/builders/transaction-gate');
+  const { createPostgresContainer, createTestService } = require('@onebun/core/testing');
+  const { eq } = require('../src/index');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  /** Starting and stopping the Postgres container takes far longer than a hook's default 5 s. */
+  const CONTAINER_BOOT_MS = 120_000;
+
+  const orders = pgTable('doc_iso_orders', {
+    id: serial('id').primaryKey(),
+    status: pgText('status').notNull(),
+  });
+  const orderItems = pgTable('doc_iso_order_items', {
+    id: serial('id').primaryKey(),
+    orderId: pgInteger('order_id').notNull(),
+    sku: pgText('sku').notNull(),
+  });
+
+  class OrderRepository extends BaseRepository<typeof orders> {
+    constructor(db: DrizzleServiceCtor) {
+      super(db, orders);
+    }
+  }
+
+  let container: TestContainer;
+  let db: DrizzleServiceCtor;
+  let orderRepository: OrderRepository;
+
+  /** The `code` of the DrizzleTransactionError `work` rejects with, or `null` if it resolved. */
+  const refusalCodeOf = async (work: Promise<unknown>): Promise<string | null> => {
+    const outcome = await work.then(() => null, (error: unknown) => error);
+    if (outcome === null) {
+      return null;
+    }
+
+    expect(outcome).toBeInstanceOf(DrizzleTransactionError);
+
+    return (outcome as { code: string }).code;
+  };
+
+  beforeAll(async () => {
+    container = await createPostgresContainer();
+    db = new DrizzleServiceCtor();
+    await db.initialize({
+      type: DatabaseType.POSTGRESQL,
+      options: { connectionString: container.url },
+    });
+
+    const client = db.getPostgreSQLClient()!;
+    await client`CREATE TABLE doc_iso_orders (id serial PRIMARY KEY, status text NOT NULL)`;
+    await client`CREATE TABLE doc_iso_order_items (id serial PRIMARY KEY, order_id integer NOT NULL, sku text NOT NULL)`;
+
+    orderRepository = new OrderRepository(db);
+  }, CONTAINER_BOOT_MS);
+
+  afterAll(async () => {
+    await db?.close();
+    await container?.stop();
+  }, CONTAINER_BOOT_MS);
+
+  afterEach(async () => {
+    await db.getPostgreSQLClient()!`TRUNCATE doc_iso_orders, doc_iso_order_items RESTART IDENTITY`;
+  });
+
+  /**
+   * @source docs:api/drizzle.md#isolation-level-and-access-mode
+   */
+  it('reads one snapshot under repeatable read, read only — repository and service reads alike', async () => {
+    // From docs: "Every read sees one snapshot: a commit that lands between them is not visible."
+    const snapshot: PostgreSQLTransactionOptions = {
+      isolationLevel: 'repeatable read',
+      accessMode: 'read only',
+    };
+
+    const [{ id: orderId }] = await db.insert(orders).values({ status: 'paid' }).returning();
+    await db.insert(orderItems).values({ orderId, sku: 'first' });
+
+    let firstReadDone!: () => void;
+    const firstRead = new Promise<void>(resolve => {
+      firstReadDone = resolve;
+    });
+    let commitLanded!: () => void;
+    const landed = new Promise<void>(resolve => {
+      commitLanded = resolve;
+    });
+
+    const pending = db.transaction(async () => {
+      const order = await orderRepository.findById(orderId);
+      firstReadDone();
+      await landed;
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+
+      return { order, items };
+    }, snapshot);
+
+    await firstRead;
+    // Committed on another pooled connection, between the transaction's two reads.
+    await db.insert(orderItems).values({ orderId, sku: 'committed in between' });
+    commitLanded();
+
+    const view = await pending;
+    expect(view.order?.status).toBe('paid');
+    expect(view.items.map(item => item.sku)).toEqual(['first']);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#isolation-level-and-access-mode
+   */
+  it('has the server refuse a write and a locking read under read only', async () => {
+    // From docs: "An INSERT, UPDATE or DELETE inside the callback fails with `cannot execute
+    // INSERT in a read-only transaction`, and so does a locking read".
+    const causeOf = async (work: Promise<unknown>): Promise<string> =>
+      await work.then(() => '', (error: unknown) => String((error as Error).cause));
+
+    expect(await causeOf(db.transaction(async () => {
+      await orderRepository.create({ status: 'new' });
+    }, { accessMode: 'read only' }))).toContain('cannot execute INSERT in a read-only transaction');
+
+    expect(await causeOf(db.transaction(async () => {
+      await db.getPostgreSQLDatabase().execute(sql`SELECT id FROM doc_iso_orders FOR UPDATE`);
+    }, { accessMode: 'read only' }))).toContain('in a read-only transaction');
+
+    expect(await orderRepository.findAll()).toEqual([]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#isolation-level-and-access-mode
+   */
+  it('runs nested calls under the outermost settings and refuses different ones', async () => {
+    // From docs: a nested call may repeat the outer options or pass none; anything else throws
+    // code 'POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH' before its callback runs.
+    const levelOf = async (): Promise<string> => {
+      const rows = await db.getPostgreSQLDatabase().execute(sql`SHOW transaction_isolation`);
+
+      return String((rows as unknown as Array<{ transaction_isolation: string }>)[0].transaction_isolation);
+    };
+    const seen: string[] = [];
+    let mismatchedRan = false;
+
+    const mismatch = await db.transaction(async () => {
+      seen.push(await db.transaction(async () => await levelOf()));
+      seen.push(await db.transaction(async () => await levelOf(), { isolationLevel: 'serializable' }));
+
+      return await refusalCodeOf(db.transaction(async () => {
+        mismatchedRan = true;
+      }, { isolationLevel: 'read committed' }));
+    }, { isolationLevel: 'serializable' });
+
+    expect(seen).toEqual(['serializable', 'serializable']);
+    expect(mismatch).toBe('POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH');
+    expect(mismatchedRan).toBe(false);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#isolation-level-and-access-mode
+   */
+  it('refuses drizzle own transaction(fn, config) inside the callback, and an uncaught refusal rolls back', async () => {
+    // From docs: "drizzle's own transaction(fn, config) inside the callback is held to the same
+    // rule" and "Uncaught, it rolls this whole transaction back."
+    let rawRan = false;
+    const raw = db.getPostgreSQLDatabase();
+
+    const code = await refusalCodeOf(db.transaction(async () => {
+      await orderRepository.create({ status: 'written before the refusal' });
+
+      await raw.transaction(async () => {
+        rawRan = true;
+      }, { isolationLevel: 'read committed' });
+    }, { isolationLevel: 'serializable' }));
+
+    expect(code).toBe('POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH');
+    expect(rawRan).toBe(false);
+    expect(await orderRepository.findAll()).toEqual([]);
+
+    // Without a config it is a savepoint as usual; outside a callback, drizzle's own transaction.
+    const levels = await db.transaction(async () => await raw.transaction(async (tx) => {
+      const rows = await tx.execute(sql`SHOW transaction_isolation`);
+
+      return String((rows as unknown as Array<{ transaction_isolation: string }>)[0].transaction_isolation);
+    }), { isolationLevel: 'serializable' });
+    expect(levels).toBe('serializable');
+
+    const outside = await raw.transaction(async (tx) => {
+      const rows = await tx.execute(sql`SHOW transaction_isolation`);
+
+      return String((rows as unknown as Array<{ transaction_isolation: string }>)[0].transaction_isolation);
+    }, { isolationLevel: 'repeatable read' });
+    expect(outside).toBe('repeatable read');
+  });
+
+  /**
+   * @source docs:api/drizzle.md#isolation-level-and-access-mode
+   */
+  it('refuses options on SQLite before the callback runs, and malformed ones on both dialects', async () => {
+    // From docs: on SQLite any option throws code 'SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED';
+    // an option name or value transaction() does not accept throws 'TRANSACTION_OPTIONS_INVALID'.
+    const { instance: sqlite } = createTestService(DrizzleServiceCtor);
+    await sqlite.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+
+    try {
+      let ran = false;
+      expect(await refusalCodeOf(sqlite.transaction(async () => {
+        ran = true;
+      }, { isolationLevel: 'serializable' }))).toBe('SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED');
+      expect(ran).toBe(false);
+
+      const malformed = { isolationLevel: 'snapshot' } as unknown as PostgreSQLTransactionOptions;
+      expect(await refusalCodeOf(sqlite.transaction(async () => undefined, malformed)))
+        .toBe('TRANSACTION_OPTIONS_INVALID');
+      expect(await refusalCodeOf(db.transaction(async () => undefined, malformed)))
+        .toBe('TRANSACTION_OPTIONS_INVALID');
+    } finally {
+      await sqlite.close();
+    }
+  });
+});
+
 describe('Startup Contract (docs)', () => {
   const { createTestService } = require('@onebun/core/testing');
   const deadUrl = 'postgresql://app:hunter2@127.0.0.1:5999/orders';
@@ -2256,52 +2480,65 @@ describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
     expect((await users.byEmail('ada@example.com'))?.name).toBe('Ada');
   });
 
-  it('fails the boot when it carries @Service() and something injects it', async () => {
+  it('fails the boot when it carries @Service(), whether or not anything injects it', async () => {
     // From docs: registering a repository as a provider makes app.start() reject with a
-    // DependencyResolutionError naming the repository as the dependency its consumer could not
-    // get, because constructing it threw. Before 0.8.2 this was a CircularDependencyError that
-    // named only the consumer, although there is no cycle.
-    @ServiceDecorator()
-    class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
-      constructor(db: DrizzleServiceCtor) {
-        super(db, docRepoUsers);
+    // ServiceConstructionError naming the repository, with 'Database not initialized' as its cause —
+    // whether or not anything injects it. Up to 0.8.x an injected one surfaced as a
+    // DependencyResolutionError on its consumer (0.8.1: a CircularDependencyError), and one that
+    // nothing injected let the application boot without it.
+    const bootFailure = async (injected: boolean): Promise<Error | null> => {
+      @ServiceDecorator()
+      class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
+        constructor(db: DrizzleServiceCtor) {
+          super(db, docRepoUsers);
+        }
       }
+
+      @ServiceDecorator()
+      class Consumer extends BaseService {
+        constructor(private repository: ProviderRepository) {
+          super();
+        }
+
+        async count(): Promise<number> {
+          return await this.repository.count();
+        }
+      }
+
+      @Module({
+        imports: [
+          DrizzleModule.forRoot({
+            connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+            autoMigrate: false,
+          }),
+        ],
+        providers: injected ? [ProviderRepository, Consumer] : [ProviderRepository],
+      })
+      class AppModule {}
+
+      const app = new OneBunApplication(AppModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+      });
+
+      const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+      await app.stop().catch(() => undefined);
+      DrizzleModule.clearOptions();
+
+      return failure;
+    };
+
+    for (const injected of [true, false]) {
+      const failure = await bootFailure(injected);
+
+      expect(failure?.name).toBe('ServiceConstructionError');
+      expect(String(failure)).toBe(
+        'ServiceConstructionError: Failed to create service ProviderRepository in module AppModule: ' +
+          'Error: Database not initialized. Call initialize() first.',
+      );
+      expect((failure?.cause as Error).message).toBe('Database not initialized. Call initialize() first.');
     }
-
-    @ServiceDecorator()
-    class Consumer extends BaseService {
-      constructor(private repository: ProviderRepository) {
-        super();
-      }
-
-      async count(): Promise<number> {
-        return await this.repository.count();
-      }
-    }
-
-    @Module({
-      imports: [
-        DrizzleModule.forRoot({
-          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
-          autoMigrate: false,
-        }),
-      ],
-      providers: [ProviderRepository, Consumer],
-    })
-    class AppModule {}
-
-    const app = new OneBunApplication(AppModule, {
-      port: 0,
-      metrics: { enabled: false },
-      gracefulShutdown: false,
-    });
-
-    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
-    await app.stop().catch(() => undefined);
-
-    expect(failure?.name).toBe('DependencyResolutionError');
-    expect(String(failure)).toContain('Could not resolve dependency ProviderRepository for service Consumer');
-    expect(String(failure)).toContain('Failed to create service ProviderRepository');
   });
 });
 

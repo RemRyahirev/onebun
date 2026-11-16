@@ -13,9 +13,13 @@ import {
   expect,
   beforeEach,
   afterEach,
+  spyOn,
 } from 'bun:test';
 
+import type { Interceptor, ResolvedInterceptor } from '../types';
+
 import { UseInterceptors } from '../decorators/decorators';
+import { useFakeTimers } from '../testing/test-utils';
 
 import { acknowledgesAutomatically, tracksDelivery } from './ack-mode';
 import { getMessageInterceptors } from './decorators';
@@ -31,7 +35,7 @@ import {
   OnMessageReceived,
   OnMessageProcessed,
   OnMessageFailed,
-  MessageAuthGuard,
+  MessageAuthorizationPresenceGuard,
   MessageServiceGuard,
   MessageHeaderGuard,
   MessageTraceGuard,
@@ -53,6 +57,7 @@ import {
   createQueuePatternMatcher,
   toRedisQueueGlob,
   resolveMaxAttempts,
+  isLastAttempt,
   retryDelayMs,
   DEFAULT_RETRY_ATTEMPTS,
   DEFAULT_RETRY_DELAY_MS,
@@ -63,8 +68,11 @@ import {
   getTimeoutMetadata,
   getLifecycleHandlers,
   hasQueueDecorators,
+  QueuePublishError,
   QueueScheduler,
   QueueService,
+  type PublishOptions,
+  type QueuePublishFailureReason,
 } from './index';
 
 /**
@@ -108,8 +116,8 @@ describe('Setup Section Examples (docs/api/queue.md)', () => {
           // process order
           await message.ack();
         } catch {
-          if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
-            await message.ack();
+          if (isLastAttempt(message.attempt, message.maxAttempts)) {
+            await message.nack(false);
           } else {
             await message.nack(true);
           }
@@ -345,7 +353,7 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
     // From docs/api/queue.md: Built-in Guards section
     class SecureService {
       // Require authorization token
-      @UseMessageGuards(MessageAuthGuard)
+      @UseMessageGuards(MessageAuthorizationPresenceGuard)
       @Subscribe('secure.events')
       async handleSecure(_message: Message<unknown>) {}
 
@@ -375,14 +383,14 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
     class StrictService {
       // All guards must pass
       @UseMessageGuards(
-        new MessageAllGuards([MessageAuthGuard, new MessageServiceGuard(['allowed-service'])]),
+        new MessageAllGuards([MessageAuthorizationPresenceGuard, new MessageServiceGuard(['allowed-service'])]),
       )
       @Subscribe('strict.events')
       async handleStrict(_message: Message<unknown>) {}
 
       // Any guard can pass
       @UseMessageGuards(
-        new MessageAnyGuard([new MessageServiceGuard(['internal-service']), MessageAuthGuard]),
+        new MessageAnyGuard([new MessageServiceGuard(['internal-service']), MessageAuthorizationPresenceGuard]),
       )
       @Subscribe('flexible.events')
       async handleFlexible(_message: Message<unknown>) {}
@@ -1060,6 +1068,163 @@ describe('Publishing Messages (docs/api/queue.md)', () => {
 });
 
 /**
+ * @source docs:api/queue.md#publish-errors
+ */
+describe('Handling a failed publish (docs/api/queue.md)', () => {
+  // The snippet, verbatim.
+  /**
+   * Publishes `orders.created`, repeating a failed attempt while a repeat cannot store the message
+   * twice — at most `attempts` times. What happens once they run out is the caller's decision.
+   */
+  async function publishOrderCreated(queue: QueueService, orderId: string, attempts = 3): Promise<string> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        // With a messageId, JetStream drops a repeat that arrives inside the stream's duplicate window.
+        return await queue.publish('orders.created', { orderId }, { messageId: `order-created-${orderId}` });
+      } catch (error) {
+        // 'unavailable' and 'rejected' stored nothing. 'unknown' may have stored it, so it goes back to
+        // the caller — who can still repeat it with the same messageId on JetStream.
+        const repeatable = error instanceof QueuePublishError && error.safeToRepeat;
+
+        if (!repeatable || attempt >= attempts) {
+          throw error;
+        }
+
+        await Bun.sleep(attempt * 100);
+      }
+    }
+  }
+
+  /**
+   * A custom adapter's publish path, throwing what the page tells a custom adapter to throw: each
+   * call takes the next outcome off `failures`, and publishes for real once they run out.
+   */
+  class ScriptedAdapter extends InMemoryQueueAdapter {
+    calls = 0;
+
+    constructor(private readonly failures: unknown[]) {
+      super();
+    }
+
+    override async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
+      this.calls += 1;
+      const failure = this.failures.shift();
+      if (failure !== undefined) {
+        throw failure;
+      }
+
+      return await super.publish(pattern, data, options);
+    }
+  }
+
+  async function serviceOver(adapter: InMemoryQueueAdapter): Promise<QueueService> {
+    const queueService = new QueueService({ adapter: 'memory' });
+    await queueService.initialize(adapter);
+
+    return queueService;
+  }
+
+  const failure = (reason: QueuePublishFailureReason): QueuePublishError =>
+    new QueuePublishError(`failed: ${reason}`, { reason, pattern: 'orders.created' });
+
+  it('publishes with the messageId on the first attempt', async () => {
+    const adapter = new ScriptedAdapter([]);
+    const queueService = await serviceOver(adapter);
+
+    expect(await publishOrderCreated(queueService, '42')).toBe('order-created-42');
+    expect(adapter.calls).toBe(1);
+
+    await queueService.stop();
+  });
+
+  /** The snippet's waits, recorded instead of slept: they are real `Bun.sleep` calls. */
+  function recordWaits(): { waits: number[]; restore: () => void } {
+    const waits: number[] = [];
+    const sleep = spyOn(Bun, 'sleep').mockImplementation(async (ms: number | Date) => {
+      waits.push(Number(ms));
+    });
+
+    return { waits, restore: () => sleep.mockRestore() };
+  }
+
+  it('repeats an "unavailable" and a "rejected" publish — both stored nothing — until it succeeds', async () => {
+    const adapter = new ScriptedAdapter([failure('unavailable'), failure('rejected')]);
+    const queueService = await serviceOver(adapter);
+    const { waits, restore } = recordWaits();
+
+    try {
+      expect(await publishOrderCreated(queueService, '42')).toBe('order-created-42');
+    } finally {
+      restore();
+    }
+    expect(adapter.calls).toBe(3);
+    expect(waits).toEqual([100, 200]);
+
+    await queueService.stop();
+  });
+
+  it('gives a "rejected" publish back once the attempts run out', async () => {
+    const last = failure('rejected');
+    const adapter = new ScriptedAdapter([failure('rejected'), failure('rejected'), last]);
+    const queueService = await serviceOver(adapter);
+    const { waits, restore } = recordWaits();
+
+    try {
+      await expect(publishOrderCreated(queueService, '42')).rejects.toBe(last);
+    } finally {
+      restore();
+    }
+    expect(adapter.calls).toBe(3);
+    expect(waits).toEqual([100, 200]);
+  });
+
+  it('hands an "unknown" publish straight back: it may be stored', async () => {
+    const unknown = failure('unknown');
+    const adapter = new ScriptedAdapter([unknown]);
+    const queueService = await serviceOver(adapter);
+
+    expect(unknown.safeToRepeat).toBe(false);
+    await expect(publishOrderCreated(queueService, '42')).rejects.toBe(unknown);
+    expect(adapter.calls).toBe(1);
+  });
+
+  it('reports a disconnected adapter as "unavailable", and its name survives a second copy of the class', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    const queueService = await serviceOver(adapter);
+    await adapter.disconnect();
+
+    const thrown = await queueService.publish('orders.created', {}).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(QueuePublishError);
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as QueuePublishError).reason).toBe('unavailable');
+    expect((thrown as QueuePublishError).safeToRepeat).toBe(true);
+    // The fallback the page gives for an application that loads two copies of @onebun/core.
+    expect((thrown as Error).name).toBe('QueuePublishError');
+  });
+
+  it('keeps the original error as cause, and the pattern it was published to', () => {
+    const driverError = new Error('timeout');
+    const error = new QueuePublishError('no acknowledgement', {
+      reason: 'unknown',
+      pattern: 'orders.created',
+      cause: driverError,
+    });
+
+    expect(error.cause).toBe(driverError);
+    expect(error.pattern).toBe('orders.created');
+  });
+
+  it('rethrows anything that is not a QueuePublishError, without repeating it', async () => {
+    const adapter = new ScriptedAdapter([new TypeError('Do not know how to serialize a BigInt')]);
+    const queueService = await serviceOver(adapter);
+
+    await expect(publishOrderCreated(queueService, '42')).rejects.toBeInstanceOf(TypeError);
+    expect(adapter.calls).toBe(1);
+  });
+});
+
+/**
  * @source docs:api/queue.md#interceptors
  */
 describe('Interceptors on queue handlers (docs/api/queue.md)', () => {
@@ -1084,6 +1249,60 @@ describe('Interceptors on queue handlers (docs/api/queue.md)', () => {
     );
     expect(interceptors.length).toBe(1);
     expect(interceptors[0]).toBe(LoggingInterceptor);
+  });
+
+  it('should run global, class and method interceptors in that order on a @Subscribe handler', async () => {
+    const order: string[] = [];
+    const named = (name: string): Interceptor => ({
+      async intercept(_ctx, next) {
+        order.push(name);
+
+        return await next();
+      },
+    });
+    const resolve = (list: (Function | Interceptor)[]): ResolvedInterceptor[] =>
+      list.map((item) => async (ctx, next) => await (item as Interceptor).intercept(ctx, next));
+
+    @UseInterceptors(named('class'))
+    class EventProcessor {
+      @Subscribe('events.audited')
+      @UseInterceptors(named('method'))
+      handleAudited() {
+        order.push('handler');
+      }
+
+      @Subscribe('events.created')
+      handleCreated() {
+        order.push('created');
+      }
+    }
+
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    await service.initialize(adapter);
+    await service.registerService(new EventProcessor(), EventProcessor, resolve, [named('global')]);
+    await adapter.publish('events.audited', {});
+    await adapter.publish('events.created', {});
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(order).toEqual(['global', 'class', 'method', 'handler', 'global', 'class', 'created']);
+  });
+
+  it('should not carry a base method interceptor list over to an overriding handler', () => {
+    const base: Interceptor = { intercept: async (_ctx, next) => await next() };
+
+    class BaseProcessor {
+      @UseInterceptors(base)
+      handleAudited() {}
+    }
+    class EventProcessor extends BaseProcessor {
+      @Subscribe('events.audited')
+      override handleAudited() {}
+    }
+
+    expect(getMessageInterceptors(BaseProcessor, 'handleAudited')).toEqual([base]);
+    expect(getMessageInterceptors(EventProcessor, 'handleAudited')).toEqual([]);
   });
 });
 
@@ -1136,6 +1355,7 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(toRedisQueueGlob('orders.created')).toBe('orders.created');
     expect(toRedisQueueGlob('orders.*')).toBe('orders.*');
     expect(toRedisQueueGlob('events.#')).toBe('events.*');
+    expect(toRedisQueueGlob('events.>')).toBe('events.*');
     expect(toRedisQueueGlob('orders.{id}')).toBe('orders.*');
   });
 
@@ -1164,6 +1384,8 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(delivered[0]!.params).toEqual({ id: '123', event: 'created' });
     // "the topic as delivered" — the pattern field is unchanged by the capture.
     expect(delivered[0]!.pattern).toBe('orders.123.created');
+    // "the same value"
+    expect(delivered[0]!.subject).toBe('orders.123.created');
     // "A pattern with no {name} gives params === {} rather than undefined."
     expect(matchQueuePattern('orders.*', 'orders.created').params).toEqual({});
   });
@@ -1219,13 +1441,192 @@ describe('Pattern Syntax — the Redis key glob column', () => {
 });
 
 /**
+ * @source docs:api/queue.md#native-wildcards
+ */
+describe('Native NATS wildcards: * and > (docs/api/queue.md)', () => {
+  it('delivers to the documented tenants.{tenant}.> consumer, capturing only the {name}', async () => {
+    class AuditConsumer {
+      readonly seen: Array<{ tenant: string; subject?: string }> = [];
+
+      @Subscribe('tenants.{tenant}.>')
+      async onTenantEvent(message: Message<unknown>): Promise<void> {
+        this.seen.push({ tenant: message.params.tenant, subject: message.subject });
+        // "`*` and `>` capture nothing": the {name} is the only key.
+        expect(Object.keys(message.params)).toEqual(['tenant']);
+      }
+    }
+
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new AuditConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, AuditConsumer);
+
+    // The in-memory publish resolves once every matching handler has run.
+    await adapter.publish('tenants.acme.orders.created', {});
+    // `>`, like `#`, needs at least one token after the separator.
+    await adapter.publish('tenants.acme', {});
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen).toEqual([{ tenant: 'acme', subject: 'tenants.acme.orders.created' }]);
+  });
+
+  it('matches "events.>" exactly where "events.#" matches, on every adapter that matches in process', () => {
+    for (const topic of ['events', 'events.created', 'events.user.created', 'eventsx.created']) {
+      expect(matchQueuePattern('events.>', topic)).toEqual(matchQueuePattern('events.#', topic));
+    }
+    expect(matchQueuePattern('>', 'orders.created').matched).toBe(true);
+  });
+
+  it('reads the non-portable rows of the table the way the memory and Redis column says', () => {
+    // `*` also matches inside a token.
+    expect(matchQueuePattern('orders.v*', 'orders.v2').matched).toBe(true);
+    expect(matchQueuePattern('orders.a*b', 'orders.axb').matched).toBe(true);
+    // `>` anywhere but the whole last token is a literal character.
+    expect(matchQueuePattern('events.>.created', 'events.user.created').matched).toBe(false);
+    expect(matchQueuePattern('events.>.created', 'events.>.created').matched).toBe(true);
+    expect(matchQueuePattern('events.new>', 'events.newer').matched).toBe(false);
+    expect(matchQueuePattern('events.new>', 'events.new>').matched).toBe(true);
+    // An empty token is literal too.
+    expect(matchQueuePattern('orders..created', 'orders..created').matched).toBe(true);
+    // And the Redis glob follows the matcher.
+    expect(toRedisQueueGlob('events.>.created')).toBe('events.>.created');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#message-subject
+ */
+describe('Where pattern, params and subject come from (docs/api/queue.md)', () => {
+  /** The documented `ResultConsumer`, recording what it reads instead of logging it. */
+  class ResultConsumer {
+    readonly seen: Array<Record<string, unknown>> = [];
+    readonly refused: Array<string | undefined> = [];
+
+    @Subscribe('*.wq.result.{runId}', { group: 'results' })
+    async onResult(message: Message<{ status: string }>): Promise<void> {
+      const { runId } = message.params;
+      if (!/^\d+$/.test(runId)) {
+        this.refused.push(message.subject);
+        await message.nack(false);
+
+        return;
+      }
+
+      const application = message.subject?.split('.')[0];
+      this.seen.push({
+        subject: message.subject,
+        pattern: message.pattern,
+        runId,
+        stream: message.stream,
+        headers: message.headers,
+        application,
+      });
+    }
+  }
+
+  /** Runs the documented consumer on the in-memory adapter and publishes each topic to it. */
+  async function deliver(...topics: string[]): Promise<ResultConsumer> {
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    for (const topic of topics) {
+      await adapter.publish(topic, { status: 'succeeded' });
+    }
+
+    await service.stop();
+    await adapter.disconnect();
+
+    return consumer;
+  }
+
+  it('refuses a run id the publisher spelled as a wildcard token', async () => {
+    // "a publish to `app-a.wq.result.*` captures `runId === '*'`"
+    const consumer = await deliver('app-a.wq.result.*');
+
+    expect(consumer.refused).toEqual(['app-a.wq.result.*']);
+    expect(consumer.seen).toEqual([]);
+  });
+
+  it('refuses a subject that spells the subscription pattern itself, which captures nothing', async () => {
+    // "matches as a literal and captures nothing, leaving `params.runId` undefined"
+    const consumer = await deliver('*.wq.result.{runId}');
+
+    expect(consumer.refused).toEqual(['*.wq.result.{runId}']);
+    expect(consumer.seen).toEqual([]);
+  });
+
+  it('reads the delivery on the in-memory adapter: the published topic, no stream, no headers', async () => {
+    // The whole chain the docs show — decorator, QueueService, adapter — so a wrapper that
+    // re-built the message and dropped the new fields would fail here.
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    await adapter.publish('app-a.wq.result.1', { status: 'succeeded' });
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen).toHaveLength(1);
+    expect(consumer.seen[0]).toEqual({
+      subject: 'app-a.wq.result.1',
+      pattern: 'app-a.wq.result.1',
+      runId: '1',
+      stream: undefined,
+      headers: undefined,
+      application: 'app-a',
+    });
+  });
+
+  it('captures from the topic itself on the in-memory adapter, whatever the metadata claims', async () => {
+    // "Everything else on the message is the publisher's word" — and none of it moves `params`.
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new ResultConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, ResultConsumer);
+
+    await adapter.publish('app-b.wq.result.7', {}, { metadata: { pattern: 'app-a.wq.result.999' } });
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen[0]).toMatchObject({ subject: 'app-b.wq.result.7', runId: '7', application: 'app-b' });
+  });
+});
+
+/**
  * @source docs:api/queue.md#error-handling-in-handlers
  */
 describe('Error Handling in Handlers — the documented recipe, executed', () => {
+  /** The recipe's branch, verbatim: `isLastAttempt(message.attempt, message.maxAttempts)`. */
+  async function documentedDisposition(message: Message<unknown>): Promise<'requeue' | 'terminate'> {
+    if (isLastAttempt(message.attempt, message.maxAttempts)) {
+      await message.nack(false);
+
+      return 'terminate';
+    }
+
+    await message.nack(true);
+
+    return 'requeue';
+  }
+
   it('reaches the terminal nack(false) branch once attempt equals maxAttempts', async () => {
-    // The recipe on the page branches on `message.attempt >= (message.maxAttempts || 3)`. With
-    // `attempt` permanently undefined that branch was unreachable on this adapter, so the handler
-    // took `nack(true)` forever. This runs the recipe's shape and asserts it terminates.
+    // With `attempt` permanently undefined that branch was unreachable on this adapter, so the
+    // handler took `nack(true)` forever. This runs the recipe's shape and asserts it terminates.
     const adapter = new InMemoryQueueAdapter();
     await adapter.connect();
 
@@ -1238,13 +1639,7 @@ describe('Error Handling in Handlers — the documented recipe, executed', () =>
       try {
         throw new Error('order processing failed');
       } catch {
-        if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
-          dispositions.push('terminate');
-          await message.nack(false);
-        } else {
-          dispositions.push('requeue');
-          await message.nack(true);
-        }
+        dispositions.push(await documentedDisposition(message));
       }
     }, { ackMode: 'manual', retry: { attempts: 3, backoff: 'exponential', delay: 1 } });
 
@@ -1259,6 +1654,46 @@ describe('Error Handling in Handlers — the documented recipe, executed', () =>
       { attempt: 2, maxAttempts: 3 },
       { attempt: 3, maxAttempts: 3 },
     ]);
+  });
+
+  it('never takes the terminal branch on a subscription with no attempts limit', async () => {
+    // `maxAttempts` is -1 there, and the comparison the recipe used to make by hand —
+    // `attempt >= (maxAttempts || 3)` — was true on the first failure.
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const dispositions: Array<'requeue' | 'terminate'> = [];
+    const reported = new Set<number | undefined>();
+
+    await adapter.subscribe('orders.created', async (message) => {
+      reported.add(message.maxAttempts);
+
+      try {
+        if (dispositions.length < 5) {
+          throw new Error('order processing failed');
+        }
+        await message.ack();
+      } catch {
+        dispositions.push(await documentedDisposition(message));
+      }
+    }, { ackMode: 'manual', retry: { attempts: -1 } });
+
+    await adapter.publish('orders.created', { orderId: 'o-1' });
+    // `nack(true)` redelivers on `setImmediate`, so turns of the event loop are what it waits on.
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await adapter.disconnect();
+
+    expect(dispositions).toEqual(['requeue', 'requeue', 'requeue', 'requeue', 'requeue']);
+    expect([...reported]).toEqual([-1]);
+  });
+
+  it('answers false when nothing tracks delivery', () => {
+    // Core NATS, and every adapter under ackMode 'none', leave both fields undefined.
+    expect(isLastAttempt(undefined, undefined)).toBe(false);
+    expect(isLastAttempt(3, undefined)).toBe(false);
+    expect(isLastAttempt(undefined, 3)).toBe(false);
   });
 });
 
@@ -1278,9 +1713,107 @@ describe('RetryOptions — the documented defaults and formulas', () => {
     expect(resolveMaxAttempts({ attempts: 3 })).toBe(3);
   });
 
-  it('refuses to turn a subscription into one that never fires', () => {
-    expect(resolveMaxAttempts({ attempts: 0 })).toBe(1);
-    expect(resolveMaxAttempts({ attempts: -5 })).toBe(1);
+  it('reads -1, 0 and every other negative value as no limit, resolved to -1', () => {
+    expect(resolveMaxAttempts({ attempts: -1 })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: 0 })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: -5 })).toBe(-1);
+    // `deadLetter.maxRetries` follows the same rule when `retry.attempts` is absent.
+    expect(resolveMaxAttempts(undefined, { queue: 'd', maxRetries: -1 })).toBe(-1);
+    // A non-finite value sets no limit either, and is reported as the same -1.
+    expect(resolveMaxAttempts({ attempts: Number.POSITIVE_INFINITY })).toBe(-1);
+    expect(resolveMaxAttempts({ attempts: Number.NaN })).toBe(-1);
+  });
+
+  it('keeps a positive value as a cap, floored but never below one attempt', () => {
+    expect(resolveMaxAttempts({ attempts: 1 })).toBe(1);
+    expect(resolveMaxAttempts({ attempts: 2.7 })).toBe(2);
+    expect(resolveMaxAttempts({ attempts: 0.5 })).toBe(1);
+  });
+
+  it('reads an untyped value — a string from env or JSON — as it always has, never as no limit', () => {
+    // Only a value that really is a number takes the "0 or below is no limit" rule.
+    const untyped = (value: unknown) => ({ attempts: value as number });
+
+    expect(resolveMaxAttempts(untyped('3'))).toBe(3);
+    expect(resolveMaxAttempts(untyped('2.7'))).toBe(2);
+    expect(resolveMaxAttempts(untyped('0'))).toBe(1);
+    expect(resolveMaxAttempts(untyped('-1'))).toBe(1);
+    expect(resolveMaxAttempts(undefined, { queue: 'd', maxRetries: untyped('4').attempts })).toBe(4);
+    // Not a number at all: the default single delivery, not an endless retry.
+    expect(resolveMaxAttempts(untyped('three'))).toBe(1);
+  });
+
+  it('has no last attempt under no limit, so a bare attempt >= maxAttempts is the wrong test', () => {
+    const maxAttempts = resolveMaxAttempts({ attempts: -1 });
+
+    expect(isLastAttempt(1, maxAttempts)).toBe(false);
+    expect(isLastAttempt(1_000, maxAttempts)).toBe(false);
+    // The comparison the page warns about: true on the very first attempt.
+    expect(1 >= maxAttempts).toBe(true);
+
+    expect(isLastAttempt(2, 3)).toBe(false);
+    expect(isLastAttempt(3, 3)).toBe(true);
+  });
+
+  it('retries the documented attempts: -1 subscription every 5 s until the handler succeeds', async () => {
+    // The snippet as written: its options, registered by the decorator, and what they do on a
+    // real adapter.
+    class PaymentCapture {
+      calls = 0;
+
+      @Subscribe('payments.capture', {
+        retry: { attempts: -1, backoff: 'fixed', delay: 5_000 },
+      })
+      async capture(message: Message<{ paymentId: string }>) {
+        this.calls += 1;
+        if (this.calls < 12) {
+          throw new Error(`gateway unavailable for ${message.data.paymentId}`);
+        }
+      }
+    }
+
+    const [subscription] = getSubscribeMetadata(PaymentCapture);
+    expect(subscription.options?.retry).toEqual({ attempts: -1, backoff: 'fixed', delay: 5_000 });
+
+    const timers = useFakeTimers();
+    const adapter = new InMemoryQueueAdapter();
+
+    try {
+      await adapter.connect();
+
+      const consumer = new PaymentCapture();
+      const seen: Array<number | undefined> = [];
+      await adapter.subscribe<{ paymentId: string }>(subscription.pattern, async (message) => {
+        seen.push(message.maxAttempts);
+        await consumer.capture(message);
+      }, subscription.options);
+
+      await adapter.publish('payments.capture', { paymentId: 'p-1' });
+
+      for (let tick = 0; tick < 15; tick += 1) {
+        timers.advanceTime(5_000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      // Eleven failures, the twelfth attempt succeeds, and nothing follows it.
+      expect(consumer.calls).toBe(12);
+      expect(seen.every((maxAttempts) => maxAttempts === -1)).toBe(true);
+    } finally {
+      await adapter.disconnect();
+      timers.restore();
+    }
+  });
+
+  it('waits the default delay for a subscription with no limit and no retry, never zero', () => {
+    // `deadLetter.maxRetries: -1` (or JetStream's `consumerConfig.maxDeliver: -1`) sets no limit
+    // without a `retry`; a zero wait would redeliver as fast as the broker hands it back.
+    const unlimited = resolveMaxAttempts(undefined, { queue: 'd', maxRetries: -1 });
+
+    expect(retryDelayMs(undefined, 1, unlimited)).toBe(DEFAULT_RETRY_DELAY_MS);
+    expect(retryDelayMs(undefined, 40, unlimited)).toBe(DEFAULT_RETRY_DELAY_MS);
+    // A capped subscription without `retry`, and an explicit `delay: 0`, keep their zero wait.
+    expect(retryDelayMs(undefined, 1, 3)).toBe(0);
+    expect(retryDelayMs({ attempts: -1, delay: 0 }, 1, unlimited)).toBe(0);
   });
 
   it('computes each documented backoff formula', () => {
@@ -1396,5 +1929,82 @@ describe('Interval overlap and the first run', () => {
 
     expect(jobs[0]?.options.overlapStrategy).toBeUndefined();
     expect(jobs[0]?.options.runOnStart).toBeUndefined();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#retry-max-delay
+ */
+describe('RetryOptions.maxDelay — the documented ceiling', () => {
+  it('runs the documented exponential subscription at 1, 2, 4, 8, 16 and then 30 seconds', async () => {
+    class ReportBuilder {
+      calls = 0;
+
+      @Subscribe('reports.build', {
+        retry: {
+          attempts: -1, backoff: 'exponential', delay: 1_000, maxDelay: 30_000, 
+        },
+      })
+      async build(message: Message<{ reportId: string }>) {
+        this.calls += 1;
+        if (this.calls < 9) {
+          throw new Error(`dependency down for ${message.data.reportId}`);
+        }
+      }
+    }
+
+    const [subscription] = getSubscribeMetadata(ReportBuilder);
+    expect(subscription.options?.retry?.maxDelay).toBe(30_000);
+
+    // The waits the comment in the snippet lists, then the ceiling for every further attempt.
+    const waits = Array.from({ length: 8 }, (_, index) => retryDelayMs(subscription.options?.retry, index + 1));
+    expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]);
+
+    const timers = useFakeTimers();
+    const adapter = new InMemoryQueueAdapter();
+
+    try {
+      await adapter.connect();
+
+      const consumer = new ReportBuilder();
+      await adapter.subscribe<{ reportId: string }>(subscription.pattern, async (message) => {
+        await consumer.build(message);
+      }, subscription.options);
+
+      await adapter.publish('reports.build', { reportId: 'r-1' });
+
+      for (const wait of waits) {
+        timers.advanceTime(wait);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      // Nine attempts in exactly the eight documented waits: uncapped, the last wait alone
+      // would have been 128 s.
+      expect(consumer.calls).toBe(9);
+    } finally {
+      await adapter.disconnect();
+      timers.restore();
+    }
+  });
+
+  it('keeps the ladder untouched when maxDelay is not set', () => {
+    expect(retryDelayMs({ backoff: 'exponential', delay: 1_000 }, 12)).toBe(2_048_000);
+  });
+
+  it('applies the ceiling to the base delay and refuses an invalid value at subscribe()', async () => {
+    expect(retryDelayMs({ delay: 1_000, maxDelay: 250 }, 1)).toBe(250);
+    expect(retryDelayMs({ backoff: 'fixed', delay: 1_000, maxDelay: 0 }, 1)).toBe(0);
+
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    try {
+      for (const maxDelay of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(adapter.subscribe('reports.build', async () => undefined, { retry: { maxDelay } }))
+          .rejects.toThrow('"reports.build"');
+      }
+    } finally {
+      await adapter.disconnect();
+    }
   });
 });

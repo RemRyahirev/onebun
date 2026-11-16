@@ -174,6 +174,43 @@ export type DatabaseConnectionOptions =
   | { type: DatabaseType.POSTGRESQL; options: PostgreSQLConnectionOptions };
 
 /**
+ * Isolation level of a PostgreSQL transaction.
+ *
+ * `read uncommitted` is not offered: PostgreSQL runs it as `read committed`.
+ *
+ * @see docs:api/drizzle.md
+ */
+export type PostgreSQLIsolationLevel = 'read committed' | 'repeatable read' | 'serializable';
+
+/**
+ * Whether a PostgreSQL transaction may write. In a `read only` transaction the server refuses
+ * every write, and every locking read (`FOR UPDATE`, `FOR SHARE`) as well.
+ *
+ * @see docs:api/drizzle.md
+ */
+export type PostgreSQLAccessMode = 'read write' | 'read only';
+
+/**
+ * Settings of the transaction `DrizzleService.transaction(callback, options)` opens.
+ *
+ * PostgreSQL only: on SQLite, passing any of them throws `DrizzleTransactionError` before the
+ * callback runs. A key that is left out keeps the server default. The settings are issued as
+ * `SET TRANSACTION` before the callback, so they hold for every statement in it — the
+ * repositories and services it calls included.
+ *
+ * A nested `transaction()` is a SAVEPOINT and runs under the settings of the outermost one; it
+ * may repeat them, or pass none, but asking for anything else throws.
+ *
+ * @see docs:api/drizzle.md
+ */
+export interface PostgreSQLTransactionOptions {
+  /** Defaults to the server's `default_transaction_isolation`, normally `read committed`. */
+  isolationLevel?: PostgreSQLIsolationLevel;
+  /** Defaults to the server's `default_transaction_read_only`, normally `read write`. */
+  accessMode?: PostgreSQLAccessMode;
+}
+
+/**
  * Drizzle module options
  */
 export interface DrizzleModuleOptions {

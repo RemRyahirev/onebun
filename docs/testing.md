@@ -22,7 +22,7 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `inject()` makes real HTTP requests via `undici.fetch` (bypasses global fetch mocks)
 - Always call `close()` in `afterEach` to prevent port leaks
 - `_testProviders` is an internal option; the application copies it into its `GlobalScope.overrides` before building the module tree (nothing patches the root module after the tree is built)
-- No `envSchema` in `setOptions()` + a service reading `this.config` in its constructor = `DependencyResolutionError: Could not resolve dependency X`. `module.ts` re-throws only `OneBun*`-named errors; the config stub's plain `Error` is logged to the silent mock logger and the service is dropped
+- No `envSchema` in `setOptions()` + a service reading `this.config` in its constructor = `compile()` rejects with `ServiceConstructionError: Failed to create service X in module _TestingAppModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions.`, the stub's error as `cause` — with or without a consumer.
 
 **Testcontainers** (`createRedisContainer`, `createNatsContainer`, `createPostgresContainer`):
 - `testcontainers` is a REQUIRED peer dependency of `@onebun/core`, declared without `peerDependenciesMeta.optional`. The `@onebun/core/testing` barrel value-imports it, so it must be installed for any import from that subpath, not only for the container helpers. That is the intended contract: integration tests are the default, and the subpath is a boundary of concern rather than a way to make the peer conditional
@@ -254,18 +254,19 @@ module = await TestingModule
 ::: warning `envSchema` is required by any service that reads `this.config` in its constructor
 Without it the application config is the not-initialized stub, and `config.get()` throws
 `Configuration not initialized. Provide envSchema in ApplicationOptions.` from inside the
-constructor. Module init only re-throws errors whose `name` starts with `OneBun`; anything else is
-logged — to `TestingModule`'s silent mock logger, where you never see it — and the service is left
-unregistered. What surfaces is the dependent's failure instead:
+constructor. `compile()` then rejects with that error, wrapped to name the service — whether or not
+anything injects it:
 
 ```
-DependencyResolutionError: Could not resolve dependency UserService for controller UserController.
-  - Ensure UserService is decorated with @Service() and listed in a module's providers.
+ServiceConstructionError: Failed to create service UserService in module _TestingAppModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions.
 ```
 
-The service *is* decorated and *is* in `providers`; the missing `envSchema` is the real cause. A
-service that reads `this.config` only inside a method is unaffected at boot and throws into a 500 at
-request time instead.
+`error.cause` is the stub's error. It does not depend on the logger, so the silent one
+`TestingModule` installs hides nothing. See
+[When a Constructor Throws](./api/services.md#when-a-constructor-throws).
+
+A service that reads `this.config` only inside a method is unaffected at boot and throws into a 500
+at request time instead.
 :::
 
 #### `.captureLogs()` {#capturing-framework-logs}

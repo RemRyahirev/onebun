@@ -31,7 +31,7 @@ import { BaseService, Service } from '../module/service';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 
 import {
-  AuthGuard,
+  BearerPresenceGuard,
   createHttpGuard,
   executeHttpGuards,
   HttpExecutionContextImpl,
@@ -176,26 +176,26 @@ describe('createHttpGuard', () => {
 });
 
 // ============================================================================
-// AuthGuard
+// BearerPresenceGuard
 // ============================================================================
 
-describe('AuthGuard', () => {
+describe('BearerPresenceGuard', () => {
   it('allows request with Bearer token', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext([['authorization', 'Bearer my-token']]);
 
     expect(guard.canActivate(ctx)).toBe(true);
   });
 
   it('blocks request without Authorization header', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext();
 
     expect(guard.canActivate(ctx)).toBe(false);
   });
 
   it('blocks request with non-Bearer Authorization header', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext([['authorization', 'Basic dXNlcjpwYXNz']]);
 
     expect(guard.canActivate(ctx)).toBe(false);
@@ -207,45 +207,103 @@ describe('AuthGuard', () => {
 // ============================================================================
 
 describe('RolesGuard', () => {
-  it('allows when user has all required roles (default extractor)', () => {
-    const guard = new RolesGuard(['admin', 'editor']);
-    const headers = makeHeaders([['x-user-roles', 'admin, editor, viewer']]);
-    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
+  const rolesOf = (...roles: string[]) => (): string[] => roles;
 
-    expect(guard.canActivate(ctx)).toBe(true);
+  it('allows when the extractor returns every required role', () => {
+    const guard = new RolesGuard(['admin', 'editor'], rolesOf('admin', 'editor', 'viewer'));
+
+    expect(guard.canActivate(makeContext())).toBe(true);
   });
 
-  it('blocks when user is missing a required role', () => {
-    const guard = new RolesGuard(['admin']);
-    const headers = makeHeaders([['x-user-roles', 'viewer']]);
-    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
+  it('blocks when the extractor lacks a required role', () => {
+    const guard = new RolesGuard(['admin'], rolesOf('viewer'));
 
-    expect(guard.canActivate(ctx)).toBe(false);
+    expect(guard.canActivate(makeContext())).toBe(false);
   });
 
-  it('blocks when x-user-roles header is absent', () => {
-    const guard = new RolesGuard(['admin']);
-    const ctx = makeContext();
+  it('blocks when the extractor returns no roles', () => {
+    const guard = new RolesGuard(['admin'], rolesOf());
 
-    expect(guard.canActivate(ctx)).toBe(false);
-  });
-
-  it('uses custom roles extractor when provided', () => {
-    const headers = makeHeaders([['x-roles', 'admin|user']]);
-    const guard = new RolesGuard(['admin'], (ctx) =>
-      ctx.getRequest().headers.get('x-roles')?.split('|') ?? [],
-    );
-    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
-
-    expect(guard.canActivate(ctx)).toBe(true);
+    expect(guard.canActivate(makeContext())).toBe(false);
   });
 
   it('requires ALL roles to be present (not just one)', () => {
-    const guard = new RolesGuard(['admin', 'superuser']);
-    const headers = makeHeaders([['x-user-roles', 'admin']]);
-    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
+    const guard = new RolesGuard(['admin', 'superuser'], rolesOf('admin'));
 
-    expect(guard.canActivate(ctx)).toBe(false);
+    expect(guard.canActivate(makeContext())).toBe(false);
+  });
+
+  it('hands the extractor the HTTP execution context of the request', () => {
+    const seen: string[] = [];
+    const guard = new RolesGuard(['admin'], (ctx) => {
+      seen.push(`${ctx.getController()}.${ctx.getHandler()}`);
+
+      return ctx.getRequest().headers.get('x-roles')?.split('|') ?? [];
+    });
+
+    expect(guard.canActivate(makeContext([['x-roles', 'admin|user']], 'remove', 'UsersController'))).toBe(true);
+    expect(seen).toEqual(['UsersController.remove']);
+  });
+
+  it('reads nothing from the request on its own: x-user-roles is ignored', () => {
+    const guard = new RolesGuard(['admin'], rolesOf());
+
+    expect(guard.canActivate(makeContext([['x-user-roles', 'admin']]))).toBe(false);
+  });
+
+  it('requires a rolesExtractor: the one-argument form is a compile error and throws', () => {
+    // @ts-expect-error — the second argument has no default; this line must stay a type error
+    expect(() => new RolesGuard(['admin'])).toThrow(TypeError);
+    // @ts-expect-error — not a function
+    expect(() => new RolesGuard(['admin'], 'x-user-roles')).toThrow(/requires a rolesExtractor/);
+  });
+});
+
+describe('RolesGuard passed as a class', () => {
+  const HTTP_ERROR = 500;
+
+  let reached = 0;
+
+  @Controller('/roles-class')
+  class RolesClassController extends BaseController {
+    // The mistake the constructor check names: the class instead of an instance. The framework
+    // constructs it per request with no arguments.
+    @UseGuards(RolesGuard)
+    @Get('/')
+    get() {
+      reached += 1;
+
+      return { reached: true };
+    }
+  }
+
+  @Module({ controllers: [RolesClassController] })
+  class RolesClassModule {}
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: OneBunApplication<any, any>;
+
+  beforeAll(async () => {
+    app = new OneBunApplication(RolesClassModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer() as never,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+  });
+
+  afterAll(async () => {
+    await app?.stop();
+  });
+
+  it('answers 500 on every request and never reaches the handler', async () => {
+    const response = await fetch(`${app.getHttpUrl()}/roles-class/`);
+
+    // The constructor's TypeError is a guard throw, which on HTTP travels to the exception
+    // filters: a 500, and the handler is never reached.
+    expect(response.status).toBe(HTTP_ERROR);
+    expect(reached).toBe(0);
   });
 });
 

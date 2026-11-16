@@ -27,8 +27,17 @@ import {
   type NackAwareMessage,
 } from '../ack-mode';
 import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
-import { resolveMaxAttempts, retryDelayMs } from '../retry';
+import { QueuePublishError } from '../publish-error';
+import {
+  isLastAttempt,
+  resolveMaxAttempts,
+  retryDelayMs,
+  validateRetryOptions,
+  UNLIMITED_ATTEMPTS,
+} from '../retry';
 import { QueueScheduler } from '../scheduler';
+
+const NOT_CONNECTED_MESSAGE = 'InMemoryQueueAdapter not connected. Call connect() first.';
 
 // ============================================================================
 // Types
@@ -40,6 +49,30 @@ interface SubscriptionEntry {
   options?: SubscribeOptions;
   matcher: (topic: string) => QueuePatternMatch;
   paused: boolean;
+  /**
+   * Pending background retries of a subscription with no attempts limit, so removing the
+   * subscription — or disconnecting the adapter — can cancel them. A pending timer keeps the
+   * process alive, and an uncancelled one would re-arm itself forever.
+   */
+  retryTimers: Set<ReturnType<typeof setTimeout>>;
+  /**
+   * Background retries that came due while the subscription was paused. Held, not delivered and
+   * not re-armed, until `resume()` — the in-process counterpart of a paused Redis subscription,
+   * whose retries wait in Redis because a paused subscription does not drain.
+   */
+  heldRetries: Array<() => void>;
+}
+
+/**
+ * The longest delay a timer honours. Bun, like Node, fires a `setTimeout` above 2^31 - 1 ms after
+ * 1 ms instead, so an exponential ladder with no last attempt would turn into a 1 ms retry loop
+ * once its wait outgrew this; capping the timer keeps the longest wait the runtime can express.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647; // 2^31 - 1
+
+/** `ms`, capped at the longest delay a timer honours. */
+function timerDelay(ms: number): number {
+  return Math.min(ms, MAX_TIMER_DELAY_MS);
 }
 
 interface DelayedMessage {
@@ -59,6 +92,8 @@ interface DelayedMessage {
 class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The topic passed to `publish()`: an in-process bus has no subject of its own. */
+  readonly subject: string;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -88,6 +123,7 @@ class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.subject = pattern;
     this.params = params;
     this.data = data;
     this.timestamp = Date.now();
@@ -135,6 +171,7 @@ class InMemorySubscription implements Subscription {
   constructor(
     private readonly entry: SubscriptionEntry,
     private readonly onUnsubscribe: () => void,
+    private readonly onResume: () => void,
   ) {}
 
   async unsubscribe(): Promise<void> {
@@ -148,6 +185,7 @@ class InMemorySubscription implements Subscription {
 
   resume(): void {
     this.entry.paused = false;
+    this.onResume();
   }
 
   get pattern(): string {
@@ -242,7 +280,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       this.delayedInterval = undefined;
     }
 
-    // Clear all subscriptions
+    // Clear all subscriptions, and the background retries that would otherwise outlive them
+    for (const entry of this.subscriptions) {
+      this.cancelRetries(entry);
+    }
     this.subscriptions = [];
     this.delayedMessages = [];
 
@@ -257,8 +298,20 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message to every matching subscription in this process.
+   *
+   * A handler's failure is reported through the queue events, never thrown from here.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when the adapter is not connected — the only way an
+   *   in-process publish fails.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     const messageId = options?.messageId ?? this.generateMessageId();
 
@@ -322,6 +375,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     options?: SubscribeOptions,
   ): Promise<Subscription> {
     this.ensureConnected();
+    validateRetryOptions(options?.retry, pattern);
 
     const entry: SubscriptionEntry = {
       pattern,
@@ -329,16 +383,26 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       options,
       matcher: createQueuePatternMatcher(pattern),
       paused: false,
+      retryTimers: new Set(),
+      heldRetries: [],
     };
 
     this.subscriptions.push(entry);
 
-    const subscription = new InMemorySubscription(entry, () => {
-      const index = this.subscriptions.indexOf(entry);
-      if (index !== -1) {
-        this.subscriptions.splice(index, 1);
-      }
-    });
+    const subscription = new InMemorySubscription(
+      entry,
+      () => {
+        this.cancelRetries(entry);
+
+        const index = this.subscriptions.indexOf(entry);
+        if (index !== -1) {
+          this.subscriptions.splice(index, 1);
+        }
+      },
+      () => {
+        this.releaseHeldRetries(entry);
+      },
+    );
 
     return subscription;
   }
@@ -389,7 +453,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('InMemoryQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 
@@ -496,16 +560,85 @@ export class InMemoryQueueAdapter implements QueueAdapter {
 
       await message.nack(false);
 
-      if (attempt >= maxAttempts) {
+      if (isLastAttempt(attempt, maxAttempts)) {
         // Exhausted. This adapter reports `supports('dead-letter-queue') === false`, and that
         // stays true: the message is dropped, having been reported through `onMessageFailed`
         // on every attempt.
         return;
       }
 
-      await this.sleep(retryDelayMs(entry.options?.retry, attempt));
+      const delayMs = retryDelayMs(entry.options?.retry, attempt, maxAttempts);
+
+      if (maxAttempts === UNLIMITED_ATTEMPTS) {
+        // Not awaited. A capped retry runs inside the `publish()` that delivered the message, and
+        // ends; an endless one awaited there would never let `publish()` resolve, would hold the
+        // message back from every subscription after this one, and with a zero delay would spin
+        // in microtasks without ever yielding to the event loop.
+        this.armRetry(entry, () => {
+          void this.deliver(entry, pattern, params, data, messageId, metadata, attempt + 1);
+        }, delayMs);
+
+        return;
+      }
+
+      await this.sleep(delayMs);
       await this.deliver(entry, pattern, params, data, messageId, metadata, attempt + 1);
     }
+  }
+
+  /**
+   * Run `redeliver` for a subscription with no attempts limit, on a timer of its own.
+   *
+   * A timer even for a zero delay, so every attempt yields to the event loop. Nothing is armed
+   * for a subscription that is no longer registered — a handler still running when its
+   * subscription was removed fails into here, and an untracked timer would keep the process
+   * alive for the whole delay — and a timer that fires after the removal does nothing: a retry
+   * with no last attempt would otherwise run for the life of the process against a handler
+   * nobody subscribes any more. A retry that comes due while the subscription is paused is held
+   * until `resume()`.
+   */
+  private armRetry(entry: SubscriptionEntry, redeliver: () => void, delayMs: number): void {
+    if (!this.isRegistered(entry)) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      entry.retryTimers.delete(timer);
+
+      if (!this.isRegistered(entry)) {
+        return;
+      }
+
+      if (entry.paused) {
+        entry.heldRetries.push(redeliver);
+
+        return;
+      }
+
+      redeliver();
+    }, timerDelay(delayMs));
+
+    entry.retryTimers.add(timer);
+  }
+
+  /** Re-arm, with no further wait, every retry that came due while `entry` was paused. */
+  private releaseHeldRetries(entry: SubscriptionEntry): void {
+    for (const redeliver of entry.heldRetries.splice(0)) {
+      this.armRetry(entry, redeliver, 0);
+    }
+  }
+
+  /** Cancel every pending background retry of `entry`, held ones included. */
+  private cancelRetries(entry: SubscriptionEntry): void {
+    for (const timer of entry.retryTimers) {
+      clearTimeout(timer);
+    }
+    entry.retryTimers.clear();
+    entry.heldRetries.length = 0;
+  }
+
+  private isRegistered(entry: SubscriptionEntry): boolean {
+    return this.connected && this.subscriptions.includes(entry);
   }
 
   /** Awaitable pause that resolves immediately for a zero delay, so `retry` without a `delay` costs no tick. */
@@ -515,7 +648,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     }
 
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, ms);
+      setTimeout(resolve, timerDelay(ms));
     });
   }
 

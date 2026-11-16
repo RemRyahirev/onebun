@@ -43,8 +43,10 @@ import {
   registerDependencies,
   RoomName,
   Service,
+  UseGuards,
   UseWsGuards,
   WebSocketGateway,
+  WsAuthGuard,
   WsPermissionGuard,
 } from '@onebun/core';
 import { makeMockLoggerLayer } from '@onebun/core/testing';
@@ -937,6 +939,288 @@ describe('docs/api/websocket.md', () => {
 
       first.disconnect();
       second.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * A guard on `@OnJoinRoom` is asked before the join: the client it denies gets the FORBIDDEN
+   * frame and is not in the room, so the room's broadcasts never reach it. The handler runs after
+   * the join of a client the guard allows.
+   *
+   * @source docs:api/websocket.md#room-joins-and-leaves
+   */
+  it('keeps a client the join guard denies out of the room and answers it FORBIDDEN', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      vipOne: { id: 'u-vip-1', permissions: ['rooms:vip'] },
+      vipTwo: { id: 'u-vip-2', permissions: ['rooms:vip'] },
+      basic: { id: 'u-basic', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    @WebSocketGateway({
+      path: '/ws',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id, permissions: user.permissions } : null;
+      },
+    })
+    class LoungeGateway extends BaseWebSocketGateway {
+      // Asked before the join: without `rooms:vip` the client stays out of every `vip:*` room.
+      @UseWsGuards(new WsPermissionGuard('rooms:vip'))
+      @OnJoinRoom('vip:*')
+      handleVipJoin(@Client() client: WsClientData, @RoomName() room: string) {
+        // Runs after the join, so the joining client is excluded by id.
+        this.emitToRoom(room, 'user:joined', { userId: client.auth?.userId }, [client.id]);
+
+        return { event: 'room:joined', data: { room } };
+      }
+    }
+
+    @Module({ controllers: [LoungeGateway] })
+    class LoungeModule {}
+
+    const app = new OneBunApplication(LoungeModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    const connect = async (token: string) => {
+      const client = createNativeWsClient({ url: wsUrl(app, '/ws'), auth: { token }, timeout: CLIENT_TIMEOUT_MS });
+      const joined: JsonRecord[] = [];
+      client.on<JsonRecord>('user:joined', (data) => joined.push(data));
+      await client.connect();
+
+      return { client, joined };
+    };
+
+    try {
+      const first = await connect('vipOne');
+      const basic = await connect('basic');
+      const second = await connect('vipTwo');
+      const forbidden = { code: 'FORBIDDEN', event: 'join', message: 'Guard denied this message' };
+
+      expect(await first.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual({ room: 'vip:lounge' });
+      expect(await basic.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual(forbidden);
+
+      // The second member's join reaches the first member, who is in the room...
+      expect(await second.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual({ room: 'vip:lounge' });
+      expect(await waitUntil(() => first.joined[0], 'user:joined')).toEqual({ userId: 'u-vip-2' });
+
+      // ...and not the denied client. Its next reply is sent after that broadcast, so anything
+      // the broadcast had addressed to it would have arrived first.
+      expect(await basic.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual(forbidden);
+      expect(basic.joined).toEqual([]);
+
+      first.client.disconnect();
+      basic.client.disconnect();
+      second.client.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * A gateway-level guard decides every client join, also of a room no `@OnJoinRoom` handler
+   * matches: `noUserRoomJoins` keeps clients out of the `user:<id>` rooms only the server fills,
+   * whichever way the client names the room, and `WsAuthGuard` keeps an anonymous client out of
+   * every room. The server-side join in `@OnConnect` asks neither.
+   *
+   * @source docs:api/websocket.md#room-joins-and-leaves
+   */
+  it('lets the gateway-level guards decide a join of a room no @OnJoinRoom handler matches', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      alice: { id: 'u-alice', permissions: [] },
+      bob: { id: 'u-bob', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    // `user:<id>` rooms are filled by the server alone. `getRoomName()` is the room the join would
+    // add the client to, however the client spelled it; on a message handler it is undefined.
+    const noUserRoomJoins = createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:'));
+
+    @WebSocketGateway({
+      path: '/inbox',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id, permissions: user.permissions } : null;
+      },
+    })
+    // Asked on every client join of this gateway, and before each of its handlers.
+    @UseGuards(WsAuthGuard, noUserRoomJoins)
+    class InboxGateway extends BaseWebSocketGateway {
+      @OnConnect()
+      async handleConnect(@Client() client: WsClientData) {
+        // A server-side join asks no guard: only the server puts a client in its `user:<id>` room.
+        await this.joinRoom(client.id, `user:${client.auth?.userId}`);
+      }
+
+      @OnJoinRoom('thread:{threadId}')
+      handleThreadJoin(@RoomName() room: string) {
+        return { event: 'thread:joined', data: { room } };
+      }
+    }
+
+    @Module({ controllers: [InboxGateway] })
+    class InboxModule {}
+
+    const app = new OneBunApplication(InboxModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    const connect = async (token?: string) => {
+      const client = createNativeWsClient({
+        url: wsUrl(app, '/inbox'),
+        ...(token ? { auth: { token } } : {}),
+        timeout: CLIENT_TIMEOUT_MS,
+      });
+      const notes: JsonRecord[] = [];
+      client.on<JsonRecord>('note', (data) => notes.push(data));
+      await client.connect();
+
+      return { client, notes };
+    };
+
+    try {
+      const alice = await connect('alice');
+      const bob = await connect('bob');
+      const anonymous = await connect();
+      const forbidden = (event: string) => ({ code: 'FORBIDDEN', event, message: 'Guard denied this message' });
+
+      // A room a handler declares: open to an authenticated client, closed to an anonymous one.
+      expect(await bob.client.emit<JsonRecord>('join', 'thread:1')).toEqual({ room: 'thread:1' });
+      expect(await anonymous.client.emit<JsonRecord>('join', 'thread:1')).toEqual(forbidden('join'));
+      // A `user:` room no handler declares: closed to every client, whatever the message says.
+      const spellings: [string, unknown][] = [
+        ['join', 'user:u-bob'],
+        ['join', { room: 'user:u-bob' }],
+        ['join:user:u-bob', undefined],
+        ['join:user:u-bob', { room: '' }],
+        ['join:user:u-bob', 5],
+        ['join:user:u-bob', []],
+        ['join:user:u-bob', {}],
+        // Data that names a room wins over the event.
+        ['join:lobby', 'user:u-bob'],
+      ];
+      for (const [event, data] of spellings) {
+        expect(await alice.client.emit<JsonRecord>(event, data)).toEqual(forbidden(event));
+      }
+
+      // The server put bob in his own room; the raw topic follows that membership.
+      const server = app.getServer();
+      await waitUntil(() => {
+        server?.publish('user:u-bob', JSON.stringify({ event: 'note', data: { to: 'u-bob' } }));
+
+        return bob.notes[0];
+      }, 'the note to bob');
+      // Alice's next reply is sent after those publishes, so a note addressed to her would be in first.
+      expect(await alice.client.emit<JsonRecord>('join', 'user:u-bob')).toEqual(forbidden('join'));
+      expect(alice.notes).toEqual([]);
+
+      alice.client.disconnect();
+      bob.client.disconnect();
+      anonymous.client.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * `io('https://host/admin', { query: { token } })` upgrades on the shared Socket.IO path — bound
+   * to the first registered gateway, `public` — and then sends `40/admin,`. The admin gateway's own
+   * hook decides who the connection is there: an admin token is admitted with the admin identity
+   * the guard reads, any other token is answered `connect_error` "Unauthorized" and stays on
+   * `public`.
+   *
+   * @source docs:api/websocket.md#moving-to-another-namespace
+   */
+  it('authenticates a Socket.IO connection with the hook of the gateway its CONNECT moves it to', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      root: { id: 'u-root', permissions: ['admin'] },
+      guest: { id: 'u-guest', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    @WebSocketGateway({
+      path: '/ws',
+      namespace: 'public',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id } : null;
+      },
+    })
+    class PublicGateway extends BaseWebSocketGateway {}
+
+    @WebSocketGateway({
+      path: '/ws',
+      namespace: 'admin',
+      // Runs at upgrade for `?namespace=admin`, and at a CONNECT that moves a connection here.
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+        if (!user?.permissions.includes('admin')) {
+          return false; // connect_error "Unauthorized"
+        }
+
+        return { userId: user.id, permissions: user.permissions };
+      },
+    })
+    class AdminGateway extends BaseWebSocketGateway {
+      @UseWsGuards(new WsPermissionGuard('admin'))
+      @OnMessage('audit')
+      handleAudit(@Client() client: WsClientData) {
+        return { event: 'audit:ok', data: { by: client.auth?.userId } };
+      }
+    }
+
+    @Module({ controllers: [PublicGateway, AdminGateway] })
+    class MoveModule {}
+
+    const app = new OneBunApplication(MoveModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: { socketio: { enabled: true, path: '/socket.io' } },
+    });
+
+    await app.start();
+
+    const open = async (token: string) => {
+      const raw = openRawSocket(`${wsUrl(app, '/socket.io')}/?EIO=4&transport=websocket&token=${token}`);
+      await raw.opened;
+      await waitUntil(() => raw.frames.find((f) => f.startsWith('0')), 'engine.io OPEN');
+
+      return raw;
+    };
+
+    try {
+      const root = await open('root');
+      root.send('40/admin,');
+      await waitUntil(() => root.frames.find((f) => f.startsWith('42/admin,["connect"')), 'the admin CONNECT');
+      root.send('421["audit",{}]');
+      const audit = await waitUntil(() => root.frames.find((f) => f.startsWith('431')), 'audit ack');
+      expect(JSON.parse(audit.slice(3))).toEqual([{ event: 'audit:ok', data: { by: 'u-root' } }]);
+
+      const guest = await open('guest');
+      guest.send('40/admin,');
+      const refusal = await waitUntil(() => guest.frames.find((f) => f.startsWith('44/admin,')), 'connect_error');
+      expect(JSON.parse(refusal.slice('44/admin,'.length))).toEqual([{ message: 'Unauthorized' }]);
+
+      // Still on the public gateway: the CONNECT that names it is served.
+      guest.send('40/public,');
+      await waitUntil(() => guest.frames.find((f) => f.startsWith('42/public,["connect"')), 'the public CONNECT');
+
+      root.close();
+      guest.close();
     } finally {
       await app.stop();
     }

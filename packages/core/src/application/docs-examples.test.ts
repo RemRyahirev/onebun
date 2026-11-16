@@ -28,25 +28,34 @@ import type {
   OneBunResponse,
 } from '@onebun/core';
 import {
+  ApiResponse,
+  BadGatewayError,
+  BadRequestError,
   BaseController,
   BaseMiddleware,
   BaseService,
   Body,
+  ConflictError,
   Controller,
   createHttpClient,
   Delete,
   Effect,
   Env,
   EnvValidationError,
+  ForbiddenError,
+  GatewayTimeoutError,
   Get,
   getControllerMetadata,
   getServiceTag,
+  getTransportFailureKind,
   Header,
   HttpException,
   HttpMethod,
   HttpStatusCode,
+  HttpStatusError,
   InternalServerError,
   isErrorResponse,
+  isHttpClientFailure,
   Layer,
   Middleware,
   Module,
@@ -59,9 +68,15 @@ import {
   Put,
   Query,
   Service,
+  ServiceUnavailableError,
+  TooManyRequestsError,
+  TRANSPORT_FAILURE_CODE,
+  TransportError,
   type,
+  UnauthorizedError,
   UseMiddleware,
   validate,
+  withoutTransportDetails,
 } from '@onebun/core';
 import { makeMockLoggerLayer } from '@onebun/core/testing';
 import * as envs from '@onebun/envs';
@@ -1324,6 +1339,130 @@ describe('Complete controller example (docs/api/controllers.md)', () => {
 });
 
 // ============================================================================
+// docs/api/controllers.md — One envelope rule
+// ============================================================================
+
+describe('One envelope rule (docs/api/controllers.md)', () => {
+  const declined = { success: false, error: 'CARD_DECLINED', code: 7 };
+
+  /**
+   * @source docs:api/controllers.md#one-envelope-rule
+   */
+  it('should wrap a success-keyed value on every route and send only a Response as it is', async () => {
+    @Controller('/payments')
+    class PaymentController extends BaseController {
+      @Get('/last')
+      last() {
+        return { success: false, error: 'CARD_DECLINED', code: 7 };
+      }
+
+      @Get('/search')
+      search(@Query('q') _q?: string) {
+        return { success: false, error: 'CARD_DECLINED', code: 7 };
+      }
+
+      @Get('/legacy')
+      legacy() {
+        return Response.json({ success: false, error: 'CARD_DECLINED', code: 7 });
+      }
+    }
+
+    @Module({ controllers: [PaymentController] })
+    class PaymentModule {}
+
+    const app = new OneBunApplication(PaymentModule, appOptions());
+
+    try {
+      await app.start();
+      const base = `${app.getHttpUrl()}/payments`;
+
+      const last = await fetch(`${base}/last`);
+      const lastBody = await last.text();
+      expect(last.status).toBe(HttpStatusCode.OK);
+      expect(lastBody).toBe('{"success":true,"result":{"success":false,"error":"CARD_DECLINED","code":7}}');
+
+      // Byte for byte the same body with a decorated parameter
+      const search = await fetch(`${base}/search?q=visa`);
+      expect(search.status).toBe(HttpStatusCode.OK);
+      expect(await search.text()).toBe(lastBody);
+
+      const legacy = await fetch(`${base}/legacy`);
+      expect(legacy.status).toBe(HttpStatusCode.OK);
+      expect(await legacy.text()).toBe('{"success":false,"error":"CARD_DECLINED","code":7}');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/controllers.md#one-envelope-rule
+   */
+  it('should wrap the argument of this.json() and validate an @ApiResponse schema against the result', async () => {
+    const receiptSchema = type({ id: 'string', amount: 'number' });
+
+    @Controller('/receipts')
+    class ReceiptController extends BaseController {
+      // `json()` builds a Response, but one that already holds the envelope
+      @Get('/helper')
+      helper() {
+        return this.json(declined, HttpStatusCode.CREATED);
+      }
+
+      // The documented way to send a body of your own shape
+      @Get('/own')
+      own() {
+        return Response.json(declined, { status: HttpStatusCode.CREATED });
+      }
+
+      // The schema describes the handler's value: the `result`, not the envelope
+      @Get('/:id')
+      @ApiResponse(HttpStatusCode.OK, { schema: receiptSchema })
+      find(@Param('id') id: string) {
+        return { id, amount: 10 };
+      }
+
+      // An envelope returned to satisfy an envelope schema is wrapped a second time
+      @Get('/wrapped/:id')
+      @ApiResponse(HttpStatusCode.OK, { schema: type({ success: 'boolean', result: receiptSchema }) })
+      findWrapped(@Param('id') id: string) {
+        return { success: true, result: { id, amount: 10 } };
+      }
+    }
+
+    @Module({ controllers: [ReceiptController] })
+    class ReceiptModule {}
+
+    const app = new OneBunApplication(ReceiptModule, appOptions());
+
+    try {
+      await app.start();
+      const base = `${app.getHttpUrl()}/receipts`;
+
+      const helper = await fetch(`${base}/helper`);
+      expect(helper.status).toBe(HttpStatusCode.CREATED);
+      expect(await helper.json()).toEqual({ success: true, result: declined });
+
+      const own = await fetch(`${base}/own`);
+      expect(own.status).toBe(HttpStatusCode.CREATED);
+      expect(await own.json()).toEqual(declined);
+
+      const found = await fetch(`${base}/r1`);
+      expect(found.status).toBe(HttpStatusCode.OK);
+      expect(await found.json()).toEqual({ success: true, result: { id: 'r1', amount: 10 } });
+
+      const wrapped = await fetch(`${base}/wrapped/r1`);
+      expect(wrapped.status).toBe(HttpStatusCode.OK);
+      expect(await wrapped.json()).toEqual({
+        success: true,
+        result: { success: true, result: { id: 'r1', amount: 10 } },
+      });
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
+// ============================================================================
 // docs/api/core.md — Quick Reference for AI
 // ============================================================================
 
@@ -1850,13 +1989,27 @@ describe('Core re-exports (docs/api/core.md)', () => {
     expect(Env).toBe(envs.Env);
     expect(EnvValidationError).toBe(envs.EnvValidationError);
 
-    // From @onebun/requests
+    // From @onebun/requests: the client, and the error family it rejects with
+    expect(BadGatewayError).toBe(requests.BadGatewayError);
+    expect(BadRequestError).toBe(requests.BadRequestError);
+    expect(ConflictError).toBe(requests.ConflictError);
     expect(createHttpClient).toBe(requests.createHttpClient);
+    expect(ForbiddenError).toBe(requests.ForbiddenError);
+    expect(GatewayTimeoutError).toBe(requests.GatewayTimeoutError);
+    expect(getTransportFailureKind).toBe(requests.getTransportFailureKind);
     expect(HttpStatusCode).toBe(requests.HttpStatusCode);
+    expect(HttpStatusError).toBe(requests.HttpStatusError);
     expect(InternalServerError).toBe(requests.InternalServerError);
     expect(isErrorResponse).toBe(requests.isErrorResponse);
+    expect(isHttpClientFailure).toBe(requests.isHttpClientFailure);
     expect(NotFoundError).toBe(requests.NotFoundError);
     expect(OneBunBaseError).toBe(requests.OneBunBaseError);
+    expect(ServiceUnavailableError).toBe(requests.ServiceUnavailableError);
+    expect(TooManyRequestsError).toBe(requests.TooManyRequestsError);
+    expect(TRANSPORT_FAILURE_CODE).toBe(requests.TRANSPORT_FAILURE_CODE);
+    expect(TransportError).toBe(requests.TransportError);
+    expect(UnauthorizedError).toBe(requests.UnauthorizedError);
+    expect(withoutTransportDetails).toBe(requests.withoutTransportDetails);
 
     // From effect
     expect(Effect).toBe(effect.Effect);

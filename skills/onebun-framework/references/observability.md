@@ -112,8 +112,8 @@ needs both or a `traceparent`.
   dispatch arm). The flip side: `{ ...response }` loses it — read it before copying, and never spread it back
   in to "keep" it (that makes it serializable again). `toEqual` ignores it; assert the header directly.
   `Bun.inspect`, `console.log` and `toMatchSnapshot` DO show it (`set-cookie`, `date`): log or snapshot
-  `{ ...response }` or the fields you need. `RequestsService` returns `result` only (no headers);
-  `HttpClient` and the service client carry them. `SuccessResponse.headers` exists since 0.8.2.
+  `{ ...response }` or the fields you need. `RequestsService` and the service client return the value only
+  (no headers); `HttpClient` carries them. `SuccessResponse.headers` exists since 0.8.2.
 - **An `HTTP_ERROR`'s `details.headers` is a different record**: enumerable, and a repeated `set-cookie` keeps
   only its last value. The error object keeps it, `details.url` and the upstream body; the default exception
   filter leaves those out of the caller's body when a client error escapes a controller (`withoutTransportDetails`,
@@ -156,9 +156,10 @@ needs both or a `traceparent`.
   resolves `result: undefined` so the `Location` survives — a 200/300 like that is still
   `RESPONSE_PARSE_ERROR`), metrics record the 3xx with `success: true`; `req()` returns the 3xx body.
   `RequestsService` returns `result` alone, so under `'manual'` it yields only the 3xx body — no status, no
-  `Location`: read redirects through `HttpClient` (or the service client, which returns the envelope).
-  `RequestsService` fails a refused redirect with a `OneBunBaseError` (`code` 500 as for every non-mapped
-  status, the 3xx in `details.status`). The `redirect` option exists since 0.8.2.
+  `Location`: read redirects through `HttpClient` (the service client resolves the handler's value alone too).
+  `RequestsService`, and every Promise method of `HttpClient`, fail a refused redirect with an
+  `HttpStatusError` whose `code` is the 3xx (also in `details.status`). The `redirect` option exists since
+  0.8.2.
 - **`maxResponseBytes` caps the DECODED body while it is read** (client option, or per request; the request's
   wins, `Infinity` is the same as unset — that request takes `fetch`'s path). Off by default — an uncapped
   request keeps `fetch`'s path exactly. Set, the request goes out with `decompress: false` and
@@ -186,9 +187,12 @@ needs both or a `traceparent`.
   undefined, { responseType: 'stream' })`). Under `'stream'` `timeout` is NOT a whole-response deadline: it bounds
   the wait for the headers, then each read's wait for the next chunk (restarted per read, stopped while nobody
   reads — the stream is pulled on demand), so a flowing SSE lives on and a stalled one errors `TIMEOUT_ERROR`
-  (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the plain `ErrorResponse`
-  object (`isErrorResponse(e)`), not an `Error`: `TIMEOUT_ERROR`, `RESPONSE_TOO_LARGE` (under `maxResponseBytes`,
-  counted as read; the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR`, `RESPONSE_READ_ERROR`. An
+  (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the `OneBunBaseError` the
+  Promise API rejects with for that failure, whichever API made the call (`isErrorResponse(e)` is false for
+  it): `TIMEOUT_ERROR` is a `TransportError`
+  (`getTransportFailureKind(e) === 'timeout'`); `RESPONSE_TOO_LARGE` (under `maxResponseBytes`, counted as read;
+  the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR` and `RESPONSE_READ_ERROR` carry the status that
+  arrived as `code` (a 200 is an `HttpStatusError`); `e.error` and `e.details` are the record's. An
   error status is read as under `'auto'` in every mode (`HTTP_ERROR` with `details.details`, retried per
   `retryOn`); a declared `Content-Length` over the cap fails the call. Nothing after the hand-over is retried,
   and the metrics duration is the time to the headers. Read to the end or cancel (`cancel()`, `break` in
@@ -216,6 +220,30 @@ needs both or a `traceparent`.
   not exempt it). A `custom` auth interceptor may set or replace it, not remove it: a config it returns without
   one (rebuilt as `{ method, url, headers }`, or `connectAddress: undefined`) keeps the caller's. Allow/deny
   policy and the lookup stay in the app; the service client has no per-call config, so use `HttpClient`.
+- **Request bodies** (`post`/`put`/`patch` payload = `config.data`; only POST/PUT/PATCH send one): a
+  `Uint8Array` (`Buffer` included), an `ArrayBuffer` or a `Blob` (`Bun.file()`, `file.slice(a, b)`) goes out
+  as its exact bytes, NOT through `JSON.stringify` (which would make `{"0":0,"1":255}` of `Uint8Array([0,255])`
+  and `{"type":"Buffer","data":[…]}` of a `Buffer`). A string goes as is, anything else as `JSON.stringify`
+  makes it — once per call, not per attempt; a value with a `toJSON` is a JSON value whatever else it is
+  (`URLSearchParams`/`FormData` go as a JSON object of their entries, never as a form), and `Map`/`Set` still
+  go as `{}`. **Content-Type**: exactly one is sent, names matched in any letter case — the request's, else
+  the client's, else the default: `application/json` for text/JSON (and no body), `application/octet-stream`
+  for bytes, a `Blob`'s own `type` when it has one. A request `content-type` replaces a client `Content-Type`
+  (kept side by side, `fetch` joins them into `application/json, application/octet-stream`, and an `onebun`
+  signature then fails `signature-mismatch`). So **never put `Content-Type` in the client's `headers`**: it
+  labels every body, binary ones included. Every attempt, every 307/308 hop and every `onebun` signature carry
+  the same bytes; a `Blob` is read once, whole, into memory before the first attempt, within `timeout` (a read
+  that outlives it fails `TIMEOUT_ERROR`, `code: 0`, `details.phase: 'request-body'`, not retried; the read is
+  abandoned, not cancelled). A `Uint8Array`/`ArrayBuffer` is sent without a copy: do not mutate it until the
+  call settles, or the retry sends (and signs) the change. Refused before anything is sent — `REQUEST_CONFIG_ERROR`,
+  `code: 500`, `details { option: 'data', reason, url, type? | details? }`, no retry, no metrics:
+  `'unsupported-body'` (a `ReadableStream`, a Node.js `Readable` — every Node.js readable stream — or an async
+  generator object, none with a `toJSON`; a data class that merely has an async iterator, a cursor say, is NOT
+  refused and goes as JSON of its fields; another typed array — wrap it as `new Uint8Array(v.buffer, v.byteOffset, v.byteLength)`;
+  a `DataView`; a `SharedArrayBuffer`; `details.type` names it), `'unserializable-body'` (`JSON.stringify`
+  throws: `BigInt`, a cycle), `'unreadable-body'` (the `Blob` read failed — `details.details` is the error, an
+  `ENOENT` names the path; it is a transport detail the default filter withholds). A stream cannot be replayed
+  or signed in advance: send the `Blob` it came from, or read it into a `Uint8Array` first.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header
@@ -338,6 +366,12 @@ Implementation details:
   `shutdown()` after a `'flush'` one shuts down exactly what the flush left running
 - On `app.stop()`, provider is shut down (flushes pending spans), then `trace.disable()` clears the global —
   not reached if that flush rejects
+
+## Console Log Streams
+
+The console transport writes each record plus a newline through `process.stdout` (`trace`, `debug`, `info`) or
+`process.stderr` (`warn`, `error`, `fatal`), in pretty and JSON format alike. A log line is not a readiness signal
+for another process (a pipe buffers until its reader catches up): probe the service over HTTP instead.
 
 ## OTLP Log Transport
 

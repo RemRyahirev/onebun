@@ -145,15 +145,20 @@ export class OrderService extends BaseService {
     userId: string;
     items: Array<{ productId: string; quantity: number; price: number }>;
   }): Promise<Order> {
-    // Verify user exists by calling Users service
-    const userResponse = await this.usersClient.get<User>(`/users/${data.userId}`);
-
-    if (isErrorResponse(userResponse)) {
-      this.logger.warn('User not found', { userId: data.userId });
-      throw new Error('User not found');
+    // Verify user exists by calling Users service. A failed request rejects: an unknown user is
+    // the Users service's 404, a NotFoundError. req() resolves the body, which a OneBun service
+    // sends as its envelope, { success: true, result: user }
+    let user: User;
+    try {
+      user = (await this.usersClient.req<{ result: User }>('GET', `/users/${data.userId}`)).result;
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        this.logger.warn('User not found', { userId: data.userId });
+        throw new Error('User not found');
+      }
+      throw error;
     }
 
-    const user = userResponse.result;
     this.logger.info('User verified', { userId: user.id, name: user.name });
 
     // Calculate total and create order...
@@ -420,7 +425,8 @@ const usersClient = createHttpClient({
   baseUrl: app.getServiceUrl('users'), // Returns externalServiceUrls.users or local URL
 });
 
-const user = await usersClient.get(`/users/${userId}`);
+// A OneBun service answers { success: true, result: user }, and req() resolves that body
+const { result: user } = await usersClient.req<{ result: User }>('GET', `/users/${userId}`);
 ```
 
 ---

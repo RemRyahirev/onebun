@@ -5,22 +5,29 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
- * Why a transaction on SQLite is refused rather than executed.
+ * Why a transaction is refused rather than executed.
  *
  * @see docs:api/drizzle.md
  */
 export type DrizzleTransactionErrorCode =
-  /** A synchronous statement was issued while a transaction holds the connection. */
+  /** SQLite: a synchronous statement was issued while a transaction holds the connection. */
   | 'SQLITE_TRANSACTION_SYNC_QUERY'
-  /** `transaction()` was called from inside a transaction callback. */
-  | 'SQLITE_TRANSACTION_NESTED';
+  /** SQLite: `transaction()` was called from inside a transaction callback. */
+  | 'SQLITE_TRANSACTION_NESTED'
+  /** SQLite: `transaction()` was given options, which are PostgreSQL settings. */
+  | 'SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED'
+  /** PostgreSQL: a nested `transaction()` asked for settings the enclosing one does not run under. */
+  | 'POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH'
+  /** Either dialect: an option `transaction()` does not know, or a value it does not accept. */
+  | 'TRANSACTION_OPTIONS_INVALID';
 
 /**
- * A transaction on SQLite could not be carried out as asked.
+ * A transaction could not be carried out as asked.
  *
- * Thrown instead of deadlocking or of silently enrolling a query in someone else's
- * transaction. `name` is stable (`DrizzleTransactionError`) so it can be matched without
- * importing the class, and `code` says which of the three situations it is.
+ * Thrown instead of deadlocking, of silently enrolling a query in someone else's transaction,
+ * or of running a transaction under settings other than the ones requested. `name` is stable
+ * (`DrizzleTransactionError`) so it can be matched without importing the class, and `code`
+ * says which situation it is.
  *
  * @see docs:api/drizzle.md
  */

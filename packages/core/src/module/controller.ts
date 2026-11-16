@@ -199,6 +199,11 @@ export class Controller {
 
   /**
    * Create standardized success response
+   *
+   * The body is `{ success: true, result }` — the same envelope a plain return value gets, so
+   * `result` is wrapped even when it is an envelope itself. Only the status differs from returning
+   * `result`. To send JSON of another shape, return `Response.json(body, { status })`.
+   *
    * @param result - The result data
    * @param status - The HTTP status code
    * @returns A Response object
@@ -236,6 +241,9 @@ export class Controller {
 
   /**
    * Create JSON response (legacy method, use success() instead)
+   *
+   * An alias of `success()`: the body is `{ success: true, result: data }`, not `data` itself.
+   *
    * @param data - The data to return
    * @param status - The HTTP status code
    * @returns A Response object

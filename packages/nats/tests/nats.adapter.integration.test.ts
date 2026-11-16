@@ -4,6 +4,7 @@
  * Tests using testcontainers for real NATS server integration
  */
 
+import { headers } from '@nats-io/transport-node';
 import {
   afterAll,
   afterEach,
@@ -19,8 +20,54 @@ import type { Message } from '@onebun/core';
 import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
 
 
-import { createNatsClient } from '../src/nats-client';
+import {
+  createNatsClient,
+  type NatsClient,
+  type NatsMessage,
+} from '../src/nats-client';
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
+
+/**
+ * Kept below bun's default 5s per-test timeout, so a predicate that never holds fails the case
+ * with pollUntil's own message rather than with a bare "timed out" and the reason lost.
+ */
+const POLL_DEADLINE_MS = 3_000;
+const POLL_INTERVAL_MS = 10;
+/** A cold image pull outlasts bun's default hook timeout by far. */
+const CONTAINER_BOOT_MS = 120_000;
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
+
+/** Polls instead of sleeping for a guessed duration, so a slow container costs latency, not a flake. */
+async function pollUntil(predicate: () => boolean): Promise<void> {
+  const startedAt = Date.now();
+
+  while (!predicate()) {
+    if (Date.now() - startedAt > POLL_DEADLINE_MS) {
+      throw new Error(`pollUntil: predicate did not hold within ${POLL_DEADLINE_MS}ms`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+
+/**
+ * Returns once the server has registered every subscription `client` has sent so far.
+ *
+ * `subscribe()` resolves when the SUB is queued on the subscriber's own connection, not when the
+ * server has it. A publish on that same connection is ordered behind it; one on another
+ * connection is not, and can reach the server first — the message is then dropped, and a
+ * request is rejected at once with no responders. A flush is a round trip on the subscriber's
+ * connection, which the server answers only after processing everything sent before it.
+ */
+async function subscriptionsRegistered(client: NatsClient): Promise<void> {
+  await client.getConnection().flush();
+}
+
+/** The adapter's own client, which it keeps private — needed only to flush its subscriptions. */
+function clientOf(queue: NatsQueueAdapter): NatsClient {
+  return (queue as unknown as { client: NatsClient }).client;
+}
 
 describe('NatsQueueAdapter Integration', () => {
   let nats: TestContainer;
@@ -30,11 +77,11 @@ describe('NatsQueueAdapter Integration', () => {
   beforeAll(async () => {
     nats = await createNatsContainer();
     natsUrl = nats.url;
-  });
+  }, CONTAINER_BOOT_MS);
 
   afterAll(async () => {
     await nats.stop();
-  });
+  }, CONTAINER_BOOT_MS);
 
   beforeEach(() => {
     adapter = createNatsQueueAdapter({
@@ -322,6 +369,128 @@ describe('NatsQueueAdapter Integration', () => {
     });
   });
 
+  describe('native NATS wildcards in a subscription pattern', () => {
+    beforeEach(async () => {
+      await adapter.connect();
+    });
+
+    /**
+     * Subscribes `pattern`, publishes `subjects` in order, and returns what the handler saw once
+     * `expected` messages arrived. One connection delivers in publish order, so a case that publishes
+     * the subject it expects LAST has seen everything before it once that one is in.
+     */
+    async function deliveredTo(
+      pattern: string,
+      subjects: string[],
+      expected: number,
+    ): Promise<Array<{ subject?: string; params: Record<string, string> }>> {
+      const seen: Array<{ subject?: string; params: Record<string, string> }> = [];
+      await adapter.subscribe(pattern, async (message) => {
+        seen.push({ subject: message.subject, params: message.params });
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      for (const subject of subjects) {
+        await adapter.publish(subject, { subject });
+      }
+      await pollUntil(() => seen.length >= expected);
+
+      return seen;
+    }
+
+    it('delivers every subject a ">" pattern covers to the handler, capturing nothing', async () => {
+      const seen = await deliveredTo('nativegt.>', ['nativegt.a', 'nativegt.a.b'], 2);
+
+      expect(seen).toEqual([
+        { subject: 'nativegt.a', params: {} },
+        { subject: 'nativegt.a.b', params: {} },
+      ]);
+    });
+
+    it('delivers a ">"-only pattern every subject', async () => {
+      const seen = await deliveredTo('>', ['nativeall.a'], 1);
+
+      expect(seen.map(entry => entry.subject)).toContain('nativeall.a');
+    });
+
+    it('delivers one token to a "*" pattern, and the same subjects as "{name}" captures', async () => {
+      const named: Array<Record<string, string>> = [];
+      await adapter.subscribe('nativestar.{id}', async (message) => {
+        named.push(message.params);
+      });
+
+      const seen = await deliveredTo('nativestar.*', ['nativestar.a.b', 'nativestar.a'], 1);
+
+      expect(seen).toEqual([{ subject: 'nativestar.a', params: {} }]);
+      await pollUntil(() => named.length === 1);
+      expect(named).toEqual([{ id: 'a' }]);
+    });
+
+    it('delivers the same subjects to ">" and "#"', async () => {
+      const framework: string[] = [];
+      await adapter.subscribe('nativeparity.#', async (message) => {
+        framework.push(message.subject ?? '');
+      });
+
+      const seen = await deliveredTo('nativeparity.>', ['nativeparity.a', 'nativeparity.a.b'], 2);
+
+      await pollUntil(() => framework.length === 2);
+      expect(framework).toEqual(seen.map(entry => entry.subject ?? ''));
+    });
+
+    for (const pattern of ['nativebad.>.run', '>.nativebad', 'nativebad..run', 'nativebad.', 'nativebad.new run']) {
+      it(`refuses "${pattern}", which can never receive a message, at subscribe(), naming it`, async () => {
+        let thrown: Error | undefined;
+        try {
+          await adapter.subscribe(pattern, async () => undefined);
+        } catch (error) {
+          thrown = error as Error;
+        }
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown!.message).toContain(`"${pattern}"`);
+      });
+    }
+
+    it('delivers to a parameter whose name holds whitespace, which never reaches the wire', async () => {
+      expect(await deliveredTo('ws.{a b}', ['ws.a'], 1)).toEqual([{ subject: 'ws.a', params: { [SPACED_NAME]: 'a' } }]);
+    });
+
+    it('delivers to a pattern holding a no-break space, a valid subject character, its literal subject', async () => {
+      // Only a space, tab, CR or LF is refused; the server routes any other character as written.
+      const subject = 'nbsp.a\u00A0b';
+
+      expect(await deliveredTo(subject, [subject], 1)).toEqual([{ subject, params: {} }]);
+    });
+
+    it('delivers to a partial-token parameter whose name holds whitespace', async () => {
+      expect(await deliveredTo('wsv.v{a b}', ['wsv.x', 'wsv.v1'], 1))
+        .toEqual([{ subject: 'wsv.v1', params: { [SPACED_NAME]: '1' } }]);
+    });
+
+    // A wildcard glued into a token is a literal token on the server: the subscription receives the
+    // one subject it spells. A `{name}` beside it widens to `*` and narrows back in process.
+    // [pattern, a neighbour the matcher's sub-token `*` would accept, the subject delivered, params]
+    const glued: Array<[string, string, string, Record<string, string>]> = [
+      ['glued.a*b', 'glued.aqb', 'glued.a*b', {}],
+      ['glued.v*', 'glued.v1', 'glued.v*', {}],
+      ['glued.*a', 'glued.ba', 'glued.*a', {}],
+      ['glued.**', 'glued.ab', 'glued.**', {}],
+      ['glued.foo>', 'glued.fooz', 'glued.foo>', {}],
+      ['glued.a>b', 'glued.ab', 'glued.a>b', {}],
+      ['glued.>>', 'glued.a', 'glued.>>', {}],
+      ['glued.{id}>', 'glued.1', 'glued.1>', { id: '1' }],
+    ];
+
+    for (const [pattern, neighbour, delivered, params] of glued) {
+      it(`delivers to "${pattern}" the literal subject "${delivered}" and nothing else`, async () => {
+        const seen = await deliveredTo(pattern, [neighbour, delivered], 1);
+
+        expect(seen).toEqual([{ subject: delivered, params }]);
+      });
+    }
+  });
+
   describe('message properties', () => {
     beforeEach(async () => {
       await adapter.connect();
@@ -339,6 +508,22 @@ describe('NatsQueueAdapter Integration', () => {
       
       expect(receivedMessage).not.toBeNull();
       expect(receivedMessage!.id).toBe(sentId);
+    });
+
+    it('delivers a message published with undefined data, with data undefined and the publisher\'s id', async () => {
+      // `JSON.stringify` drops `data: undefined`: the envelope a scheduled job returning nothing
+      // publishes carries no `data` key, and reaches the handler like any other.
+      const received: Array<Message<unknown>> = [];
+      await adapter.subscribe('test.nodata', async (msg) => {
+        received.push(msg);
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      const sentId = await adapter.publish('test.nodata', undefined);
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].id).toBe(sentId);
+      expect(received[0].data).toBeUndefined();
     });
 
     it('should include pattern in received message', async () => {
@@ -416,6 +601,190 @@ describe('NatsQueueAdapter Integration', () => {
   });
 
   /**
+   * onebun-FB-39. A message carrying headers used to throw inside the client's consume loop,
+   * which ended the loop: the handler never ran, and neither did it for any message after —
+   * headers or not. Every case here crosses a real server, because the object the driver hands
+   * back for received headers is the thing that was misread, and nothing short of a real
+   * delivery produces one.
+   *
+   * Where the publisher is a different connection from a subscriber, the case waits for
+   * `subscriptionsRegistered` before publishing; where both are the adapter, one connection
+   * already orders the SUB ahead of the PUB.
+   */
+  describe('message headers', () => {
+    /** Clients opened by a case, closed after it whether it passed or not. */
+    let clients: NatsClient[] = [];
+
+    async function connectedClient(): Promise<NatsClient> {
+      const client = createNatsClient({ servers: natsUrl });
+      clients.push(client);
+      await client.connect();
+
+      return client;
+    }
+
+    beforeEach(async () => {
+      await adapter.connect();
+    });
+
+    afterEach(async () => {
+      await Promise.all(clients.map(async (client) => await client.disconnect()));
+      clients = [];
+    });
+
+    it('delivers a message published with metadata.headers, which the handler reads back as published', async () => {
+      const received: Message<{ value: number }>[] = [];
+      await adapter.subscribe<{ value: number }>('hdr.roundtrip', async (message) => {
+        received.push(message);
+      }, { ackMode: 'none' });
+
+      await adapter.publish('hdr.roundtrip', { value: 42 }, {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        metadata: { headers: { 'X-Probe': 'yes', 'x-api-key': 'k-1' } },
+      });
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].data).toEqual({ value: 42 });
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      expect(received[0].metadata.headers).toEqual({ 'X-Probe': 'yes', 'x-api-key': 'k-1' });
+    });
+
+    it('keeps the subscription alive: a message without headers still arrives after one with them', async () => {
+      const received: number[] = [];
+      await adapter.subscribe<{ n: number }>('hdr.survives', async (message) => {
+        received.push(message.data.n);
+      });
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      await adapter.publish('hdr.survives', { n: 1 }, { metadata: { headers: { 'X-Probe': 'yes' } } });
+      await adapter.publish('hdr.survives', { n: 2 });
+      await pollUntil(() => received.length === 2);
+
+      expect(received).toEqual([1, 2]);
+    });
+
+    it('sends metadata.headers on the wire too, names in the case they were published with', async () => {
+      const observer = await connectedClient();
+      const seen: NatsMessage[] = [];
+      await observer.subscribe('hdr.wire', (msg) => {
+        seen.push(msg);
+      });
+      await subscriptionsRegistered(observer);
+
+      await adapter.publish('hdr.wire', { value: 1 }, {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        metadata: { headers: { 'X-Probe': 'yes', 'x-lower': 'v' } },
+      });
+      await pollUntil(() => seen.length === 1);
+
+      expect([...seen[0].headers!.entries()]).toEqual([['X-Probe', ['yes']], ['x-lower', ['v']]]);
+    });
+
+    it('delivers a message whose wire headers repeat a name, and exposes every value of it', async () => {
+      // Another client's publish: MessageMetadata.headers cannot hold two values for one name, so
+      // only a raw driver publish puts a repeated header on the wire.
+      const sender = await connectedClient();
+      const observer = await connectedClient();
+      const handled: Message<{ value: number }>[] = [];
+      const seen: NatsMessage[] = [];
+      await adapter.subscribe<{ value: number }>('hdr.multi', async (message) => {
+        handled.push(message);
+      });
+      await observer.subscribe('hdr.multi', (msg) => {
+        seen.push(msg);
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+      await subscriptionsRegistered(observer);
+
+      const wire = headers();
+      wire.append('X-Multi', 'a');
+      wire.append('X-Multi', 'b');
+      const envelope = {
+        id: 'foreign-1', pattern: 'hdr.multi', data: { value: 7 }, timestamp: Date.now(), metadata: {},
+      };
+      sender.getConnection().publish('hdr.multi', JSON.stringify(envelope), { headers: wire });
+      await pollUntil(() => handled.length === 1 && seen.length === 1);
+
+      expect(handled[0].data).toEqual({ value: 7 });
+      expect(seen[0].headers!.get('X-Multi')).toEqual(['a', 'b']);
+    });
+
+    it('takes pattern and params from the subject, not the envelope, and exposes the wire headers', async () => {
+      // onebun-FB-53: a client allowed to publish on `forge.a.>` writes an envelope naming
+      // `forge.b.result.999`. The server routes by subject, so the handler must read that too.
+      const sender = await connectedClient();
+      const received: Message<unknown>[] = [];
+      await adapter.subscribe('forge.*.result.{id}', async (message) => {
+        received.push(message);
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      const wire = headers();
+      wire.append('X-Multi', 'a');
+      wire.append('X-Multi', 'b');
+      const envelope = {
+        id: 'forged-1', pattern: 'forge.b.result.999', data: {}, timestamp: Date.now(), metadata: {},
+      };
+      sender.getConnection().publish('forge.a.result.1', JSON.stringify(envelope), { headers: wire });
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].subject).toBe('forge.a.result.1');
+      expect(received[0].pattern).toBe('forge.a.result.1');
+      expect(received[0].params).toEqual({ id: '1' });
+      expect(received[0].headers?.get('X-Multi')).toEqual(['a', 'b']);
+      expect(received[0].stream).toBeUndefined();
+    });
+
+    it('leaves NatsMessage.headers absent on a message that carried none', async () => {
+      const sender = await connectedClient();
+      const observer = await connectedClient();
+      const seen: NatsMessage[] = [];
+      await observer.subscribe('hdr.none', (msg) => {
+        seen.push(msg);
+      });
+      await subscriptionsRegistered(observer);
+
+      await sender.publish('hdr.none', 'plain');
+      await pollUntil(() => seen.length === 1);
+
+      expect(seen[0].data).toBe('plain');
+      expect(seen[0].headers).toBeUndefined();
+    });
+
+    it('resolves a request whose reply carries headers, with every value of each', async () => {
+      const requester = await connectedClient();
+      const responder = await connectedClient();
+      await responder.subscribe('hdr.rpc', (msg) => {
+        const wire = headers();
+        wire.append('X-Reply', 'a');
+        wire.append('X-Reply', 'b');
+        wire.set('x-lower', 'v');
+        responder.getConnection().publish(msg.reply!, 'pong', { headers: wire });
+      });
+      await subscriptionsRegistered(responder);
+
+      const response = await requester.request('hdr.rpc', 'ping', { timeout: POLL_DEADLINE_MS });
+
+      expect(response.data).toBe('pong');
+      expect([...response.headers!.entries()]).toEqual([['X-Reply', ['a', 'b']], ['x-lower', ['v']]]);
+    });
+
+    it('resolves a request whose reply carries no headers, with headers absent', async () => {
+      const requester = await connectedClient();
+      const responder = await connectedClient();
+      await responder.subscribe('hdr.rpc-plain', async (msg) => {
+        await responder.publish(msg.reply!, 'pong');
+      });
+      await subscriptionsRegistered(responder);
+
+      const response = await requester.request('hdr.rpc-plain', 'ping', { timeout: POLL_DEADLINE_MS });
+
+      expect(response.data).toBe('pong');
+      expect(response.headers).toBeUndefined();
+    });
+  });
+
+  /**
    * `inboxPrefix` against a real server, observed from the other end of the wire.
    *
    * It cannot be asserted from the client that set it — the option is consumed inside the
@@ -440,6 +809,7 @@ describe('NatsQueueAdapter Integration', () => {
           replySubject = msg.reply;
           await responder.publish(msg.reply!, 'pong');
         });
+        await subscriptionsRegistered(responder);
 
         const response = await requester.request('inbox.echo', 'ping', { timeout: 5_000 });
 
@@ -467,6 +837,7 @@ describe('NatsQueueAdapter Integration', () => {
           replySubject = msg.reply;
           await responder.publish(msg.reply!, 'pong');
         });
+        await subscriptionsRegistered(responder);
 
         await requester.request('inbox.default', 'ping', { timeout: 5_000 });
 

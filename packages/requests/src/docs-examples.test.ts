@@ -4,6 +4,10 @@
  * @source docs:api/requests.md
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   describe,
   it,
@@ -11,19 +15,29 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
-import {
-  Cause,
-  Effect,
-  Runtime,
-} from 'effect';
+import { Cause, Effect } from 'effect';
 
 import { runPinnedRequest } from './connect-address-fixtures/fixture-protocol';
 
 import {
+  BadGatewayError,
+  BadRequestError,
   calculateRetryDelay,
+  ConflictError,
   createHttpClient,
+  ForbiddenError,
+  GatewayTimeoutError,
   getTransportFailureKind,
+  HttpStatusError,
+  InternalServerError,
   isErrorResponse,
+  NotFoundError,
+  OneBunBaseError,
+  ServiceUnavailableError,
+  TooManyRequestsError,
+  TransportError,
+  UnauthorizedError,
+  ValidationError,
   makeSingleReplicaNonceStore,
   resolveRetryConfig,
   DEFAULT_RETRY_CONFIG,
@@ -148,6 +162,47 @@ function startEchoServer(): { baseUrl: string; calls: EchoedCall[]; stop(): void
   };
 }
 
+interface ReceivedBytes {
+  method: string;
+  path: string;
+  contentType: string | null;
+  body: Uint8Array;
+}
+
+/**
+ * Records the bytes every request carried. `/flaky` answers 503 to its first request and 200 after,
+ * `/moved` answers 307 to `/landing`, and everything else 200.
+ */
+function startBytesServer(): { baseUrl: string; calls: ReceivedBytes[]; stop(): void } {
+  const calls: ReceivedBytes[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      calls.push({
+        method: req.method,
+        path: url.pathname,
+        contentType: req.headers.get('content-type'),
+        body: new Uint8Array(await req.arrayBuffer()),
+      });
+
+      if (url.pathname === '/moved') {
+        return new Response(null, { status: 307, headers: { location: '/landing' } });
+      }
+
+      const firstFlaky = url.pathname === '/flaky' && calls.filter((call) => call.path === '/flaky').length === 1;
+
+      return jsonStatus(firstFlaky ? 503 : 200);
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    calls,
+    stop: () => server.stop(true),
+  };
+}
+
 describe('Requests README Examples', () => {
   describe('Basic Usage with Promise API (README)', () => {
     it('should create a client with basic options', () => {
@@ -175,7 +230,7 @@ describe('Requests README Examples', () => {
         /* eslint-disable @typescript-eslint/naming-convention */
         headers: {
           Accept: 'application/json',
-          'Content-Type': 'application/json',
+          'X-Client-Name': 'orders-service',
         },
         /* eslint-enable @typescript-eslint/naming-convention */
         auth: {
@@ -330,7 +385,8 @@ describe('Requests API Documentation Examples', () => {
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 2, delay: 1 } });
 
-        await expect(client.get('/users', undefined, { retries: { max: 0 } })).rejects.toThrow(/"code":503/);
+        await expect(client.get('/users', undefined, { retries: { max: 0 } }))
+          .rejects.toBeInstanceOf(ServiceUnavailableError);
 
         // One arrival: the per-request `retries: { max: 0 }` reached the request. Dropped, the
         // client's own `max: 2` would have sent three.
@@ -513,6 +569,244 @@ describe('Requests API Documentation Examples', () => {
     });
   });
 
+  describe('Sending bytes (docs/api/requests.md)', () => {
+    let dir: string;
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'onebun-request-bytes-'));
+    });
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send a Uint8Array and a Bun.file() as their bytes, each with its Content-Type', async () => {
+      const server = startBytesServer();
+      const avatar = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x80]);
+      await Bun.write(join(dir, 'avatar.png'), avatar);
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+
+        const part = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        await storage.put('/uploads/42/parts/1', part);
+        await storage.put('/avatars/42.png', Bun.file(join(dir, 'avatar.png')));
+        await storage.put('/uploads/42/parts/2', part, {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/vnd.example.chunk' },
+        });
+
+        expect(server.calls.map((call) => [call.path, call.contentType])).toEqual([
+          ['/uploads/42/parts/1', 'application/octet-stream'],
+          ['/avatars/42.png', 'image/png'],
+          ['/uploads/42/parts/2', 'application/vnd.example.chunk'],
+        ]);
+        expect(server.calls.map((call) => call.body)).toEqual([part, avatar, part]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should label each payload as the table says, and send a lower-case content-type alone', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+
+        await storage.post('/json', { a: 1 });
+        await storage.post('/text', 'plain');
+        await storage.post('/buffer', new ArrayBuffer(2));
+        await storage.post('/blob', new Blob([new Uint8Array([1])]));
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await storage.post('/own', new Uint8Array([1]), { headers: { 'content-type': 'image/webp' } });
+
+        expect(server.calls.map((call) => call.contentType)).toEqual([
+          'application/json',
+          'application/json',
+          'application/octet-stream',
+          'application/octet-stream',
+          'image/webp',
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send one Content-Type: the request\'s over the client\'s, matched in any letter case', async () => {
+      const server = startBytesServer();
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const storage = createHttpClient({ baseUrl: server.baseUrl, headers: { 'Content-Type': 'application/json' } });
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await storage.put('/part', new Uint8Array([1]), { headers: { 'content-type': 'application/octet-stream' } });
+        await storage.put('/part', new Uint8Array([1]));
+
+        // "A request's content-type replaces a client's Content-Type rather than going out beside it",
+        // and "the client's headers" label a binary payload too
+        expect(server.calls.map((call) => call.contentType)).toEqual(['application/octet-stream', 'application/json']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should fail TIMEOUT_ERROR before anything is sent when a Blob is not read within timeout', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl, timeout: 50 });
+        const stalled = new Blob([new Uint8Array([1])]);
+        stalled.arrayBuffer = () => new Promise(() => undefined);
+
+        const outcome = await Effect.runPromise(Effect.either(storage.putEffect('/part', stalled)));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('TIMEOUT_ERROR');
+          expect(outcome.left.code).toBe(0);
+          expect(outcome.left.details?.phase).toBe('request-body');
+        }
+        expect(server.calls).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send the same bytes on a retry and on a 307, and an empty payload as an empty body', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl, retries: { delay: 1 } });
+        const part = new Uint8Array([0, 255, 128]);
+
+        await storage.put('/flaky', new Blob([part]));
+        await storage.post('/moved', part);
+        await storage.put('/empty', new Uint8Array(0));
+
+        expect(server.calls.map((call) => [call.method, call.path, call.body])).toEqual([
+          ['PUT', '/flaky', part],
+          ['PUT', '/flaky', part],
+          ['POST', '/moved', part],
+          ['POST', '/landing', part],
+          ['PUT', '/empty', new Uint8Array(0)],
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should refuse a stream with REQUEST_CONFIG_ERROR before anything is sent', async () => {
+      const server = startBytesServer();
+      await Bun.write(join(dir, 'part.bin'), new Uint8Array([1, 2, 3]));
+
+      try {
+        const metrics: RequestMetricsData[] = [];
+        const storage = createHttpClient({
+          baseUrl: server.baseUrl,
+          metricsSink: (record) => metrics.push(record),
+        });
+
+        const outcome = await Effect.runPromise(Effect.either(
+          storage.putEffect('/uploads/42/parts/3', Bun.file(join(dir, 'part.bin')).stream()),
+        ));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('REQUEST_CONFIG_ERROR');
+          expect(outcome.left.code).toBe(500);
+          expect(outcome.left.details?.option).toBe('data');
+          expect(outcome.left.details?.reason).toBe('unsupported-body');
+          expect(outcome.left.details?.type).toBe('ReadableStream');
+        }
+        // "The refusal is never retried and records no metrics: no request was made."
+        expect(server.calls).toHaveLength(0);
+        expect(metrics).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should name each refusal by its reason, and send a wrapped typed array as its bytes', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+        const reasonOf = async (data: unknown) => {
+          const outcome = await Effect.runPromise(Effect.either(storage.putEffect('/x', data)));
+
+          return outcome._tag === 'Left' ? outcome.left.details?.reason : 'sent';
+        };
+        const view = new Int16Array([1, -1]);
+
+        expect(await reasonOf((async function* chunks() {
+          yield new Uint8Array([1]);
+        })())).toBe('unsupported-body');
+        expect(await reasonOf(view)).toBe('unsupported-body');
+        expect(await reasonOf({ size: 1n })).toBe('unserializable-body');
+        expect(await reasonOf(Bun.file(join(dir, 'missing.bin')))).toBe('unreadable-body');
+        expect(server.calls).toHaveLength(0);
+
+        expect(await reasonOf(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))).toBe('sent');
+        expect(server.calls[0]?.body).toEqual(new Uint8Array(view.buffer));
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should send a value with a toJSON, a Map and an async-iterable data class through JSON.stringify', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+        const map = new Map([['a', 1]]);
+        class Cursor {
+          readonly page = 2;
+
+          async *[Symbol.asyncIterator]() {
+            yield this.page;
+          }
+        }
+
+        await storage.put('/search', new URLSearchParams({ q: 'cats' }));
+        await storage.put('/map', map);
+        await storage.put('/converted', Object.fromEntries(map));
+        await storage.put('/cursor', new Cursor());
+
+        expect(server.calls.map((call) => new TextDecoder().decode(call.body)))
+          .toEqual(['{"q":"cats"}', '{}', '{"a":1}', '{"page":2}']);
+        expect(server.calls.map((call) => call.contentType))
+          .toEqual(['application/json', 'application/json', 'application/json', 'application/json']);
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
   describe('Error Handling (docs/api/requests.md)', () => {
     /**
      * @source docs:api/requests.md#a-failed-request-rejects
@@ -569,36 +863,128 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
-     * @source docs:api/requests.md#reading-the-errorresponse
+     * @source docs:api/requests.md#a-failed-request-rejects
      */
-    it('should carry the ErrorResponse inside the rejected FiberFailure', async () => {
-      // From docs: unwrapping the rejection with Runtime.isFiberFailure + Cause.squash
+    it('should reject with the OneBunBaseError subclass the failure names', async () => {
+      // From docs: "The rejection is a `OneBunBaseError` subclass chosen by the failure's `code`"
       const server = startEchoServer();
 
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
-        let code: number | undefined;
-        let name: string | undefined;
+        const rejection = await client.get('/missing').then(() => undefined, (error: unknown) => error);
 
-        try {
-          await client.get('/missing');
-        } catch (error) {
-          expect(Runtime.isFiberFailure(error)).toBe(true);
+        expect(rejection).toBeInstanceOf(NotFoundError);
+        expect(rejection).toBeInstanceOf(OneBunBaseError);
 
-          if (Runtime.isFiberFailure(error)) {
-            const failure = Cause.squash(error[Runtime.FiberFailureCauseId]);
-
-            expect(isErrorResponse(failure)).toBe(true);
-
-            if (isErrorResponse(failure)) {
-              code = failure.code;
-              name = failure.error;
-            }
-          }
+        if (rejection instanceof NotFoundError) {
+          expect(rejection.error).toBe('HTTP_ERROR');
+          expect(rejection.code).toBe(HttpStatusCode.NOT_FOUND);
+          expect(rejection.details).toMatchObject({ method: 'GET', url: `${server.baseUrl}/missing` });
+          // From docs: "`message` is the `error` name"
+          expect(rejection.message).toBe('HTTP_ERROR');
         }
+      } finally {
+        server.stop();
+      }
+    });
 
-        expect(code).toBe(HttpStatusCode.NOT_FOUND);
-        expect(name).toBe('HTTP_ERROR');
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it('should reject a timeout with a TransportError coded 0, whose kind getTransportFailureKind reads', async () => {
+      const server = startStallingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 }, timeout: 50 });
+        const rejection = await client.get('/slow').then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(TransportError);
+        expect(rejection).toMatchObject({ error: 'TIMEOUT_ERROR', code: TRANSPORT_FAILURE_CODE });
+        expect(getTransportFailureKind(rejection)).toBe('timeout');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it('should map every status of the table to its class, and keep any other status', async () => {
+      // From docs: the `code` -> class table
+      const expected: [number, new (...args: never[]) => OneBunBaseError][] = [
+        [HttpStatusCode.BAD_REQUEST, BadRequestError],
+        [HttpStatusCode.UNAUTHORIZED, UnauthorizedError],
+        [HttpStatusCode.FORBIDDEN, ForbiddenError],
+        [HttpStatusCode.NOT_FOUND, NotFoundError],
+        [HttpStatusCode.CONFLICT, ConflictError],
+        [HttpStatusCode.UNPROCESSABLE_ENTITY, ValidationError],
+        [HttpStatusCode.TOO_MANY_REQUESTS, TooManyRequestsError],
+        [HttpStatusCode.INTERNAL_SERVER_ERROR, InternalServerError],
+        [HttpStatusCode.BAD_GATEWAY, BadGatewayError],
+        [HttpStatusCode.SERVICE_UNAVAILABLE, ServiceUnavailableError],
+        [HttpStatusCode.GATEWAY_TIMEOUT, GatewayTimeoutError],
+        [418, HttpStatusError],
+        [405, HttpStatusError],
+      ];
+
+      const statusServer = Bun.serve({
+        port: 0,
+        fetch: (req) => jsonStatus(Number(new URL(req.url).pathname.slice(1))),
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${statusServer.port}`, retries: { max: 0 } });
+
+        for (const [status, errorClass] of expected) {
+          const rejection = await client.get(`/${status}`).then(() => undefined, (error: unknown) => error);
+
+          expect({ status, instance: rejection instanceof errorClass }).toEqual({ status, instance: true });
+          expect({ status, code: (rejection as OneBunBaseError).code }).toEqual({ status, code: status });
+        }
+      } finally {
+        statusServer.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it("should reject with a OneBun upstream's own error, as its handler threw it", async () => {
+      // From docs: "a `ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 })` rejects here as a
+      // `ConflictError` with `code` 409, `error` 'REVISION_CONFLICT' and those `details`"
+      const upstream = Bun.serve({
+        port: 0,
+        fetch: () => jsonStatus(
+          HttpStatusCode.CONFLICT,
+          new ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 }).toErrorResponse(),
+        ),
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${upstream.port}`, retries: { max: 0 } });
+        const rejection = await client.put('/items/a', { revision: 1 }).then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(ConflictError);
+        expect(rejection).toMatchObject({ code: 409, error: 'REVISION_CONFLICT' });
+        expect((rejection as ConflictError).details).toEqual({ expected: 1, actual: 2 });
+      } finally {
+        upstream.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#rejection-upgrade
+     */
+    it('should reject req() with the failure\'s own class, not a 500 REQUEST_FAILED', async () => {
+      // From docs: `req()` rejects with the failure's own class as well
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        const rejection = await client.req('GET', '/missing').then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(NotFoundError);
+        expect(rejection).toMatchObject({ code: HttpStatusCode.NOT_FOUND, error: 'HTTP_ERROR' });
       } finally {
         server.stop();
       }
@@ -1578,7 +1964,7 @@ describe('Requests API Documentation Examples', () => {
     /**
      * @source docs:api/requests.md#response-stream
      */
-    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR ErrorResponse', async () => {
+    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR TransportError', async () => {
       const server = startStreamingServer();
       const outcomes: string[] = [];
 
@@ -1588,8 +1974,8 @@ describe('Requests API Documentation Examples', () => {
             outcomes.push(textDecoder.decode(chunk));
           }
         } catch (error) {
-          if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
-            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details?.phase)}`);
+          if (error instanceof TransportError && getTransportFailureKind(error) === 'timeout') {
+            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details.phase)}`);
           }
         }
       }

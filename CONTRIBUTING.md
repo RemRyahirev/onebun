@@ -25,6 +25,7 @@ Thank you for your interest in contributing to OneBun! This document provides gu
 - `bun test` - Run all tests
 - `bun lint` - Run ESLint
 - `bun run typecheck` - Run TypeScript type checking
+- `bun run typecheck:consumer` - Compile the packages the way an application does: packed as `npm publish` ships them, in a scratch project outside the repo, under every pinned combination of bun-types, `@types/node`, `lib` and TypeScript. The project `bun create @onebun` scaffolds is compiled there too, with the `tsconfig.json` it writes, and the run fails when the scaffold's `@onebun/core` range does not cover the workspace core. The packages ship `.ts` sources, so `skipLibCheck` does not shield an application from them. It warns when npm has a newer `@types/node` major or bun-types minor than the newest pin, which is the signal to add it. Needs the npm registry; the pins, how to bump them and the usage are in `scripts/consumer-typecheck.ts`
 - `bun run dev` - Start development server with watch mode
 
 ## Pull Request Process

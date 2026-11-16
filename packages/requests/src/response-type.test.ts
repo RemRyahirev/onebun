@@ -28,14 +28,17 @@ import {
 
 import { createHttpClient } from './client.js';
 import { makeRequestsService, RequestsService } from './service.js';
+import { isHttpClientFailure } from './transport-details.js';
 import {
   type ApiResponse,
   type ErrorResponse,
   getTransportFailureKind,
+  HttpStatusError,
   isErrorResponse,
   type RequestMetricsData,
   type SuccessResponse,
   TRANSPORT_FAILURE_CODE,
+  TransportError,
 } from './types.js';
 
 const encoder = new TextEncoder();
@@ -478,13 +481,16 @@ describe("responseType 'stream'", () => {
     expect(decoder.decode(first.value)).toBe('data: 1\n\n');
     expect(waited).toBeGreaterThanOrEqual(280);
     expect(waited).toBeLessThan(1000);
-    // The stream errors with the ErrorResponse a timed-out body read produces
-    expect(isErrorResponse(error)).toBe(true);
-    if (isErrorResponse(error)) {
+    // The stream errors with the error the Promise API rejects with for a timed-out body read,
+    // around the client's own record: not the plain ErrorResponse the Effect API fails with
+    expect(error).toBeInstanceOf(TransportError);
+    expect(isErrorResponse(error)).toBe(false);
+    expect(isHttpClientFailure(error)).toBe(true);
+    if (error instanceof TransportError) {
       expect(error.error).toBe('TIMEOUT_ERROR');
       expect(error.code).toBe(TRANSPORT_FAILURE_CODE);
-      expect(error.details?.phase).toBe('body');
-      expect(error.details?.statusCode).toBe(200);
+      expect(error.details.phase).toBe('body');
+      expect(error.details.statusCode).toBe(200);
       expect(getTransportFailureKind(error)).toBe('timeout');
     }
     await waitUntil(() => fixture.cancelled.includes('/stall'), 1000);
@@ -571,13 +577,14 @@ describe("responseType 'stream'", () => {
       error = outcome;
     }
 
-    expect(isErrorResponse(error)).toBe(true);
-    if (isErrorResponse(error)) {
+    // The status that arrived is the code, and a 200 has no class of its own
+    expect(error).toBeInstanceOf(HttpStatusError);
+    if (error instanceof HttpStatusError) {
       expect(error.error).toBe('RESPONSE_TOO_LARGE');
       expect(error.code).toBe(200);
-      expect(error.details?.limit).toBe(limit);
-      expect(error.details?.statusCode).toBe(200);
-      expect(error.details?.received).toBeGreaterThan(limit);
+      expect(error.details.limit).toBe(limit);
+      expect(error.details.statusCode).toBe(200);
+      expect(error.details.received).toBeGreaterThan(limit);
     }
     // The chunk that crossed the limit is not handed out
     expect(handedOut).toBeLessThanOrEqual(limit);
@@ -656,7 +663,7 @@ describe("responseType 'stream'", () => {
     expect(failure.retryCount).toBe(2);
     expect(fixture.arrivals.get('/unavailable')).toBe(3);
     // The timeout hit the stream after the call had resolved: retryOnTimeout cannot replay it
-    expect(isErrorResponse(error) && error.error).toBe('TIMEOUT_ERROR');
+    expect(error instanceof TransportError && error.error).toBe('TIMEOUT_ERROR');
     expect(fixture.arrivals.get('/stall')).toBe(1);
   });
 
@@ -710,7 +717,7 @@ describe("responseType 'stream'", () => {
       timers.fire();
       const error = await pending;
 
-      expect(isErrorResponse(error) && error.error).toBe('TIMEOUT_ERROR');
+      expect(error instanceof TransportError && error.error).toBe('TIMEOUT_ERROR');
       expect(fixture.arrivals.get('/stall')).toBe(1);
       // No stretch asked for more than the runtime keeps: the headers' wait, the first read's, this one's
       expect(Math.max(...timers.requested())).toBe(MAX_TIMER_DELAY);

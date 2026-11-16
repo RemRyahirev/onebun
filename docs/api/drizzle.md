@@ -901,11 +901,14 @@ const [deleted] = await this.db.delete(users)
 #### transaction()
 
 Execute queries in a transaction. The transaction callback receives a `UniversalTransactionClient` with the same API as `DrizzleService`.
+The optional `options` set the isolation level and access mode on PostgreSQL — see
+[Isolation level and access mode](#isolation-level-and-access-mode).
 
 <!-- typecheck: skip -->
 ```typescript
 async transaction<T>(
-  fn: (tx: UniversalTransactionClient) => Promise<T>
+  fn: (tx: UniversalTransactionClient) => Promise<T>,
+  options?: PostgreSQLTransactionOptions
 ): Promise<T>
 ```
 
@@ -991,16 +994,20 @@ Work that OUTLIVES the transaction it was started in is not routed onto it — o
 transaction has ended, such a statement queues like any other bystander.
 
 The error carries `name === 'DrizzleTransactionError'` and one of the codes
-`SQLITE_TRANSACTION_NESTED` or `SQLITE_TRANSACTION_SYNC_QUERY` — the latter for a
-synchronous `.get()`, `.all()`, `.run()` or `.values()` issued by a CONCURRENT caller while
-a transaction holds the connection, which cannot be queued because it returns rows rather
-than a promise.
+`SQLITE_TRANSACTION_NESTED`, `SQLITE_TRANSACTION_SYNC_QUERY`,
+`SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED` or `TRANSACTION_OPTIONS_INVALID`.
+`SQLITE_TRANSACTION_SYNC_QUERY` is for a synchronous `.get()`, `.all()`, `.run()` or
+`.values()` issued by a CONCURRENT caller while a transaction holds the connection, which
+cannot be queued because it returns rows rather than a promise.
+`SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED` is for `transaction()` given options, which are
+PostgreSQL settings, and `TRANSACTION_OPTIONS_INVALID` for an option name or value
+`transaction()` does not accept (see [below](#isolation-level-and-access-mode)).
 
 ##### PostgreSQL
 
 The transaction runs on its own pooled connection through drizzle's own `transaction()`.
-Nothing is queued and nothing is refused — concurrent queries use other connections, and the
-re-entrancy errors above cannot occur.
+Nothing is queued — concurrent queries use other connections, and the re-entrancy errors
+above cannot occur.
 
 - **A query issued through the service or a repository from inside the callback runs ON the
   transaction**, exactly as on SQLite, and is rolled back with it.
@@ -1019,6 +1026,88 @@ re-entrancy errors above cannot occur.
   the other's writes, and a query issued outside any transaction goes to the pool even while
   one is open. Two `DrizzleService` instances never see each other's transactions either,
   including against the same database.
+
+##### Isolation level and access mode
+
+On PostgreSQL, `transaction()` takes the settings of the transaction it opens as a second
+argument, typed `PostgreSQLTransactionOptions`:
+
+- `isolationLevel` — `'read committed'`, `'repeatable read'` or `'serializable'`
+  (`PostgreSQLIsolationLevel`);
+- `accessMode` — `'read write'` or `'read only'` (`PostgreSQLAccessMode`).
+
+They are issued as `SET TRANSACTION` before the callback runs, so they hold for every
+statement in it — the repositories and services it calls included, exactly like the
+transaction itself:
+
+```typescript
+import { eq, type PostgreSQLTransactionOptions } from '@onebun/drizzle';
+
+const snapshot: PostgreSQLTransactionOptions = {
+  isolationLevel: 'repeatable read',
+  accessMode: 'read only',
+};
+
+const view = await this.db.transaction(async () => {
+  // Every read sees one snapshot: a commit that lands between them is not visible.
+  const order = await this.orderRepository.findById(orderId);
+  const items = await this.db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+
+  return { order, items };
+}, snapshot);
+```
+
+A key that is left out keeps the server default (`default_transaction_isolation` and
+`default_transaction_read_only`, normally `read committed` and `read write`). Without options,
+and with `{}`, the transaction is opened exactly as without the argument.
+
+- **`read only` is enforced by the server.** An `INSERT`, `UPDATE` or `DELETE` inside the
+  callback fails with `cannot execute INSERT in a read-only transaction`, and so does a locking
+  read — `SELECT ... FOR UPDATE` or `FOR SHARE` — because a row lock counts as a write. The
+  failure rolls the transaction back like any other error.
+- **`repeatable read` and `serializable` can fail with SQLSTATE `40001`** (`could not serialize
+  access ...`): under `repeatable read` when the transaction updates, deletes or locks a row that
+  another transaction changed after its snapshot was taken, under `serializable` also when the
+  concurrent transactions could not have run one after the other. The transaction is rolled
+  back; retrying means calling `transaction()` again.
+- **A nested `transaction()` runs under the settings of the outermost one.** It is a SAVEPOINT,
+  and PostgreSQL fixes the settings before the first statement of a transaction. A nested call
+  may repeat the outer options — all of them or some — or pass none. Asking for anything else,
+  including an option the outermost transaction was opened without, throws
+  `DrizzleTransactionError` with `code === 'POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH'` before its
+  callback runs. Nothing has been opened by then: if the caller catches the error, the outer
+  transaction carries on untouched; if not, the error rolls the outer transaction back like
+  any other.
+- **drizzle's own `transaction(fn, config)` inside the callback is held to the same rule.**
+  Reached through `getDatabase()`, `getPostgreSQLDatabase()` or `tx.getRawTransaction()`, it is
+  a SAVEPOINT too, and drizzle's savepoint does not apply a config. So a config that asks for
+  anything the outermost transaction does not run under — `deferrable` included, which
+  `DrizzleService.transaction()` never sets — throws the same
+  `POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH` before `fn` runs. Without a config, or with one the
+  transaction already satisfies, it is a savepoint as usual. Outside a `transaction()` callback
+  it is drizzle's own transaction on a pooled connection, config applied — and nothing called
+  from inside it joins it, which is what passing the options to `transaction()` gives.
+
+```typescript
+await this.db.transaction(async () => {
+  // Savepoints under the outer settings
+  await this.db.transaction(async () => { /* ... */ });
+  await this.db.transaction(async () => { /* ... */ }, { isolationLevel: 'serializable' });
+
+  // Each throws DrizzleTransactionError (code 'POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH').
+  // Uncaught, it rolls this whole transaction back.
+  await this.db.transaction(async () => { /* ... */ }, { isolationLevel: 'read committed' });
+  await this.db.getPostgreSQLDatabase().transaction(async () => { /* ... */ }, { isolationLevel: 'read committed' });
+}, { isolationLevel: 'serializable' });
+```
+
+SQLite has no per-transaction equivalent — its transactions are serializable — so on SQLite
+any option throws `DrizzleTransactionError` with
+`code === 'SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED'` before the callback runs, without waiting
+for a transaction in flight. An option name or value `transaction()` does not accept throws
+`code === 'TRANSACTION_OPTIONS_INVALID'` on both dialects: the values reach the
+`SET TRANSACTION` statement as SQL keywords, so they are checked at run time as well as by the
+type.
 
 <llm-only>
 **Technical details for AI agents:**
@@ -1044,8 +1133,32 @@ re-entrancy errors above cannot occur.
 - `DrizzleService.transaction()` dispatches on the ambient transaction when there is one, so a
   nested call is drizzle's own `tx.transaction()` — a SAVEPOINT — rather than a second pooled
   connection. `tx.getRawTransaction().transaction(...)` remains available and is the same thing
+- The transaction client of a PostgreSQL callback — what `tx.getRawTransaction()` returns and
+  what the ambient cell routes onto — is `createGuardedTransaction(rawTx, options)`: drizzle's
+  transaction as prototype with only `transaction()` redefined, so identity differs from the
+  driver's handle (`Object.getPrototypeOf(tx.getRawTransaction())` is it) and nothing on the
+  handle is modified. The redefined `transaction(fn, config)` asks
+  `findTransactionOptionsMismatch(config, outermostOptions)` and rejects with
+  `POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH` when it returns a `TransactionOptionsMismatch`; it
+  compares all three `PgTransactionConfig` keys. The savepoint handle drizzle passes to `fn` is
+  guarded the same way, so the rule holds however deep the raw API is nested; a `WeakSet` keeps
+  a handle from being wrapped twice. The service's own nested call passes no config and is
+  checked before it reaches the guard
 - The store is keyed by the owning `AmbientTransaction` instance, so two `DrizzleService`s (two
   databases) never see each other's transactions
+- Transaction options: the outermost call passes them to drizzle as the `PgTransactionConfig` of
+  `db.transaction(fn, config)`, which bun-sql issues as `set transaction ...` right after BEGIN and
+  before `fn`; without options (or with `{}`) the call is a plain `db.transaction(fn)`. The
+  ambient cell — an `ActiveTransaction`, read through `AmbientTransaction.activeTransaction()` —
+  carries the outermost options, and a savepoint inherits them, so a nested call is compared
+  with the outermost transaction however deep it is. drizzle's savepoint `tx.transaction(fn)`
+  takes no config, which is why a mismatch is refused rather than passed on
+- Options are validated (`resolveTransactionOptions()` in `drizzle.service.ts`) before
+  `waitForInit()` and before the SQLite gate is acquired: an unknown key or value is
+  `TRANSACTION_OPTIONS_INVALID`, because drizzle interpolates the values with `sql.raw`.
+  `undefined` values are dropped, and an options object with nothing set is treated as none
+- `deferrable` (drizzle's third `PgTransactionConfig` field) and `read uncommitted` are not
+  accepted: PostgreSQL runs `read uncommitted` as `read committed`
 </llm-only>
 
 ## BaseRepository
@@ -1092,11 +1205,11 @@ projection.
 **A repository is not a provider.** `BaseRepository` resolves the database in its constructor,
 and every provider is constructed before `DrizzleService` has opened one — so a repository
 carrying `@Service()` fails to construct with `Database not initialized. Call initialize()
-first.` If anything injects it, `app.start()` then rejects with a `DependencyResolutionError`
-naming the repository as the dependency its consumer could not get, because constructing it
-threw — the original error is in the log as `Failed to create service <Repository>`. If nothing
-injects it, the application boots with the repository silently absent from DI. Construct it after the database is up instead — lazily on
-first use, or in `onApplicationInit()` — from a service that holds `DrizzleService`.
+first.`, and `app.start()` rejects with a `ServiceConstructionError` naming the repository, with
+that error as its `cause` — whether or not anything injects it (see
+[When a Constructor Throws](./services.md#when-a-constructor-throws)). Construct it after the
+database is up instead — lazily on first use, or in `onApplicationInit()` — from a service that
+holds `DrizzleService`.
 
 ```typescript
 @Service()

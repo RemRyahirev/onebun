@@ -33,6 +33,8 @@ export class WsExecutionContextImpl implements WsExecutionContext {
     private data: unknown,
     private handler: WsHandlerMetadata,
     private patternParams: Record<string, string>,
+    /** The room a join or leave changes, as the gateway resolved it; absent for other handlers. */
+    private roomName?: string,
   ) {}
 
   getClient(): WsClientData {
@@ -54,6 +56,11 @@ export class WsExecutionContextImpl implements WsExecutionContext {
   getPatternParams(): Record<string, string> {
     return this.patternParams;
   }
+
+  /** The room the join or leave being decided changes — what `@RoomName()` injects. */
+  getRoomName(): string | undefined {
+    return this.roomName;
+  }
 }
 
 // ============================================================================
@@ -61,7 +68,11 @@ export class WsExecutionContextImpl implements WsExecutionContext {
 // ============================================================================
 
 /**
- * Guard that requires client to be authenticated
+ * Guard that requires the client to be authenticated: `client.auth.authenticated === true`.
+ *
+ * The framework sets that flag only when the gateway's `authenticate` hook accepts the client at
+ * the upgrade, after the application's own verification of the token — so a client that merely
+ * sent a token is denied. Without the hook no client is authenticated and this guard denies everyone.
  *
  * @example
  * ```typescript

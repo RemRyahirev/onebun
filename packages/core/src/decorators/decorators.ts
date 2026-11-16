@@ -28,6 +28,8 @@ import {
   defineGlobalMetadata,
   getConstructorParamTypes as getDesignParamTypes,
   getOwnGlobalMetadata,
+  isDecoratedClass,
+  markDecoratedClass,
   Reflect,
 } from './metadata';
 
@@ -97,12 +99,17 @@ function mergeParamTypes(
 
 /**
  * Injectable decorator for controllers and services
- * This decorator enables automatic dependency injection by registering the class for DI
+ * This decorator enables automatic dependency injection by registering the class for DI.
+ *
+ * It records the class as decorated: TypeScript then emits `design:paramtypes` for any constructor
+ * the class declares, so a class with no constructor metadata of its own is known to declare none
+ * and runs the one it inherits — see {@link traceConstructorMetadata}.
  */
 export function injectable() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return <T extends new (...args: any[]) => any>(target: T): T => {
-    // The class is now marked as injectable
+    markDecoratedClass(target);
+
     return target;
   };
 }
@@ -144,15 +151,94 @@ export function registerControllerDependencies(
 }
 
 /**
- * Constructor parameter types, POSITIONALLY INTACT: entry `i` describes parameter `i`, and a
- * parameter nothing could name is `undefined` in its own slot rather than missing.
- *
- * Precedence is PER INDEX, not per array. An explicit `@Inject(Class)` wins its own slot, and
- * every slot it says nothing about falls back to TypeScript's `design:paramtypes`. Taking the
- * explicit array whole would blank every undecorated parameter of a constructor that decorates
- * one of them, because `@Inject` pads the array with `undefined` up to its own index.
+ * Whether `target` carries constructor metadata of its own, from any of the four sources DI reads:
+ * `design:paramtypes` (on the global `Reflect` or in the module store, `[]` included), explicit
+ * `@Inject(Class)` types, `@Inject(TOKEN)` selections and `@Optional()` marks. Every one of them
+ * describes a parameter of a constructor this very class declares.
  */
-export function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
+function hasOwnConstructorMetadata(target: Function): boolean {
+  return Array.isArray(getOwnGlobalMetadata('design:paramtypes', target))
+    || Array.isArray(Reflect.getMetadata('design:paramtypes', target))
+    || META_CONSTRUCTOR_PARAMS.has(target)
+    || META_INJECT_TOKENS.has(target)
+    || META_OPTIONAL_PARAMS.has(target);
+}
+
+/**
+ * Whether `target` is KNOWN to declare no constructor, and so runs the one it inherits.
+ *
+ * Only a decorated class can be known to: TypeScript emits constructor types for it whenever it
+ * declares a constructor, so none of its own means none declared. An undecorated class records
+ * nothing either way — `class G extends Base {}` and `class G extends Base { constructor(opts = {})
+ * { ... } }` look the same — and handing the second one its parent's types would inject by position
+ * into parameters that may differ (onebun-FB-18). The arity check keeps a decorated class compiled
+ * without `emitDecoratorMetadata` out: an inherited constructor always has `length` 0.
+ */
+function runsInheritedConstructor(target: Function): boolean {
+  return isDecoratedClass(target) && target.length === 0 && !hasOwnConstructorMetadata(target);
+}
+
+const FUNCTION_PROTOTYPE: unknown = Object.getPrototypeOf(Function);
+
+/**
+ * Where the constructor metadata DI uses for a class comes from.
+ * @internal
+ */
+export interface ConstructorMetadataTrace {
+  /**
+   * The class whose four sources of constructor metadata apply: `target` itself, or — for a class
+   * that runs an inherited constructor — the nearest ancestor that declares it.
+   */
+  readonly source: Function;
+  /**
+   * Set only when `source` is `target` and `target` has no constructor metadata of its own: the
+   * first class, from `target` up, that has none either and is not known to run an inherited
+   * constructor — an undecorated class, or one that declares parameters. Nothing above it applies.
+   */
+  readonly stoppedAt?: Function;
+  /** With `stoppedAt`: the nearest class above it that has constructor metadata of its own. */
+  readonly declaringAncestor?: Function;
+}
+
+/**
+ * Find the class whose constructor metadata applies to `target`.
+ *
+ * A class that declares no constructor runs the one it inherits, so it is injected with THAT
+ * constructor's dependencies. All four sources are taken from the same class: a prototype walk over
+ * `design:paramtypes` alone would hand a subclass its parent's types but not its `@Inject(Class)`,
+ * `@Inject(TOKEN)` or `@Optional()` entries, which are keyed per class — a silent `undefined` for
+ * the first, the wrong registration for the second, a boot failure for the third.
+ *
+ * The walk passes only classes known to run an inherited constructor (see
+ * {@link runsInheritedConstructor}) and stops at the first class with metadata of its own. A class
+ * that declares its own constructor never inherits, decorated or not.
+ * @internal
+ */
+export function traceConstructorMetadata(target: Function): ConstructorMetadataTrace {
+  let current = target;
+  let stoppedAt: Function | undefined;
+
+  while (!hasOwnConstructorMetadata(current)) {
+    if (stoppedAt === undefined && !runsInheritedConstructor(current)) {
+      stoppedAt = current;
+    }
+    const parent: unknown = Object.getPrototypeOf(current);
+    if (typeof parent !== 'function' || parent === FUNCTION_PROTOTYPE) {
+      return stoppedAt === undefined ? { source: target } : { source: target, stoppedAt };
+    }
+    current = parent;
+  }
+
+  return stoppedAt === undefined ? { source: current } : { source: target, stoppedAt, declaringAncestor: current };
+}
+
+/**
+ * The constructor types `target` itself carries, merged per index: an explicit `@Inject(Class)` wins
+ * its own slot, and every slot it says nothing about falls back to `design:paramtypes`. Taking the
+ * explicit array whole would blank every undecorated parameter of a constructor that decorates one
+ * of them, because `@Inject` pads the array with `undefined` up to its own index.
+ */
+function ownConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
   const explicitDeps = META_CONSTRUCTOR_PARAMS.get(target);
   const designTypes = getDesignParamTypes(target);
 
@@ -161,6 +247,22 @@ export function getConstructorParamTypes(target: Function): (Function | undefine
   }
 
   return designTypes === undefined ? explicitDeps : mergeParamTypes(explicitDeps, designTypes);
+}
+
+/**
+ * Constructor parameter types, POSITIONALLY INTACT: entry `i` describes parameter `i`, and a
+ * parameter nothing could name is `undefined` in its own slot rather than missing.
+ *
+ * Precedence is PER INDEX, not per array. An explicit `@Inject(Class)` wins its own slot, and
+ * every slot it says nothing about falls back to TypeScript's `design:paramtypes`.
+ *
+ * These are the types DI injects: for a decorated class that declares no constructor, those of the
+ * constructor it inherits (see {@link traceConstructorMetadata}); `undefined` when there are none.
+ *
+ * @see docs:api/decorators.md
+ */
+export function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
+  return ownConstructorParamTypes(traceConstructorMetadata(target).source);
 }
 
 /**
@@ -212,6 +314,10 @@ export function controllerDecorator(basePath: string = '') {
     // Copy all method-decorator metadata (queue decorators, etc.) from original to wrapped class
     copyAllMetadata(target, WrappedController);
 
+    // The original is decorated too: DI walks wrapper -> original -> parent for a controller that
+    // declares no constructor, and passes the original only if it is known to declare none.
+    markDecoratedClass(target);
+
     // Copy metadata and static properties
     META_CONTROLLERS.set(WrappedController, metadata);
     META_CONTROLLERS.set(target, metadata); // Keep original for compatibility
@@ -228,9 +334,9 @@ export function controllerDecorator(basePath: string = '') {
 
     // Copy design:paramtypes from original class to wrapped class
     // This enables automatic DI without @Inject when emitDecoratorMetadata is enabled.
-    // The copy is required, not a convenience: DI reads OWN paramtypes only, and the wrapper is a
-    // subclass that emitted none. It reads the original's OWN array too — a controller that
-    // declares no constructor must not pick up its parent's through a prototype walk.
+    // It reads the original's OWN array: a controller that declares no constructor gets its
+    // parent's through traceConstructorMetadata, with the parent's @Inject and @Optional entries,
+    // never through a prototype walk over design:paramtypes alone.
     const designParamTypes = getOwnGlobalMetadata('design:paramtypes', target);
     if (designParamTypes) {
       defineGlobalMetadata('design:paramtypes', designParamTypes, WrappedController);
@@ -373,10 +479,13 @@ export function Optional() {
 }
 
 /**
- * The registration token `@Inject(TOKEN)` put on a constructor parameter, if any.
+ * The registration token `@Inject(TOKEN)` put on a constructor parameter, if any — for a decorated
+ * class that declares no constructor, on the parameter of the constructor it inherits.
+ *
+ * @see docs:api/decorators.md
  */
 export function getInjectToken(target: Function, parameterIndex: number): symbol | string | undefined {
-  return META_INJECT_TOKENS.get(target)?.get(parameterIndex);
+  return META_INJECT_TOKENS.get(traceConstructorMetadata(target).source)?.get(parameterIndex);
 }
 
 /**
@@ -395,10 +504,13 @@ export function copyInjectTokens(from: Function, to: Function): void {
 }
 
 /**
- * Check if a constructor parameter is marked as @Optional()
+ * Check if a constructor parameter is marked as @Optional() — for a decorated class that declares
+ * no constructor, a parameter of the constructor it inherits.
+ *
+ * @see docs:api/decorators.md
  */
 export function isOptionalParam(target: Function, parameterIndex: number): boolean {
-  return META_OPTIONAL_PARAMS.get(target)?.has(parameterIndex) ?? false;
+  return META_OPTIONAL_PARAMS.get(traceConstructorMetadata(target).source)?.has(parameterIndex) ?? false;
 }
 
 /**
@@ -1205,18 +1317,21 @@ export function getControllerGuards(target: Function): (Function | Guard)[] {
 /**
  * Read the method-level `@UseGuards` list for a handler, walking the prototype chain.
  *
- * `@Controller` wraps the decorated class in a subclass, so `WrappedController.prototype` is a
- * DIFFERENT object from the prototype the method decorator wrote to, and the metadata polyfill
- * is a `WeakMap` keyed on the exact object with no prototype walking. A queue consumer read by
- * class — which is how `QueueService.registerService` receives it — therefore finds nothing
- * unless the chain is walked. HTTP does not need this: route registration reads the prototype
- * it was handed directly.
+ * HTTP route registration, WebSocket gateway registration and queue consumer registration all
+ * resolve method guards through this function, once, when the handler is registered. The walk
+ * covers two cases. `@Controller` wraps the decorated class in a subclass, so
+ * `WrappedController.prototype` is a DIFFERENT object from the prototype the method decorator
+ * wrote to, and the metadata polyfill is a `WeakMap` keyed on the exact object with no prototype
+ * walking. And a handler that overrides a base method carries the base method's `@UseGuards` list
+ * as well as its own: a guard written on the base method guards every override, on every
+ * transport.
  *
  * Base entries come first, matching how class-level and method-level lists already merge.
+ * Deduplicated by identity, so a guard named on both the base method and the override runs once.
  *
  * @param target - Class holding the handler
  * @param propertyKey - Handler method name
- * @returns Guards declared with `@UseGuards` on that method
+ * @returns Guards declared with `@UseGuards` on that method and on every method it overrides
  * @see docs:api/guards.md
  */
 export function getMethodGuards(target: Function, propertyKey: string | symbol): (Function | Guard)[] {
@@ -1256,20 +1371,24 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  *
  * Execution order: middleware → class guards → method guards → handler
  *
+ * A method-level list also guards every method that overrides it in a subclass, on all three
+ * transports: the base method's guards run first, then the override's own, and a guard named on
+ * both runs once.
+ *
  * @see docs:api/guards.md
  * @see docs:api/decorators.md
  *
  * @example Class-level (all routes)
  * ```typescript
  * \@Controller('/admin')
- * \@UseGuards(AuthGuard)
+ * \@UseGuards(BearerPresenceGuard)
  * class AdminController extends BaseController { ... }
  * ```
  *
- * @example Method-level (single route)
+ * @example Method-level (single route) — guards in one list run left to right
  * ```typescript
  * \@Get('/dashboard')
- * \@UseGuards(new RolesGuard(['admin']))
+ * \@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
  * getDashboard() { ... }
  * ```
  *
@@ -1282,11 +1401,13 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  *
  * @example Combined (class guard + route guard)
  * ```typescript
+ * // VerifiedTokenGuard verifies the token and records the caller on the request context;
+ * // rolesOfVerifiedUser reads it back: () => getRequestContext()?.user?.roles ?? []
  * \@Controller('/api')
- * \@UseGuards(AuthGuard)                      // runs on every route
+ * \@UseGuards(VerifiedTokenGuard)                                    // runs on every route
  * class ApiController extends BaseController {
  *   \@Get('/admin')
- *   \@UseGuards(new RolesGuard(['admin']))     // runs only here, after AuthGuard
+ *   \@UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))       // runs only here, after it
  *   getAdmin() { ... }
  * }
  * ```
@@ -1776,9 +1897,15 @@ export function clearGlobalModules(): void {
 
 /**
  * Response schema decorator for API documentation and validation
+ *
+ * The schema describes the value the handler returns, and that value is what gets validated. The
+ * framework wraps it afterwards like any other return value, so the body on the wire is
+ * `{ success: true, result: <value> }`: declare the data, not the envelope.
+ *
  * @param statusCode - HTTP status code (e.g., 200, 201, 404)
  * @param options - Response schema options
  * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  * @example
  * ```typescript
  * @Get('/users')

@@ -36,8 +36,8 @@ interface HttpExecutionContext {
 `HttpExecutionContext | WsExecutionContext | MessageExecutionContext`, and `isHttpContext(ctx)` is
 literally `ctx.type === 'http'`. `type` is a required member, so a context hand-rolled without it —
 typically in a unit test — does not typecheck as `HttpExecutionContext` at all. At runtime it
-additionally makes every guard that *narrows* — each `createHttpGuard()` guard, plus `AuthGuard` and
-`RolesGuard` — return `false`, which reads as a real denial. A class guard that calls `getRequest()`
+additionally makes every guard that *narrows* — each `createHttpGuard()` guard, plus `BearerPresenceGuard`
+and `RolesGuard` — return `false`, which reads as a real denial. A class guard that calls `getRequest()`
 directly (like `ApiKeyGuard` below) never narrows and will not notice, which is what makes the
 omission easy to ship. Use `isWsContext` / `isQueueContext` for the other two.
 
@@ -70,23 +70,26 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 
 ### Applying Guards
 
+`VerifiedTokenGuard` and `rolesOfVerifiedUser` below are the verifying guard and the `RolesGuard`
+extractor from "Production Authentication" further down.
+
 <!-- typecheck: skip -->
 ```typescript
 // Controller-level (all routes)
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/protected')
 class ProtectedController extends BaseController { ... }
 
-// Method-level (single route)
-@UseGuards(AuthGuard, new RolesGuard(['admin']))
+// Method-level (single route) — one list runs left to right, so the identity exists before RolesGuard
+@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
 @Delete('/:id')
 async delete(@Param('id') id: string) { ... }
 
 // Combined: controller guards run first, then route guards
-@UseGuards(AuthGuard)
+@UseGuards(VerifiedTokenGuard)
 @Controller('/admin')
 class AdminController extends BaseController {
-  @UseGuards(new RolesGuard(['admin']))
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/user/:id')
   deleteUser() { ... }
 }
@@ -99,6 +102,72 @@ transport-specific `@UseWsGuards` / `@UseMessageGuards` on the same handler — 
 first. **Every guard merge deduplicates by identity**, on all three transports: controller+route,
 class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once,
 so a guard that logs, counts or calls out does it once per invocation, at whatever levels it is named.
+
+**A method-level `@UseGuards` on a base method guards every override of it**, on an HTTP route,
+every WebSocket gateway handler type (`@OnMessage`, `@OnConnect`, `@OnDisconnect`, `@OnJoinRoom`,
+`@OnLeaveRoom`) and a queue consumer alike. Order: class guards, then the base method's guards,
+then the override's own; a guard named on both the base method and the override runs once. The
+override adds guards, it cannot drop an inherited one. Only `@UseGuards` carries over —
+`@UseWsGuards`, `@UseMessageGuards` and `@UseInterceptors` are read from the method that declares
+the handler, so an override does not inherit those.
+
+**A guard on `@OnJoinRoom` is access control for the room.** It runs BEFORE the room changes; a
+denial keeps the client out (not stored, not subscribed, not in `client.rooms`, no broadcasts),
+runs none of the room's `@OnJoinRoom` handlers and answers with the same `FORBIDDEN` error frame a
+denied `@OnMessage` gets. The guards of every `@OnJoinRoom` handler whose pattern matches the room
+are asked, in declaration order; one denial is enough. Each handler's list starts with the
+gateway-level guards (class-level `@UseGuards`, base gateway classes included), so with several
+matching handlers those run once per handler. When all allow, the client joins and the handlers run
+after it, no guard asked again for them. **A gateway-level `@UseGuards` decides EVERY client join**:
+a room no `@OnJoinRoom` handler matches (e.g. a server-filled `user:<id>`) is decided by the
+gateway-level guards alone — same order, once each, same `FORBIDDEN` frame, cancelled by a leave or
+a move like any pending join. Only a gateway WITHOUT gateway-level guards lets such a join through
+unasked. **A room guard reads the room from `ctx.getRoomName()`** — on every guard of a join or
+leave (matched or handler-less) and every `@OnJoinRoom`/`@OnLeaveRoom` interceptor it is the room
+the gateway adds the client to or removes it from, what `@RoomName()` injects; `undefined` on
+`@OnMessage`/`@OnConnect`/`@OnDisconnect`. NEVER derive the room from `getData()`: the gateway takes
+string data, else a non-empty `data.room`, else the `join:`/`leave:` suffix, so `join:user:42` with
+`{ room: '' }`, `5`, `[]` or `{}` joins `user:42`, and `join:lobby` with `'user:42'` joins `user:42`.
+Server-filled rooms: `@UseGuards(createGuard((ctx) => !ctx.getRoomName()?.startsWith('user:')))` on
+the gateway. In a handler-less join `getHandler()` = `{ type: 'joinRoom', handler: '', params: [],
+guards }` (no `pattern`) and `getPatternParams()` = `{}` — recognise it by `handler === ''`; a
+gateway-level guard written for `@OnMessage` must cope — one that denies or throws on it keeps
+clients out of every room no handler matches. The
+guard sees the client before the join, so `client.rooms` does not list the room yet —
+`WsRoomGuard('<the room being joined>')` denies every join to it. The guards cover only the client's own
+`join` message: a server-side `joinRoom(clientId, room)` never asks them. A `leave` never waits for
+a join — the client's `leave` and a server-side `leaveRoom()` (a kick) apply at once and cancel a
+still-pending join of the same room; the kick only on the instance holding the connection — with
+shared Redis storage, `leaveRoom()` on another instance does not cancel it and the join lands later. A cancelled join (by a leave or a Socket.IO move) is answered at
+once with the same `FORBIDDEN` frame; its guards' later verdict is ignored. A connection that closes
+before the guard answers is not added. Pending joins are not limited in number. A Socket.IO CONNECT
+that moves a connection to another gateway (`40/<namespace>,`) takes it out of every room it had in
+the same step (a server-side `joinRoom()` still writing is taken back), so no membership crosses
+gateways and the client rejoins rooms on the new gateway. A hook's grant does NOT cross a move: a
+target gateway with an `authenticate` hook runs it at the CONNECT (same token, a request with the
+upgrade's URL and headers) and `client.auth` / `client.metadata` become fresh copies of its answer;
+a hook that returns `false`, throws or takes over 10 s answers `connect_error` `Unauthorized` and the
+connection stays on its gateway, rooms and identity intact. Once the hook allowed, new EVENTs are
+held (≤ 100; more refuses the move, or closes the connection once the move is being recorded) and the swap waits (≤ 10 s, else `connect_error` `The connection
+could not be moved`) until the first gateway finished every message it was serving — a join pending
+on its guards is waited for, not cancelled — so no guard or handler body the first gateway awaits
+sees the target's grant; held EVENTs then go to whichever gateway the connection ends on. Work a
+handler starts WITHOUT awaiting it is not waited for and reads/writes the new identity after the
+swap. A second CONNECT meanwhile is refused. A target WITHOUT a hook refuses a move from a gateway that has one (`connect_error`).
+Between two hook-less gateways the connection moves as it is, INCLUDING what a handler wrote to
+`client.auth` — authenticate in the hook, never by assigning `client.auth` in a handler. A guard or
+handler body of a gateway a move took the connection away from never runs (answered `FORBIDDEN`,
+`Message cancelled: the connection moved to another gateway`); a close is not a move — a closed
+connection's message runs on. Every gateway a Socket.IO client
+reaches with `io('/<namespace>')` that guards on `client.auth` needs its OWN `authenticate` hook —
+or the client connects with `?namespace=<namespace>`. A `join`/`leave` whose room is not a string is
+ignored.
+
+The other lifecycle denials are silent to the client. A denied `@OnConnect` leaves the socket open
+without running the handler or sending its reply; a denied `@OnDisconnect` skips the cleanup written
+in it (the framework still unregisters the client); a denied `@OnLeaveRoom` skips the handler, and
+the client leaves the room anyway — the framework removes it first, so a leave guard can never keep
+a client in a room.
 
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved
@@ -121,17 +190,19 @@ parameter types left to fail on (next paragraph).
 `design:paramtypes` metadata DI reads only for classes with at least one decorator, so an
 undecorated guard with constructor parameters receives `undefined` for every one of them and
 nothing fails at startup either: there are no parameter types left to fail on. That holds for an
-undecorated guard that EXTENDS a decorated base guard too: DI reads a class's OWN
-`design:paramtypes`, never its parent's, so the subclass does not receive the base's dependencies
-by position — whatever the import order of `reflect-metadata`, and even when its parameters match
-the base's. Decorate the subclass and declare its constructor to have it injected. Startup warns
-about such a subclass (`<Guard> declares a constructor with parameters, but no types were emitted
-...`): add `@Service()` to it.
+undecorated guard that EXTENDS a decorated base guard too: without a decorator nothing tells a
+constructor it declares from none, so DI never hands it the base's dependencies — by position into
+parameters that may differ — whatever the import order of `reflect-metadata`, and even when its
+parameters match the base's. Decorate the subclass: one that declares no constructor is then
+injected with the base guard's constructor dependencies, `@Inject` and `@Optional()` included
+(since 0.9.0), and one that declares its own gets its own parameters. Startup warns about an
+undecorated subclass (`<Guard> declares a constructor with parameters, but no types were emitted
+...`, or `<Guard> declares no constructor of its own ...`): add `@Service()` to it.
 
 **An INSTANCE passed to `@UseGuards` is shared, a CLASS is not.** `@UseGuards(new SomeGuard(...))`
 hands over one object built at decoration time, and that single object serves every concurrent
-request. Stateless instances are fine — `new RolesGuard(['admin'])` only reads its constructor
-argument, which is why every instance-form example here is stateless. A guard that writes the
+request. Stateless instances are fine — `RolesGuard` keeps nothing but its constructor arguments,
+which is why every instance-form example here is stateless. A guard that writes the
 caller onto `this`, awaits, then reads `this` back will read whatever the LAST request wrote: two
 overlapping requests measurably let the denied one through. Keep per-request state in locals inside
 `canActivate`, or pass the class and let the framework construct it.
@@ -140,43 +211,109 @@ Function-based guards from `createHttpGuard(fn)` have no DI by design.
 
 ### Built-in Guards
 
-- **`AuthGuard`** — checks `Authorization: Bearer <token>` header presence
-- **`RolesGuard`** — compares required roles against whatever its `rolesExtractor` returns. It
-  requires **ALL** listed roles (`roles.every(...)`), not any of them:
-  `new RolesGuard(['admin', 'moderator'])` admits only a caller holding both. For an OR, pass a
-  custom `rolesExtractor` or use a single role.
+The built-in guards are **starter examples**: each checks that something is present or compares a
+value it is handed, and none verifies a credential. Production auth is the setup under
+"Production Authentication" below.
 
-**`RolesGuard`'s default extractor is not an authorization decision.** With no `rolesExtractor`
-it comma-splits the `x-user-roles` request header — a value the CALLER sends and nothing verifies,
-so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` passes both built-in guards.
-Always pass a `rolesExtractor` that reads a verified identity. If an already-deployed app depends
-on the header, its middleware must OVERWRITE the header on every request (`headers.set`), never
-fill it in only when absent — an absent-only write leaves a forged value in place. The same shape
-applies on the queue side: `MessageAuthGuard` and `MessageServiceGuard` trust `metadata.authorization`
-and `metadata.serviceId`, which the publisher writes and the broker does not authenticate.
+- **`BearerPresenceGuard`** — checks `Authorization: Bearer <token>` header presence; the token is
+  never decoded or verified, so `Bearer anything` passes
+- **`RolesGuard`** — `new RolesGuard(roles, rolesExtractor)`, **both arguments required**. It
+  compares the required roles against whatever the extractor returns and reads nothing from the
+  request on its own. It requires **ALL** listed roles (`roles.every(...)`), not any of them:
+  `new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser)` admits only a caller holding both.
+  For an OR, require a single role, or have the extractor add one when any accepted role is held.
 
-Both are **HTTP-only and deny everywhere else**: each begins with
+**`RolesGuard` is exactly as trustworthy as its extractor.** Read a verified identity —
+`() => getRequestContext()?.user?.roles ?? []`, written by a verifying guard that ran first — never
+a request header: an extractor reading `x-user-roles` returns what the caller wrote, so
+`curl -H 'x-user-roles: admin'` passes, with `BearerPresenceGuard` in front or not. A header is
+sound only when a middleware you control OVERWRITES it on every request (`headers.set`), never
+fills it in only when absent — an absent-only write leaves a forged value in place — and that rests
+on an ordering convention nothing enforces. Always pass an **instance**: a missing extractor is a
+compile error and a `TypeError` at construction, and the class form `@UseGuards(RolesGuard)` is
+constructed with no arguments on every request and answers 500 without reaching the handler. The
+same trust problem applies on the queue side: `MessageAuthorizationPresenceGuard` and
+`MessageServiceGuard` trust `metadata.authorization` and `metadata.serviceId`, which the publisher
+writes and the broker does not authenticate.
+
+`BearerPresenceGuard` and `RolesGuard` are **HTTP-only and deny everywhere else**: each begins with
 `if (!isHttpContext(context)) return false`, because both read a request. Guards created by
 `createHttpGuard(fn)` behave identically — the wrapper denies rather than calling `getRequest()` on
-a context that has none. This turns a class-level `@UseGuards(AuthGuard)` on a class that also
+a context that has none. This turns a class-level `@UseGuards(BearerPresenceGuard)` on a class that also
 carries `@Subscribe` handlers into an outage: every message is denied and nacked with
 `requeue: false`. Use `WsAuthGuard` / `WsPermissionGuard` (from `@onebun/core` WebSocket) and
-`MessageAuthGuard` / `MessageServiceGuard` (queue) on those transports, or write a `Guard` that
+`MessageAuthorizationPresenceGuard` / `MessageServiceGuard` (queue) on those transports, or write a `Guard` that
 narrows with `isHttpContext` / `isWsContext` / `isQueueContext` itself.
 
 <!-- typecheck: skip -->
 ```typescript
-import { AuthGuard, RolesGuard } from '@onebun/core';
+import { getRequestContext, RolesGuard } from '@onebun/core';
 
-// admin AND moderator — both roles must be present
-@UseGuards(AuthGuard, new RolesGuard(['admin', 'moderator']))
+// admin AND moderator — both roles must be present on the identity VerifiedTokenGuard recorded
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser))
 
-// Custom role extractor
+// Roles from the token payload
 new RolesGuard(['admin'], (ctx) => {
   const payload = parseJwt(ctx.getRequest().headers.get('authorization') ?? '');
   return payload?.roles ?? [];
 });
 ```
+
+Decoding a payload is not verifying it: that extractor is sound only behind a guard that already
+checked the token's signature.
+
+### Production Authentication
+
+Verification belongs to the application, in a guard that injects the service doing it. The verified
+identity goes on the request context (`AsyncLocalStorage`, per request), and `RolesGuard` reads it
+from there — never from a header, which the caller writes, and never from a field on a guard, which
+`RolesGuard` and the handler cannot see.
+
+<!-- typecheck: skip -->
+```typescript
+import type { HttpExecutionContext, HttpGuard } from '@onebun/core';
+import { getRequestContext, HttpException, RolesGuard, Service, updateRequestContext } from '@onebun/core';
+
+interface AuthenticatedUser { id: string; roles: string[] }
+
+declare module '@onebun/core' {
+  interface RequestContext {
+    user?: AuthenticatedUser;   // MUST be optional
+  }
+}
+
+@Service()
+class VerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: TokenService) {}   // TokenService goes in `providers`
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
+    const header = ctx.getRequest().headers.get('authorization');
+    if (!header?.startsWith('Bearer ')) return false;                         // 403
+    const user = await this.tokens.verify(header.slice('Bearer '.length));   // signature + expiry
+    if (!user) throw new HttpException(401, 'Invalid or expired token');     // 401
+    updateRequestContext({ user });
+    return true;
+  }
+}
+
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+
+@UseGuards(VerifiedTokenGuard)                                   // class level: runs first
+@Controller('/admin')
+class AdminController extends BaseController {
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Delete('/users/:id')
+  deleteUser(@Param('id') id: string) { ... }
+}
+```
+
+The verifying guard must run before `RolesGuard` — class level, or earlier in the same
+`@UseGuards(...)` list. Where it did not run, the context has no `user`, the extractor returns `[]`
+and `RolesGuard` denies. Handlers and services read the identity with `getRequestContext()?.user`.
+WebSocket verifies once per connection in the gateway's `authenticate` hook (`WsAuthGuard` and
+`WsPermissionGuard` read what it attached); queue metadata is publisher-written, so verify a
+signature in a guard of your own.
 
 ### Guard Response
 
@@ -187,8 +324,8 @@ answers 200, so the status is not the denial signal there; `code` is.
 
 On the other transports a denial is not a Response at all. WebSocket: the handler is skipped and an
 `error` frame `{ code: 'FORBIDDEN', event, message: 'Guard denied this message' }` goes back on the
-same ack id — the socket is **not** closed, since one denied message must not tear down a
-multiplexed connection. Queue: the message is `nack`ed with `requeue: false` (a guard decision is
+same ack id — for a denied `@OnMessage` and a denied room join alike — and the socket is **not**
+closed, since one denied message must not tear down a multiplexed connection. Queue: the message is `nack`ed with `requeue: false` (a guard decision is
 deterministic, so requeueing would deny the same message forever) and surfaces as
 `onMessageFailed`, not `onMessageProcessed`.
 
@@ -224,16 +361,18 @@ const myFilter = createExceptionFilter((error, ctx) => {
   if (error instanceof MyCustomError) {
     return Response.json({ success: false, error: error.message }, { status: 200 });
   }
-  throw error; // delegate to the default filter
+
+  return undefined; // decline: the next filter outwards gets it
 });
 
 // Class-based
 class ValidationFilter implements ExceptionFilter {
-  catch(error: unknown, ctx: HttpExecutionContext): Response {
+  catch(error: unknown, ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
       return Response.json({ success: false, error: error.message });
     }
-    throw error;
+
+    return undefined; // decline
   }
 }
 ```
@@ -280,7 +419,7 @@ file/form parameter decorators.
 | Error type | HTTP status | Body |
 |---|---|---|
 | `HttpException` | exception's `statusCode` | `{ success: false, error: message, code: statusCode, details: {} }` |
-| `OneBunBaseError` | `toHttpStatus(error.code)` | `error.toErrorResponse()` → `{ success: false, error, code, details, originalError }` |
+| `OneBunBaseError` | `error.code` when it is 400–599, else 500 | `error.toErrorResponse()` → `{ success: false, error, code, details, originalError }` |
 | Any other `Error` or thrown value | `toHttpStatus(error.code)`, else 500 | `{ success: false, error: 'Internal Server Error', code, details: {} }` |
 
 Three things about the last row that a reader will otherwise get wrong:
@@ -301,8 +440,21 @@ Three things about the last row that a reader will otherwise get wrong:
   both, deliberately not derived from `NODE_ENV`, since an unset or mistyped `NODE_ENV` would flip
   a security-relevant default the wrong way with no signal.
 
-Nothing is lost operationally: the application logs the whole error, message and stack included,
-before the filter runs — grep the logs for `Unhandled error in <Controller>.<handler>`.
+Nothing is lost operationally: an error that reaches this row is logged whole, message and stack
+included, before the default filter answers — grep the logs for `Unhandled error in <Controller>.<handler>`.
+
+**What gets logged at error level.** `Unhandled error in <Controller>.<handler>:` is written only
+when no route/controller/global filter answered — the error is on its way to the default filter —
+and never for an `HttpException` or a `OneBunBaseError`, except an HTTP-client failure the handler let
+escape (logged with `{ code, details }`, see below). An error a filter answered is not logged
+by the framework, so mapping a domain error class to a 4xx in a filter produces no error-level line;
+a filter that answers a real failure reports it itself. A filter that throws or rejects — including
+one that rethrows to decline — is logged as `Exception filter <name> threw; …`, and one that
+returns neither a Response nor `undefined`/`null` as `… returned neither a Response nor undefined; …`,
+each followed by the unhandled line for the error it was handed: decline with `return undefined`.
+The line is written after every filter settled, so an async filter that never settles leaves the
+request pending with nothing logged — bound slow work in a filter. HTTP only — WebSocket and queue
+handlers have no exception-filter chain.
 
 **The `OneBunBaseError` row leaves an HTTP-client error's transport details out.** A
 `OneBunBaseError` is sent whole, `details` and `originalError` included — except the transport
@@ -310,15 +462,33 @@ details of an error `@onebun/requests` produced: an `HTTP_ERROR`'s `details.head
 `set-cookie`), `details.url` and `details.details` (the upstream's body); a `REDIRECT_ERROR`'s
 `details.url` and `details.location`; the raw error in `details.details` of a transport failure
 (Bun's connection error names the URL) and of `RESPONSE_PARSE/READ/DECODE_ERROR`. They are dropped at
-any depth — `client.req()` nests the failure under `details.originalError` — by serializing with the
-`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`).
+any depth — `client.req()` with an `errors` map nests the failure under `details.originalError` — by serializing with the
+`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`). Every
+Promise method of the HTTP client and the service client rejects with such a `OneBunBaseError` (the class
+the status names, the client's record as `details` by reference), so an escaped client call answers with
+the upstream's status minus the transport details, not an unhandled 500. A
+code outside 400–599 (a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx, a `RESPONSE_PARSE_ERROR`'s 2xx)
+answers HTTP 500 and keeps the `code` in the body; a OneBun client reading such a body takes the HTTP
+status (500), never a `TransportError` — a body's `code` counts only when it is 400–599. A OneBun
+callee's own error (`{ success: false, error, code, details }` in its body) keeps its status and `error`
+on the way out, but its `details` and `originalError` go out as `{}`: they were written for the calling
+service's code, which reads them whole. To pass them on, throw your own error with a copy
+(`new ConflictError(e.error, { ...e.details })`). The escaped client failure no filter answered is also
+LOGGED at error level (`Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, `details` minus
+the transport details: no URL, upstream headers or body — log those where you catch), unlike a `OneBunBaseError`
+the application throws itself; `isHttpClientFailure(error)` (from `@onebun/core` / `@onebun/requests`)
+tells one apart. The client's own `AUTH_ERROR` (signing failed) is an `UnauthorizedError`, 401 — map it
+if your caller must not read it as its own credentials failing.
 `exposeErrorDetails: true` sends them. Only records the client built are touched: an author-written
 `details: { headers, url }` is sent whole, and so is a COPY of a client record
 (`{ ...e.details, extra }`) — rebuild errors from `e.details` by reference, or pick fields. A filter
 of your own that serializes such an error, or puts its `details` into a body of its own (a
 `ValidationError` from an upstream's 422 carries the client's record as `details`):
-`JSON.stringify(body, withoutTransportDetails)`. Filters see only throws: a handler that RETURNS a
-client failure (`return outcome.left`) sends it whole as its `result`.
+`JSON.stringify(body, withoutTransportDetails)`. A filter of your own that answers with `error.code` as
+the HTTP status must map a code outside 400–599 to 500 (`error.code >= 400 && error.code <= 599 ?
+error.code : 500`): `new Response(body, { status: 0 })` throws RangeError, the filter is reported as
+buggy and the default filter answers, and a 3xx or 2xx would read as success. Filters see only throws:
+a handler that RETURNS a client failure (`return outcome.left`) sends it whole as its `result`.
 
 `httpEnvelope: true` overrides the status column: every row answers HTTP 200 and the real status
 lives in `code`.

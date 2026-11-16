@@ -642,20 +642,30 @@ describe('docs/testing.md — createMockSyncLogger', () => {
     expect(service.currentLogger()).toBe(logger);
 
     // "All methods are no-ops" is a claim about OUTPUT, which a return value cannot show, and a
-    // silent logger cannot report on its own silence. So the console — where the framework's real
-    // SyncLogger ends up — is watched across the service call, and the same call is then replayed
-    // through a recorder to prove it is the mock swallowing it, not the call never happening.
+    // silent logger cannot report on its own silence. So the output is watched across the service
+    // call, and the same call is then replayed through a recorder to prove it is the mock
+    // swallowing it, not the call never happening. The framework's real SyncLogger ends up on
+    // `process.stdout` / `process.stderr` (its console transport writes to them directly), the
+    // console methods are watched as well for any other route.
     const written: string[] = [];
-    const consoleSpies = CONSOLE_METHODS.map(method => spyOn(console, method)
-      .mockImplementation((...args: unknown[]) => {
-        written.push(`${method}: ${args.join(' ')}`);
-      }));
+    const outputSpies = [
+      ...CONSOLE_METHODS.map(method => spyOn(console, method)
+        .mockImplementation((...args: unknown[]) => {
+          written.push(`${method}: ${args.join(' ')}`);
+        })),
+      ...(['stdout', 'stderr'] as const).map(stream => spyOn(process[stream], 'write')
+        .mockImplementation(((chunk: unknown) => {
+          written.push(`${stream}: ${String(chunk)}`);
+
+          return true;
+        }) as never)),
+    ];
 
     try {
       service.emit();
     } finally {
       // `mockRestore()` also clears the recorded calls, hence the array of our own.
-      consoleSpies.forEach(spy => spy.mockRestore());
+      outputSpies.forEach(spy => spy.mockRestore());
     }
 
     expect(written).toEqual([]);

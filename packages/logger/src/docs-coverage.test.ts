@@ -46,28 +46,27 @@ import { Span } from '@onebun/trace';
 // the workspace links `@onebun/*` per package, and packages/logger has no link to core, while the
 // root tsconfig maps only the bare `@onebun/core` specifier. Same module, reached by file path.
 import { makeMockLoggerLayer } from '../../core/src/testing';
+import { captureLogStreams, type StreamCapture } from '../tests/stream-capture';
 
 // --- Console capture -------------------------------------------------------------
 
 type ConsoleSpy = ReturnType<typeof spyOn>;
 
+let capture: StreamCapture;
 let logSpy: ConsoleSpy;
 let infoSpy: ConsoleSpy;
 let warnSpy: ConsoleSpy;
 let errorSpy: ConsoleSpy;
 
 beforeEach(() => {
-  logSpy = spyOn(console, 'log').mockImplementation(() => undefined);
-  infoSpy = spyOn(console, 'info').mockImplementation(() => undefined);
-  warnSpy = spyOn(console, 'warn').mockImplementation(() => undefined);
-  errorSpy = spyOn(console, 'error').mockImplementation(() => undefined);
+  capture = captureLogStreams();
+  ({
+    logSpy, infoSpy, warnSpy, errorSpy, 
+  } = capture);
 });
 
 afterEach(() => {
-  logSpy.mockRestore();
-  infoSpy.mockRestore();
-  warnSpy.mockRestore();
-  errorSpy.mockRestore();
+  capture.restore();
 });
 
 const clearConsoleSpies = (): void => {

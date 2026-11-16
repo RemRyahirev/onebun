@@ -15,11 +15,7 @@ import {
   it,
   expect,
 } from 'bun:test';
-import {
-  Cause,
-  Layer,
-  Runtime,
-} from 'effect';
+import { Layer } from 'effect';
 
 import type {
   BeforeApplicationDestroy,
@@ -40,8 +36,8 @@ import {
   getCurrentTraceContext,
   HttpException,
   HttpStatusCode,
-  isErrorResponse,
   Module,
+  NotFoundError,
   OneBunApplication,
   Post,
   Query,
@@ -124,7 +120,9 @@ interface StubService {
 }
 
 /**
- * A service "running in another process": answers raw JSON, records the paths it was asked for.
+ * A users service "running in another process", answering as a OneBun service does: a found user in
+ * the success envelope, `{ success: true, result: user }`, and an unknown one with the default
+ * filter's 404 body. Records the paths it was asked for.
  */
 function startUsersStub(users: Record<string, { id: string; name: string; email: string }>): StubService {
   const paths: string[] = [];
@@ -138,13 +136,15 @@ function startUsersStub(users: Record<string, { id: string; name: string; email:
       const user = users[id];
 
       if (!user) {
-        return new Response(JSON.stringify({ error: 'not found' }), {
+        return new Response(JSON.stringify({
+          success: false, error: 'User not found', code: HttpStatusCode.NOT_FOUND, details: {},
+        }), {
           status: HttpStatusCode.NOT_FOUND,
           headers: new Headers([['content-type', 'application/json']]),
         });
       }
 
-      return new Response(JSON.stringify(user), {
+      return new Response(JSON.stringify({ success: true, result: user }), {
         status: HttpStatusCode.OK,
         headers: new Headers([['content-type', 'application/json']]),
       });
@@ -1056,15 +1056,20 @@ describe('Multi-Service Example (docs/examples/multi-service.md)', () => {
         userId: string;
         items: Array<{ productId: string; quantity: number; price: number }>;
       }): Promise<Order> {
-        // Verify user exists by calling Users service
-        const userResponse = await this.usersClient.get<UpstreamUser>(`/users/${data.userId}`);
-
-        if (isErrorResponse(userResponse)) {
-          this.logger.warn('User not found', { userId: data.userId });
-          throw new Error('User not found');
+        // Verify user exists by calling Users service. A failed request rejects: an unknown user is
+        // the Users service's 404, a NotFoundError. req() resolves the body, which a OneBun service
+        // sends as its envelope, { success: true, result: user }
+        let user: UpstreamUser;
+        try {
+          user = (await this.usersClient.req<{ result: UpstreamUser }>('GET', `/users/${data.userId}`)).result;
+        } catch (error) {
+          if (error instanceof NotFoundError) {
+            this.logger.warn('User not found', { userId: data.userId });
+            throw new Error('User not found');
+          }
+          throw error;
         }
 
-        const user = userResponse.result;
         this.logger.info('User verified', { userId: user.id, name: user.name });
 
         const total = data.items.reduce((sum, item) => sum + item.quantity * item.price, 0);
@@ -1120,7 +1125,8 @@ describe('Multi-Service Example (docs/examples/multi-service.md)', () => {
       // The client built from `this.config.get('usersServiceUrl')` really called the users service
       expect(usersStub.paths).toEqual(['/users/u-1']);
 
-      // `userResponse.result` is the upstream user — the page logs its id and name
+      // `req()` resolves the users service's envelope, and the page reads the user out of its
+      // `result` — it logs the user's id and name, not undefined
       expect(recording.records).toContainEqual({
         level: 'info',
         message: 'User verified',
@@ -1138,23 +1144,19 @@ describe('Multi-Service Example (docs/examples/multi-service.md)', () => {
       });
       expect(order.total).toBeCloseTo(109.97, 5);
 
-      // An unknown user aborts the creation — but NOT through the branch the page shows. The
-      // Promise API rejects on an HTTP failure instead of returning an ErrorResponse (see
-      // docs/api/requests.md#reading-the-errorresponse), so `isErrorResponse(userResponse)` is
-      // never reached: the awaited call throws first, and the documented warning is not written.
+      // An unknown user aborts the creation through the branch the page shows: the users
+      // service's 404 rejects as a NotFoundError (docs/api/requests.md#a-failed-request-rejects),
+      // the service writes the documented warning and throws the Error the orders controller
+      // maps to its own 404. Up to 0.8 the page tested isErrorResponse(userResponse), a branch
+      // that never ran, since the call had already rejected.
       const failure = await service.create({ userId: 'u-404', items: [] })
         .then(() => null, (error: unknown) => error);
 
       expect(usersStub.paths).toEqual(['/users/u-1', '/users/u-404']);
-      expect(Runtime.isFiberFailure(failure)).toBe(true);
-
-      const squashed = Runtime.isFiberFailure(failure)
-        ? Cause.squash(failure[Runtime.FiberFailureCauseId])
-        : failure;
-
-      expect(isErrorResponse(squashed)).toBe(true);
-      expect(isErrorResponse(squashed) ? squashed.code : undefined).toBe(HttpStatusCode.NOT_FOUND);
-      expect(recording.records).not.toContainEqual({
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(NotFoundError);
+      expect((failure as Error).message).toBe('User not found');
+      expect(recording.records).toContainEqual({
         level: 'warn',
         message: 'User not found',
         args: [{ userId: 'u-404' }],
@@ -1441,16 +1443,17 @@ describe('Multi-Service Example (docs/examples/multi-service.md)', () => {
       expect(app.getServiceUrl('orders')).toBe(`http://127.0.0.1:${app.getApplication('orders')!.getPort()}`);
       expect((await fetch(`${app.getServiceUrl('orders')}/basket`)).status).toBe(HttpStatusCode.OK);
 
-      // From docs: the client built on that URL reaches the remote service
+      // From docs: the client built on that URL reaches the remote service, and the user is the
+      // `result` of the envelope that service answers with
       const usersClient = createHttpClient({ baseUrl: app.getServiceUrl('users') });
-      const user = await usersClient.get<{ id: string; name: string }>('/users/u-7');
+      const userId = 'u-7';
+      const { result: user } = await usersClient.req<{ result: { id: string; name: string; email: string } }>(
+        'GET',
+        `/users/${userId}`,
+      );
 
-      expect(isErrorResponse(user)).toBe(false);
       expect(usersStub.paths).toEqual(['/users/u-7']);
-      expect(user).toMatchObject({
-        success: true,
-        result: { id: 'u-7', name: 'Grace' },
-      });
+      expect(user).toEqual({ id: 'u-7', name: 'Grace', email: 'grace@example.com' });
     } finally {
       await app.stop();
       TypedEnv.clear();

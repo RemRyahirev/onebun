@@ -72,7 +72,11 @@ import { BadGatewayError } from '@onebun/requests';
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
 import { MessageExecutionContextImpl } from './queue/guards';
-import { makeMockLoggerLayer, makeRecordingLoggerLayer } from './testing';
+import {
+  makeMockLoggerLayer,
+  makeRecordingLoggerLayer,
+  TestingModule,
+} from './testing';
 
 import {
   All,
@@ -104,6 +108,7 @@ import {
   NotFoundError,
   InternalServerError,
   OneBunBaseError,
+  ConflictError,
   Env,
   validate,
   validateOrThrow,
@@ -166,7 +171,7 @@ import {
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
   UseGuards,
-  AuthGuard,
+  BearerPresenceGuard,
   RolesGuard,
   createHttpGuard,
   HttpExecutionContextImpl,
@@ -191,9 +196,11 @@ import {
   CircularDependencyError,
   DependencyResolutionError,
   OneBunBootstrapError,
+  ServiceConstructionError,
   registerModule,
   resetRegistrations,
   createHttpClient,
+  isHttpClientFailure,
   withoutTransportDetails,
 } from './';
 
@@ -2636,8 +2643,8 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
     /**
      * @source docs:api/services.md#lifecycle-hooks
      * onModuleInit is called for services in ALL modules across the entire
-     * import tree, not just the root module. Deeply nested modules are
-     * initialized in depth-first order.
+     * import tree, not just the root module. Every imported module is
+     * initialized before the module importing it: AuthModule, UserModule, AppModule.
      */
     it('should call onModuleInit for services across the entire module import tree', async () => {
       const moduleMod = await import('./module/module');
@@ -2687,11 +2694,146 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
       const mod = new moduleMod.OneBunModule(AppModule, testUtils.makeMockLoggerLayer());
       await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
 
-      // All three modules' services should have onModuleInit called
-      expect(initLog).toContain('auth');
-      expect(initLog).toContain('user');
-      expect(initLog).toContain('app');
-      expect(initLog.length).toBe(3);
+      // All three modules' services have onModuleInit called, the deepest import first
+      // and the root module last (0.8.x: app, auth, user)
+      expect(initLog).toEqual(['auth', 'user', 'app']);
+    });
+
+    describe('Initialization Across Modules', () => {
+      // From docs: the DatabaseModule / AppModule example
+      @Service()
+      class ConnectionService extends BaseService implements OnModuleInit {
+        private open = false;
+
+        async onModuleInit(): Promise<void> {
+          // Open the pool here, not in the constructor
+          this.open = true;
+        }
+
+        async query(sql: string): Promise<string[]> {
+          if (!this.open) {
+            throw new Error('Connection is not open yet');
+          }
+
+          return [sql];
+        }
+      }
+
+      @Module({ providers: [ConnectionService], exports: [ConnectionService] })
+      class DatabaseModule {}
+
+      @Service()
+      class CatalogService extends BaseService implements OnModuleInit {
+        private products: string[] = [];
+
+        constructor(private readonly db: ConnectionService) {
+          super();
+        }
+
+        async onModuleInit(): Promise<void> {
+          // DatabaseModule's hooks have completed: the connection is open
+          this.products = await this.db.query('SELECT name FROM products');
+        }
+
+        list(): string[] {
+          return this.products;
+        }
+      }
+
+      @Module({ imports: [DatabaseModule], providers: [CatalogService] })
+      class AppModule {}
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should run an imported module\'s hooks before the root module\'s (0.8.x threw "not open yet")', async () => {
+        const app = new OneBunApplication(AppModule, {
+          port: 0,
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+          loggerLayer: makeMockLoggerLayer(),
+        });
+        await app.start();
+        try {
+          expect(app.getService(CatalogService).list()).toEqual(['SELECT name FROM products']);
+        } finally {
+          await app.stop();
+        }
+      });
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should initialize TestingModule providers after everything in its imports', async () => {
+        const testing = await TestingModule.create({
+          imports: [DatabaseModule],
+          providers: [CatalogService],
+        }).compile();
+        try {
+          expect(testing.get(CatalogService).list()).toEqual(['SELECT name FROM products']);
+        } finally {
+          await testing.close();
+        }
+      });
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should run a root service\'s onModuleDestroy without its onModuleInit when an import\'s hook fails', async () => {
+        // From docs: the 0.9.0 migration note — an imported connection unreachable at boot
+        const events: string[] = [];
+
+        @Service()
+        class UnreachableConnection extends BaseService implements OnModuleInit, OnModuleDestroy {
+          async onModuleInit(): Promise<void> {
+            events.push('connection:init');
+            throw new Error('connection refused');
+          }
+
+          async onModuleDestroy(): Promise<void> {
+            events.push('connection:destroy');
+          }
+        }
+
+        @Module({ providers: [UnreachableConnection], exports: [UnreachableConnection] })
+        class UnreachableDatabaseModule {}
+
+        @Service()
+        class Worker extends BaseService implements OnModuleInit, OnModuleDestroy {
+          private timer: Timer | null = null;
+
+          constructor(readonly connection: UnreachableConnection) {
+            super();
+          }
+
+          async onModuleInit(): Promise<void> {
+            events.push('worker:init');
+            this.timer = setInterval(() => undefined, 60_000);
+          }
+
+          async onModuleDestroy(): Promise<void> {
+            // Guarded: onModuleInit never ran, so there is no timer to clear
+            events.push(`worker:destroy (timer ${this.timer ? 'set' : 'never set'})`);
+            if (this.timer) {
+              clearInterval(this.timer);
+            }
+          }
+        }
+
+        @Module({ imports: [UnreachableDatabaseModule], providers: [Worker] })
+        class WorkerAppModule {}
+
+        const app = new OneBunApplication(WorkerAppModule, {
+          port: 0,
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+          loggerLayer: makeMockLoggerLayer(),
+        });
+
+        await expect(app.start()).rejects.toThrow('connection refused');
+        // 0.8.x: worker:init ran first, so its destroy found the timer set
+        expect(events).toEqual(['connection:init', 'worker:destroy (timer never set)', 'connection:destroy']);
+      });
     });
   });
 });
@@ -3390,7 +3532,94 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   /**
    * @source docs:api/requests.md#service-client-path-values
    */
-  it('should deliver a percent-encoded path value decoded, and refuse the raw one before sending', async () => {
+  it('should encode every path value so the handler receives it unchanged, and refuse the ones no encoding can send', async () => {
+    const received: string[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id };
+      }
+    }
+
+    @Controller('/admin')
+    class AdminController extends BaseController {
+      @Get('/secret')
+      secret() {
+        received.push('AdminController.secret');
+
+        return { secret: 'S3CR3T' };
+      }
+    }
+
+    @Module({ controllers: [UsersController, AdminController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      sent.push(`${init?.method} ${new URL(String(input)).pathname}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      await usersClient.UsersController.findById('team/alice');
+
+      // From docs: sent as GET /users/100%25; the handler receives '100%'
+      await usersClient.UsersController.findById('100%');
+
+      // From docs: a value naming another route is one segment of the declared one
+      await usersClient.UsersController.findById('../admin/secret');
+
+      // From docs: text that only looks encoded is data too
+      await usersClient.UsersController.findById('%2e%2e');
+
+      expect(sent).toEqual([
+        'GET /users/team%2Falice',
+        'GET /users/100%25',
+        'GET /users/..%2Fadmin%2Fsecret',
+        'GET /users/%252e%252e',
+      ]);
+      expect(received).toEqual(['team/alice', '100%', '../admin/secret', '%2e%2e']);
+
+      // From the table: each of these is refused with a TypeError naming the call, and nothing is sent.
+      for (const value of [null, undefined, '', '.', '..', '\uD800']) {
+        const error = await usersClient.UsersController.findById(value).then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+        expect(error).toBeInstanceOf(TypeError);
+        expect((error as TypeError).message).toStartWith('UsersController.findById: path parameter "id" ');
+      }
+
+      // From the table: `encodeURIComponent` leaves dots alone, which is why `.` and `..` have no path spelling.
+      expect(encodeURIComponent('..')).toBe('..');
+
+      expect(sent).toHaveLength(4);
+      expect(received).toEqual(['team/alice', '100%', '../admin/secret', '%2e%2e']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-path-values-upgrade
+   */
+  it('should deliver a value the caller encoded first still encoded, and the raw value decoded', async () => {
     const received: string[] = [];
 
     @Controller('/users')
@@ -3422,38 +3651,28 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      // From docs: encoded by the caller, so it is encoded twice
       await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
 
-      expect(sent).toEqual(['GET /users/team%2Falice']);
-      expect(received).toEqual(['team/alice']);
+      // From docs: the raw value
+      await usersClient.UsersController.findById('team/alice');
 
-      // From docs: rejects with a TypeError and sends nothing
-      const refused = await usersClient.UsersController.findById('team/alice').then(
-        () => undefined,
-        (error: unknown) => error,
-      );
+      expect(sent).toEqual(['GET /users/team%252Falice', 'GET /users/team%2Falice']);
+      expect(received).toEqual(['team%2Falice', 'team/alice']);
 
-      expect(refused).toBeInstanceOf(TypeError);
-      expect((refused as TypeError).message).toStartWith(
-        'UsersController.findById: path parameter "id" contains "/", which ends a path segment, ',
-      );
-
-      // From the table: each of these would have reached a different route, so none is sent.
-      for (const value of [null, undefined, '', '.', '..', '%2e%2e', '.%2E', 'a\\b', 'a?b', 'a#b', '.\t.', '.. ']) {
-        const error = await usersClient.UsersController.findById(value).then(
-          () => undefined,
-          (thrown: unknown) => thrown,
-        );
-
-        expect(error).toBeInstanceOf(TypeError);
+      // From docs: sent as data, not refused
+      const refusedIn082 = ['a/b', 'a\\b', 'a?b', 'a#b', '%2e', '%2e%2e', '.%2E', '%2E.', '.\t.', '.\n.', '.. '];
+      for (const value of refusedIn082) {
+        await usersClient.UsersController.findById(value);
       }
 
-      // `encodeURIComponent` leaves dots alone, which is why `..` has no path spelling at all.
-      expect(encodeURIComponent('..')).toBe('..');
+      expect(received.slice(2)).toEqual(refusedIn082);
 
-      expect(sent).toEqual(['GET /users/team%2Falice']);
-      expect(received).toEqual(['team/alice']);
+      // From docs: `encodeURIComponent` also escapes characters a path segment may carry as they are
+      await usersClient.UsersController.findById('user@example.com');
+
+      expect(sent.at(-1)).toBe('GET /users/user%40example.com');
+      expect(received.at(-1)).toBe('user@example.com');
     } finally {
       globalThis.fetch = originalFetch;
       await app.stop();
@@ -3525,7 +3744,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   /**
    * @source docs:api/requests.md#service-client-typing
    */
-  it('should check controller and method names at run time only, and resolve an untyped envelope', async () => {
+  it('should check controller and method names at run time only, and resolve the handler value as unknown', async () => {
     const received: unknown[] = [];
 
     @Controller('/users')
@@ -3558,38 +3777,38 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       });
 
       // From the table, compile time: the client is `Record<string, ControllerClient>`, the
-      // exported `ServiceClient<TDef>` is the same string index, and the result is `any`. These
-      // lines are checked by `bun run typecheck`, which covers this file.
+      // exported `ServiceClient<TDef>` is the same string index, and the result is `unknown`, not
+      // `any`. These lines are checked by `bun run typecheck`, which covers this file.
       type IsAny<T> = 0 extends 1 & T ? true : false;
+      type IsUnknown<T> = IsAny<T> extends true ? false : unknown extends T ? true : false;
+      type Result = Awaited<ReturnType<ControllerClient[string]>>;
       const asRecord: Record<string, ControllerClient> = usersClient;
       const asServiceClient: ServiceClient<ServiceDefinition> = usersClient;
-      const resultIsAny: IsAny<Awaited<ReturnType<ControllerClient[string]>>> = true;
+      const resultIsAny: IsAny<Result> = false;
+      const resultIsUnknown: IsUnknown<Result> = true;
       expect(asRecord).toBe(usersClient);
       expect(asServiceClient).toBe(usersClient);
-      expect(resultIsAny).toBe(true);
+      expect(resultIsAny).toBe(false);
+      expect(resultIsUnknown).toBe(true);
 
       interface User {
         id: string;
         name: string;
       }
 
-      // From docs: the envelope, exactly as the comment on the page shows it
-      const response = await usersClient.UsersController.findById('123');
-      expect(response).toEqual({
-        success: true,
-        result: { success: true, result: { id: '123', name: 'Ada' } },
-        statusCode: 200,
-        retryCount: 0,
-      });
-
-      // From docs: the annotation is an assertion, and the handler's value is two levels down
-      const user: User = response.result.result;
+      // From docs: the assertion is the caller's, and the value is the handler's own
+      const user = (await usersClient.UsersController.findById('123')) as User;
       expect(user).toEqual({ id: '123', name: 'Ada' });
+
+      // From docs: a property read on the unasserted value fails `tsc`
+      const found = await usersClient.UsersController.findById('123');
+      // @ts-expect-error `found` is unknown: `.result.result` was the 0.8 envelope
+      expect(found.result).toBeUndefined();
 
       // From docs: extra arguments are dropped without an error, and a path value is sent as text
       await usersClient.UsersController.findById('123', 'extra', 42);
       await usersClient.UsersController.findById(42);
-      expect(received).toEqual(['123', '123', '42']);
+      expect(received).toEqual(['123', '123', '123', '42']);
 
       // From the table, run time: a name the definition lacks compiles and throws when it is read
       expect(() => usersClient.UserController).toThrow(
@@ -3598,26 +3817,104 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       expect(() => usersClient.UsersController.findByld).toThrow(
         'Method "findByld" not found in controller "UsersController"',
       );
-      expect(received).toEqual(['123', '123', '42']);
+      expect(received).toEqual(['123', '123', '123', '42']);
     } finally {
       await app.stop();
     }
   });
 
   /**
-   * Arguments fill every decorated parameter by position, but only path, query and body values
-   * are sent; the one run-time check on the arguments is the refusal of a missing path value.
+   * @source docs:api/requests.md#service-client-results
+   */
+  it('should resolve the handler value and reject with the error class the callee threw', async () => {
+    // From docs: the callee's controller, as the page shows it
+    @Controller('/items')
+    class ItemsController extends BaseController {
+      @Put('/:id')
+      update(@Param('id') _id: string, @Body() body: { revision: number }) {
+        throw new ConflictError('REVISION_CONFLICT', { expected: body.revision, actual: 2 });
+      }
+
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id, name: 'Ada' };
+      }
+
+      @Post('/')
+      create(@Body() body: { name: string }) {
+        return this.success({ id: 'b', ...body }, 201);
+      }
+
+      @Get('/:id/raw')
+      raw(@Param('id') id: string) {
+        return Response.json({ id, shape: 'mine' });
+      }
+
+      @Get('/:id/missing')
+      missing(@Param('id') id: string) {
+        throw new NotFoundError('NO_SUCH_ITEM', { id });
+      }
+    }
+
+    @Module({ controllers: [ItemsController] })
+    class ItemsModule {}
+
+    const app = new OneBunApplication(ItemsModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const itemsClient = createServiceClient(createServiceDefinition(ItemsModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+        retries: { max: 0 },
+      });
+
+      // From docs: a call resolves with the value the handler returned
+      expect(await itemsClient.ItemsController.findById('a')).toEqual({ id: 'a', name: 'Ada' });
+      // From docs: `this.success(item, 201)` resolves with its `result`, any other body whole
+      expect(await itemsClient.ItemsController.create({ name: 'Grace' })).toEqual({ id: 'b', name: 'Grace' });
+      expect(await itemsClient.ItemsController.raw('a')).toEqual({ id: 'a', shape: 'mine' });
+
+      // From docs: the caller's catch, as the page shows it
+      let caught: { error: string; code: number; details: Record<string, unknown> } | undefined;
+      try {
+        await itemsClient.ItemsController.update('a', { revision: 1 });
+      } catch (error) {
+        if (error instanceof ConflictError) {
+          caught = { error: error.error, code: error.code, details: error.details };
+        }
+      }
+
+      expect(caught).toEqual({ error: 'REVISION_CONFLICT', code: 409, details: { expected: 1, actual: 2 } });
+
+      const missing = await itemsClient.ItemsController.missing('a').then(() => undefined, (error: unknown) => error);
+      expect(missing).toBeInstanceOf(NotFoundError);
+      expect(missing).toMatchObject({ code: 404, error: 'NO_SUCH_ITEM', details: { id: 'a' } });
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * The table's run-time column for arguments: the one check is the refusal of a missing path
+   * value, and a missing @Query or @Body argument is left out of the request.
    *
    * @source docs:api/requests.md#service-client-typing
    */
-  it('should match arguments to every decorated parameter, and send only @Param, @Query and @Body values', async () => {
+  it('should refuse a missing path value, and leave out a missing @Query or @Body argument', async () => {
     const received: unknown[][] = [];
 
     @Controller('/users')
     class UsersController extends BaseController {
       @Get('/:id')
-      findById(@Header('x-tenant') tenant: string | undefined, @Param('id') id: string) {
-        received.push(['findById', tenant ?? null, id]);
+      findById(@Param('id') id: string) {
+        received.push(['findById', id]);
 
         return { id };
       }
@@ -3655,31 +3952,572 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs: the header's position must be filled, and its value is not sent
-      await usersClient.UsersController.findById(undefined, '123');
-      await usersClient.UsersController.findById('acme', '123');
-      expect(received).toEqual([
-        ['findById', null, '123'],
-        ['findById', null, '123'],
-      ]);
-
-      // From docs: `findById('123')` puts '123' in the header's position, so `id` is undefined and
-      // the call is refused before anything is sent. So is a null path value
-      await expect(usersClient.UsersController.findById('123')).rejects.toThrow(
+      // From the table: a path parameter left out, or null, is refused before anything is sent
+      await expect(usersClient.UsersController.findById()).rejects.toThrow(
         'UsersController.findById: path parameter "id" is undefined',
       );
-      await expect(usersClient.UsersController.findById(undefined, null)).rejects.toThrow(TypeError);
-      expect(received).toHaveLength(2);
+      await expect(usersClient.UsersController.findById(null)).rejects.toThrow(TypeError);
+      expect(received).toEqual([]);
 
       // From the table: a missing @Query or @Body argument is not sent
       await usersClient.UsersController.list();
       await usersClient.UsersController.create();
-      expect(received.slice(2)).toEqual([
+      expect(received).toEqual([
         ['list', null],
         ['create', null],
       ]);
     } finally {
       await app.stop();
+    }
+  });
+
+  /**
+   * Only @Param, @Query and @Body take arguments, in declaration order. Through 0.8 the @Header
+   * below took the first argument and dropped it, so `findById('123', 'name')` was refused.
+   *
+   * @source docs:api/requests.md#service-client-arguments
+   */
+  it('should take one argument per @Param, @Query and @Body parameter, and none for a @Header', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(
+        @Header('x-tenant') tenant: string | null,
+        @Param('id') id: string,
+        @Query('fields') fields?: string,
+      ) {
+        return { id, tenant, fields };
+      }
+
+      // Not in the snippet: the prose's last sentence, a parameter with no decorator.
+      @Get('/:id/raw')
+      raw(@Param('id') id: string, _undecorated: unknown, @Query('fields') fields?: string) {
+        return { id, fields };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      sent.push(`${init?.method} ${url.pathname}${url.search}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sends GET /users/123?fields=name, and the header takes no argument
+      const response = await usersClient.UsersController.findById('123', 'name');
+      expect(sent).toEqual(['GET /users/123?fields=name']);
+      expect(response).toEqual({ id: '123', tenant: null, fields: 'name' });
+
+      // From docs: a missing @Query argument is not sent, extra arguments are dropped, and a path
+      // value is sent as its text
+      await usersClient.UsersController.findById('123');
+      await usersClient.UsersController.findById('123', 'name', 'extra', 42);
+      await usersClient.UsersController.findById(42);
+      expect(sent.slice(1)).toEqual([
+        'GET /users/123',
+        'GET /users/123?fields=name',
+        'GET /users/42',
+      ]);
+
+      // From docs: a parameter with no decorator takes no argument either
+      await usersClient.UsersController.raw('7', 'name');
+      expect(sent.slice(4)).toEqual(['GET /users/7/raw?fields=name']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-arguments-upgrade
+   */
+  it('should read a 0.8 placeholder as the first client argument, and list the endpoints whose calls change', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(
+        @Header('x-tenant') tenant: string | null,
+        @Param('id') id: string,
+        @Query('fields') fields?: string,
+      ) {
+        return { id, tenant, fields };
+      }
+
+      @Get('/')
+      list(@Header('x-tenant') tenant: string | null, @Query('page') page?: string) {
+        return { tenant, page };
+      }
+
+      // The header comes after the last client parameter: called exactly as before.
+      @Post('/')
+      create(@Body() body: unknown, @Header('x-tenant') tenant: string | null) {
+        return { body, tenant };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const wire: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      wire.push(`${init?.method} ${url.pathname}${url.search}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: a value in the header's place is read as the path value, so `undefined` is refused
+      await expect(usersClient.UsersController.findById(undefined, '123', 'name')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is undefined',
+      );
+      // From docs: a `null` placeholder in front of a @Param is refused the same way
+      await expect(usersClient.UsersController.findById(null, '123', 'name')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is null',
+      );
+      expect(wire).toEqual([]);
+
+      // From docs: the @Param and @Query values only
+      await usersClient.UsersController.findById('123', 'name');
+      expect(wire).toEqual(['GET /users/123?fields=name']);
+
+      // From docs: a placeholder that is not `undefined` moves every value one parameter later,
+      // and the last one is dropped. No error
+      await usersClient.UsersController.findById('acme', '123', 'name');
+      expect(wire.slice(1)).toEqual(['GET /users/acme?fields=123']);
+
+      // From docs: for a @Query, `undefined` sends no value, any other placeholder is sent as it
+      await usersClient.UsersController.list(undefined, '2');
+      await usersClient.UsersController.list('acme', '2');
+      expect(wire.slice(2)).toEqual(['GET /users/', 'GET /users/?page=acme']);
+
+      // From docs: the listing
+      const sent = new Set<ParamType>([ParamType.PATH, ParamType.QUERY, ParamType.BODY]);
+
+      const changed = createServiceDefinition(UsersModule)._endpoints
+        .filter(({ params = [] }) => {
+          const lastSent = Math.max(-1, ...params.filter((param) => sent.has(param.type)).map((param) => param.index));
+
+          return params.some((param) => !sent.has(param.type) && param.index < lastSent);
+        })
+        .map(({ controller, method }) => `${controller}.${method}`);
+
+      // `create` has its header after the body, so it is not listed
+      expect(changed.sort()).toEqual(['UsersController.findById', 'UsersController.list']);
+
+      // ... and it is called exactly as before
+      await usersClient.UsersController.create({ name: 'Ada' });
+      expect(wire.slice(4)).toEqual(['POST /users/']);
+
+      // From docs: a real value in the header's place, dropped through 0.8, now goes into the URL
+      const leaked = await usersClient.UsersController.list('Bearer secret-token');
+      expect(wire.slice(5)).toEqual(['GET /users/?page=Bearer+secret-token']);
+      expect(leaked).toEqual({ tenant: null, page: 'Bearer secret-token' });
+
+      // ... send it through the client's `headers` option instead
+      const tenantClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'x-tenant': 'acme' },
+      });
+      const scoped = await tenantClient.UsersController.list();
+      expect(wire.slice(6)).toEqual(['GET /users/']);
+      expect(scoped).toEqual({ tenant: 'acme' });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * Through 0.8 `['news', 'tech']` went out as `tags=news%2Ctech`, `'Hello'` as the bare text
+   * `Hello` (so `@Body()` read `undefined`), and `false` sent no body.
+   *
+   * @source docs:api/requests.md#service-client-query-body
+   */
+  it('should deliver a query array as an array and every body value as it was passed', async () => {
+    const received: unknown[] = [];
+
+    @Controller('/posts')
+    class PostsController extends BaseController {
+      @Get('/')
+      findByTags(@Query('tags') tags?: string[]) {
+        received.push({ tags });
+
+        return { tags };
+      }
+
+      @Put('/:id/title')
+      rename(@Param('id') id: string, @Body() title: string) {
+        received.push({ id, title });
+
+        return { id, title };
+      }
+
+      @Put('/:id/pinned')
+      setPinned(@Param('id') id: string, @Body() pinned: boolean) {
+        received.push({ id, pinned });
+
+        return { id, pinned };
+      }
+    }
+
+    @Module({ controllers: [PostsController] })
+    class PostsModule {}
+
+    const app = new OneBunApplication(PostsModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const wire: string[] = [];
+    const contentTypes: Array<string | null> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      wire.push(`${init?.method} ${url.pathname}${url.search} ${init?.body ?? '-'}`);
+      contentTypes.push(new Headers(init?.headers).get('content-type'));
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const postsClient = createServiceClient(createServiceDefinition(PostsModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: the four calls of the snippet
+      await postsClient.PostsController.findByTags(['news', 'tech']);
+      await postsClient.PostsController.findByTags(['news']);
+      await postsClient.PostsController.rename('42', 'Hello');
+      await postsClient.PostsController.setPinned('42', false);
+
+      expect(wire).toEqual([
+        'GET /posts/?tags%5B%5D=news&tags%5B%5D=tech -',
+        'GET /posts/?tags%5B%5D=news -',
+        'PUT /posts/42/title "Hello"',
+        'PUT /posts/42/pinned false',
+      ]);
+      expect(received).toEqual([
+        { tags: ['news', 'tech'] },
+        { tags: ['news'] },
+        { id: '42', title: 'Hello' },
+        { id: '42', pinned: false },
+      ]);
+      expect(contentTypes.every((contentType) => contentType === 'application/json')).toBe(true);
+
+      // From the table: a single value is one key and arrives as text; [], null and undefined send nothing
+      wire.length = 0;
+      received.length = 0;
+      for (const tags of ['news', 42, true, [], null, undefined]) {
+        await postsClient.PostsController.findByTags(tags);
+      }
+      expect(wire).toEqual([
+        'GET /posts/?tags=news -',
+        'GET /posts/?tags=42 -',
+        'GET /posts/?tags=true -',
+        'GET /posts/ -',
+        'GET /posts/ -',
+        'GET /posts/ -',
+      ]);
+      expect(received).toEqual([
+        { tags: 'news' },
+        { tags: '42' },
+        { tags: 'true' },
+        { tags: undefined },
+        { tags: undefined },
+        { tags: undefined },
+      ]);
+
+      // From the table: 0, false, '' and null arrive as the same value, undefined sends no body
+      wire.length = 0;
+      received.length = 0;
+      for (const title of [0, '', null, { text: 'Hi' }, undefined]) {
+        await postsClient.PostsController.rename('42', title);
+      }
+      expect(wire).toEqual([
+        'PUT /posts/42/title 0',
+        'PUT /posts/42/title ""',
+        'PUT /posts/42/title null',
+        'PUT /posts/42/title {"text":"Hi"}',
+        'PUT /posts/42/title -',
+      ]);
+      expect(received).toEqual([
+        { id: '42', title: 0 },
+        { id: '42', title: '' },
+        { id: '42', title: null },
+        { id: '42', title: { text: 'Hi' } },
+        { id: '42', title: undefined },
+      ]);
+
+      // From the table: a BigInt body is refused with a TypeError naming the call, and nothing is sent
+      wire.length = 0;
+      await expect(postsClient.PostsController.rename('42', 10n)).rejects.toThrow(
+        'PostsController.rename: the @Body value cannot be sent as JSON',
+      );
+      expect(wire).toEqual([]);
+
+      // From the table: bytes and streams are refused with a TypeError naming the call and the
+      // @Body argument, pointing to HttpClient, and nothing is sent — a Buffer included
+      const refusedBodies = [
+        new Uint8Array([1, 2]),
+        Buffer.from([1, 2]),
+        new ArrayBuffer(2),
+        new Blob(['hi']),
+        new ReadableStream(),
+      ];
+      for (const bytes of refusedBodies) {
+        await expect(postsClient.PostsController.rename('42', bytes)).rejects.toThrow(
+          /^PostsController\.rename: the @Body argument \(argument 2\) is a \w+, which has no JSON form.*through HttpClient/,
+        );
+      }
+      expect(wire).toEqual([]);
+
+      // From the prose: any other value with toJSON is a JSON value, and a Map has no fields
+      received.length = 0;
+      await postsClient.PostsController.rename('42', new URLSearchParams('a=1'));
+      await postsClient.PostsController.rename('42', new Map([['a', 1]]));
+      expect(wire).toEqual(['PUT /posts/42/title {"a":"1"}', 'PUT /posts/42/title {}']);
+      expect(received).toEqual([
+        { id: '42', title: { a: '1' } },
+        { id: '42', title: {} },
+      ]);
+
+      // From the prose: array elements are sent as text, null and undefined ones are left out,
+      // and an object in the query goes out as [object Object]
+      received.length = 0;
+      await postsClient.PostsController.findByTags(['news', null, undefined, 7]);
+      await postsClient.PostsController.findByTags({ tag: 'news' });
+      expect(received).toEqual([{ tags: ['news', '7'] }, { tags: '[object Object]' }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-query-body-upgrade
+   */
+  it('should let a handler accept both 0.8 and 0.9 callers, and deliver a pre-serialized body as a string', async () => {
+    @Controller('/posts')
+    class PostsController extends BaseController {
+      @Get('/')
+      findByTags(@Query('tags') tags?: string | string[]) {
+        // From docs: an array from a service client, the joined text from a plain HTTP client
+        const list = Array.isArray(tags) ? tags : (tags?.split(',') ?? []);
+
+        return { tags: list };
+      }
+
+      @Get('/strict')
+      strict(@Query('tags', type('string')) tags?: string) {
+        return { tags };
+      }
+
+      @Get('/widened')
+      widened(@Query('tags', type('string | string[]')) tags?: string | string[]) {
+        return { tags };
+      }
+    }
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Post('/')
+      create(@Body() body: unknown) {
+        return { body };
+      }
+    }
+
+    @Module({ controllers: [PostsController, UsersController] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const url = `http://127.0.0.1:${app.getPort()}`;
+      const client = createServiceClient(createServiceDefinition(AppModule), { url, retries: { max: 0, delay: 0 } });
+
+      // From docs: the tolerant handler, called by a 0.9 client and by a 0.8 caller's wire format
+      const fromNewCaller = await client.PostsController.findByTags(['news', 'tech']);
+      expect(fromNewCaller).toEqual({ tags: ['news', 'tech'] });
+
+      const fromOldCaller = (await (await fetch(`${url}/posts?tags=news%2Ctech`)).json()) as { result: unknown };
+      expect(fromOldCaller.result).toEqual({ tags: ['news', 'tech'] });
+
+      // From docs: a string-only schema answers the array with a 400; the widened one takes both
+      await expect(client.PostsController.strict(['news'])).rejects.toThrow('Parameter tags validation failed');
+      const widened = await client.PostsController.widened(['news']);
+      expect(widened).toEqual({ tags: ['news'] });
+      const widenedText = await client.PostsController.widened('news');
+      expect(widenedText).toEqual({ tags: 'news' });
+
+      // From docs: serialized by the caller, so @Body() receives the JSON text as a string
+      const before = await client.UsersController.create(JSON.stringify({ name: 'Ada' }));
+      expect(before).toEqual({ body: '{"name":"Ada"}' });
+
+      // From docs: the value
+      const after = await client.UsersController.create({ name: 'Ada' });
+      expect(after).toEqual({ body: { name: 'Ada' } });
+
+      // From docs: code that reads the raw request sees `tags[]` keys and a quoted string body
+      const raw: unknown[] = [];
+      const rawServer = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const { searchParams } = new URL(request.url);
+          raw.push({ plain: searchParams.getAll('tags'), bracketed: searchParams.getAll('tags[]'), text: await request.text() });
+
+          return Response.json({ success: true, result: {} });
+        },
+      });
+
+      try {
+        const rawClient = createServiceClient(createServiceDefinition(AppModule), {
+          url: `http://127.0.0.1:${rawServer.port}`,
+        });
+        await rawClient.PostsController.findByTags(['news', 'tech']);
+        await rawClient.UsersController.create('Hello');
+
+        expect(raw).toEqual([
+          { plain: [], bracketed: ['news', 'tech'], text: '' },
+          { plain: [], bracketed: [], text: '"Hello"' },
+        ]);
+      } finally {
+        rawServer.stop(true);
+      }
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Through 0.8 the interceptor received the `@Body` value in `config.data` and the query record in
+   * `config.query`.
+   *
+   * @source docs:api/requests.md#service-client-query-body-upgrade
+   */
+  it('should hand a custom auth interceptor the JSON text that is sent, which it parses to change the body', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Post('/')
+      create(@Body() body: unknown) {
+        return { body };
+      }
+
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const usersDefinition = createServiceDefinition(UsersModule);
+    const received: Array<{ path: string; text: string; digest: string | null; expected: string }> = [];
+    const users = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const text = await request.text();
+        received.push({
+          path: new URL(request.url).pathname,
+          text,
+          digest: request.headers.get('x-body-sha256'),
+          expected: new Bun.CryptoHasher('sha256').update(text).digest('hex'),
+        });
+
+        return Response.json({ success: true, result: {} });
+      },
+    });
+
+    try {
+      const seen: unknown[] = [];
+      // From docs: the interceptor, with a probe recording what it is handed
+      const usersClient = createServiceClient(usersDefinition, {
+        url: `http://127.0.0.1:${users.port}`,
+        retries: { max: 0, delay: 0 },
+        auth: {
+          type: 'custom',
+          interceptor(config) {
+            seen.push(config.data);
+            if (typeof config.data !== 'string') {
+              return config;
+            }
+            const data = JSON.stringify({ ...JSON.parse(config.data), tenantId: 'acme' });
+            const digest = new Bun.CryptoHasher('sha256').update(data).digest('hex');
+
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            return { ...config, data, headers: { ...config.headers, 'x-body-sha256': digest } };
+          },
+        },
+      });
+
+      await usersClient.UsersController.create({ name: 'Ada' });
+      await usersClient.UsersController.findById('42');
+
+      // config.data is the JSON text, not the value, and undefined when no body is sent
+      expect(seen).toEqual(['{"name":"Ada"}', undefined]);
+
+      // The changed body is sent, and the digest covers exactly the bytes that arrive
+      const [created, found] = received;
+      expect(JSON.parse(created.text)).toEqual({ name: 'Ada', tenantId: 'acme' });
+      expect(created.digest).toBe(created.expected);
+      expect(found).toEqual({
+        path: '/users/42', text: '', digest: null, expected: found.expected,
+      });
+
+      // From docs: JSON.stringify(config.data) serializes it a second time, so it is not what is sent
+      expect(JSON.stringify(seen[0])).not.toBe('{"name":"Ada"}');
+    } finally {
+      users.stop(true);
     }
   });
 });
@@ -3783,32 +4621,17 @@ describe('An uncaught client error and your caller (docs/api/requests.md)', () =
       const response = await fetch(`${base}/invoices/42`);
       const text = await response.text();
 
-      expect(response.status).toBe(500);
+      // req() rejects with billing's own 404, a NotFoundError, and the caller gets that status
+      expect(response.status).toBe(404);
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain('BODY-SECRET');
       expect(text).not.toContain(billingOrigin);
       // The body the page prints, field for field
       expect(JSON.parse(text)).toEqual({
         success: false,
-        error: 'REQUEST_FAILED',
-        code: 500,
-        details: {
-          originalError: {
-            _id: 'FiberFailure',
-            cause: {
-              _id: 'Cause',
-              _tag: 'Fail',
-              failure: {
-                success: false,
-                error: 'HTTP_ERROR',
-                code: 404,
-                traceId: expect.any(String),
-                details: { duration: expect.any(Number), method: 'GET' },
-                retryCount: 0,
-              },
-            },
-          },
-        },
+        error: 'HTTP_ERROR',
+        code: 404,
+        details: { duration: expect.any(Number), method: 'GET' },
       });
     });
   });
@@ -3856,10 +4679,112 @@ describe('An uncaught client error and your caller (docs/api/requests.md)', () =
       const text = await response.text();
 
       expect(response.status).toBe(200);
-      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: 500 });
+      expect(JSON.parse(text)).toEqual({
+        success: false,
+        error: 'HTTP_ERROR',
+        code: 404,
+        details: { duration: expect.any(Number), method: 'GET' },
+      });
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain(billingOrigin);
     });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('keeps a OneBun upstream\'s details from the caller, unless you send a copy', async () => {
+    // The callee the snippet calls `inventory`
+    @Controller('/inventory')
+    class InventoryController extends BaseController {
+      @Put('/:id')
+      reserve(@Param('id') _id: string) {
+        throw new ConflictError('ALREADY_RESERVED', { expected: 1, actual: 2 });
+      }
+    }
+
+    @Module({ controllers: [InventoryController] })
+    class InventoryModule {}
+
+    const inventoryApp = new OneBunApplication(InventoryModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await inventoryApp.start();
+    const inventory = createServiceClient(createServiceDefinition(InventoryModule), {
+      url: `http://127.0.0.1:${inventoryApp.getPort()}`,
+    });
+
+    // From docs: the snippet's controller, plus a route that lets the same error escape as it is
+    @Controller('/orders')
+    class OrdersController extends BaseController {
+      @Put('/:id/items')
+      async reserve(@Param('id') id: string) {
+        try {
+          return await inventory.InventoryController.reserve(id);
+        } catch (error) {
+          if (error instanceof ConflictError) {
+            // `{ expected, actual }` from inventory: a copy is your record, and is sent whole
+            throw new ConflictError(error.error, { ...error.details });
+          }
+          throw error;
+        }
+      }
+
+      @Put('/:id/escaped')
+      async escaped(@Param('id') id: string) {
+        return await inventory.InventoryController.reserve(id);
+      }
+    }
+
+    @Module({ controllers: [OrdersController] })
+    class OrdersModule {}
+
+    const ordersApp = new OneBunApplication(OrdersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await ordersApp.start();
+
+    try {
+      const base = `http://127.0.0.1:${ordersApp.getPort()}`;
+      const copied = await fetch(`${base}/orders/7/items`, { method: 'PUT' });
+      const escaped = await fetch(`${base}/orders/7/escaped`, { method: 'PUT' });
+
+      expect(copied.status).toBe(409);
+      expect(await copied.json()).toEqual({
+        success: false, error: 'ALREADY_RESERVED', code: 409, details: { expected: 1, actual: 2 },
+      });
+      // Your code read them; your caller gets the status and the name
+      expect(escaped.status).toBe(409);
+      expect(await escaped.json()).toEqual({
+        success: false, error: 'ALREADY_RESERVED', code: 409, details: {},
+      });
+    } finally {
+      await ordersApp.stop();
+      await inventoryApp.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('logs the escaped client failure with its code and details, and tells it apart with isHttpClientFailure', async () => {
+    const recorder = makeRecordingLoggerLayer();
+    const billing = createHttpClient({ baseUrl: billingOrigin, retries: { max: 0 } });
+    const rejection = await billing.req('GET', '/invoices/42').catch((error: unknown) => error);
+
+    expect(isHttpClientFailure(rejection)).toBe(true);
+    expect(isHttpClientFailure(new NotFoundError('NO_SUCH_INVOICE'))).toBe(false);
+
+    const app = new OneBunApplication(invoicesModule(), { port: 0, loggerLayer: recorder.layer });
+    await app.start();
+
+    try {
+      await (await fetch(`http://127.0.0.1:${app.getPort()}/invoices/42`)).text();
+      const logged = recorder.records.filter((record) => record.level === 'error');
+
+      expect(logged.map((record) => record.message)).toEqual(['Unhandled error in InvoicesController.findOne:']);
+      expect(logged[0].args[0]).toBeInstanceOf(NotFoundError);
+      // Its code and the details the caller's body keeps; not billing's URL, headers or body
+      expect(logged[0].args[1]).toEqual({ code: 404, details: { method: 'GET', duration: expect.any(Number) } });
+    } finally {
+      await app.stop();
+    }
   });
 });
 
@@ -5648,6 +6573,125 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
         'onApplicationDestroy:SIGTERM',
       ]);
     });
+
+    /**
+     * The documented Initialization Phase, step 3: services of every imported module are
+     * initialized before the module that imports them, the root module last. The fixture is the
+     * one the defect was verified on: 0.8.x ran R1, R2, S1, S2, S3, S4, so R1's hook ran before
+     * the hook of S4, which it injects.
+     *
+     * @source docs:architecture.md#module-lifecycle
+     */
+    it('should complete every imported service\'s onModuleInit before the root module\'s services start theirs', async () => {
+      const order: string[] = [];
+
+      /** Start and end are a microtask turn apart, so overlapping hooks would interleave. */
+      abstract class OrderedService extends BaseService implements OnModuleInit {
+        ready = false;
+        dependencyWasReady: boolean | undefined;
+
+        protected abstract dependency(): OrderedService | undefined;
+
+        async onModuleInit(): Promise<void> {
+          const name = this.constructor.name;
+          this.dependencyWasReady = this.dependency()?.ready;
+          order.push(`${name}:start`);
+          await Promise.resolve();
+          this.ready = true;
+          order.push(`${name}:end`);
+        }
+      }
+
+      @Service()
+      class S1 extends OrderedService {
+        protected dependency(): OrderedService | undefined {
+          return undefined;
+        }
+      }
+
+      @Service()
+      class S2 extends OrderedService {
+        constructor(private readonly s1: S1) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s1;
+        }
+      }
+
+      @Service()
+      class S3 extends OrderedService {
+        constructor(private readonly s2: S2) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s2;
+        }
+      }
+
+      @Service()
+      class S4 extends OrderedService {
+        constructor(private readonly s3: S3) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s3;
+        }
+      }
+
+      @Module({ providers: [S1, S2, S3, S4], exports: [S4] })
+      class Inner {}
+
+      @Service()
+      class R1 extends OrderedService {
+        constructor(private readonly s4: S4) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s4;
+        }
+      }
+
+      @Service()
+      class R2 extends OrderedService {
+        constructor(private readonly r1: R1) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.r1;
+        }
+      }
+
+      @Module({ imports: [Inner], providers: [R1, R2] })
+      class Root {}
+
+      const app = new OneBunApplication(Root, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+      try {
+        expect(order).toEqual([
+          'S1:start', 'S1:end',
+          'S2:start', 'S2:end',
+          'S3:start', 'S3:end',
+          'S4:start', 'S4:end',
+          'R1:start', 'R1:end',
+          'R2:start', 'R2:end',
+        ]);
+        expect(app.getService(R1).dependencyWasReady).toBe(true);
+        expect(app.getService(R2).dependencyWasReady).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
   });
 });
 
@@ -6114,6 +7158,8 @@ async function createWsGatewayHarness(gatewayClass: Function, instance: BaseWebS
   const makeSocket = (data: WsClientData, out: string[]): ServerWebSocket<WsClientData> => {
     const fake = {
       data,
+      // An open socket: the gateway takes a room join back when the connection has closed meanwhile.
+      readyState: 1,
       send(message: string) {
         out.push(message);
 
@@ -9443,16 +10489,16 @@ describe('docs/api/guards.md', () => {
     expect(typeof instance.canActivate).toBe('function');
   });
 
-  it('AuthGuard blocks request without Bearer token', async () => {
-    const guard = new AuthGuard();
+  it('BearerPresenceGuard blocks request without Bearer token', async () => {
+    const guard = new BearerPresenceGuard();
     const req = new Request('http://localhost/') as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(false);
   });
 
-  it('AuthGuard allows request with Bearer token', async () => {
-    const guard = new AuthGuard();
+  it('BearerPresenceGuard allows request with Bearer token', async () => {
+    const guard = new BearerPresenceGuard();
     const req = new Request('http://localhost/', {
       headers: { authorization: 'Bearer my-token' },
     }) as unknown as OneBunRequest;
@@ -9461,27 +10507,26 @@ describe('docs/api/guards.md', () => {
     expect(await guard.canActivate(ctx)).toBe(true);
   });
 
-  it('RolesGuard checks x-user-roles header', async () => {
-    const guard = new RolesGuard(['admin']);
-    const h = new Headers();
-    h.set('x-user-roles', 'admin,user');
-    const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
+  it('RolesGuard admits when its extractor returns every required role', async () => {
+    const guard = new RolesGuard(['admin'], () => ['admin', 'user']);
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(true);
   });
 
   it('RolesGuard rejects when role not present', async () => {
-    const guard = new RolesGuard(['admin']);
+    const guard = new RolesGuard(['admin'], () => ['user']);
     const h = new Headers();
-    h.set('x-user-roles', 'user');
+    // The guard reads only what its extractor returns, never this header.
+    h.set('x-user-roles', 'admin');
     const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(false);
   });
 
-  it('RolesGuard with custom role extractor', async () => {
+  it('RolesGuard hands its extractor the request', async () => {
     const guard = new RolesGuard(
       ['admin'],
       (ctx) => {
@@ -9499,7 +10544,7 @@ describe('docs/api/guards.md', () => {
   });
 
   it('@UseGuards applies metadata to controller', () => {
-    @UseGuards(AuthGuard)
+    @UseGuards(BearerPresenceGuard)
     @Controller('/protected')
     class ProtectedController extends BaseController {
       @Get('/')
@@ -9562,7 +10607,7 @@ describe('docs/api/guards.md', () => {
   /**
    * @source docs:api/guards.md#one-decorator-three-transports
    */
-  it('AuthGuard denies a queue context instead of reading a request that is not there', () => {
+  it('BearerPresenceGuard denies a queue context instead of reading a request that is not there', () => {
     const message = {
       id: 'm2',
       pattern: 'orders.created',
@@ -9580,7 +10625,7 @@ describe('docs/api/guards.md', () => {
       class Consumer {},
     );
 
-    expect(new AuthGuard().canActivate(queueCtx)).toBe(false);
+    expect(new BearerPresenceGuard().canActivate(queueCtx)).toBe(false);
   });
 });
 
@@ -10133,13 +11178,7 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
 
   it('reports a provider that was never constructed as DependencyResolutionError, not as a cycle', () => {
     // From docs: "Could not resolve dependency UserRepository for service UserService."
-    @Service()
-    class UserRepository extends BaseService {
-      constructor() {
-        super();
-        throw new Error('Database not initialized. Call initialize() first.');
-      }
-    }
+    class UserRepository extends BaseService {}
 
     @Service()
     class UserService extends BaseService {
@@ -10147,6 +11186,9 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
         super();
       }
     }
+
+    // An undecorated class records no constructor types, so its consumer's are registered by hand.
+    registerDependencies(UserService, [UserRepository]);
 
     @Module({ providers: [UserService, UserRepository] })
     class UserModule {}
@@ -10157,7 +11199,8 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     expect(error.message).toBe(
       'Could not resolve dependency UserRepository for service UserService.\n' +
         '  - UserRepository is listed in the providers of UserModule, but was never constructed: ' +
-        'creating it threw, and the error was logged as "Failed to create service UserRepository".',
+        'this copy of @onebun/core sees no @Service() on it, so it was skipped. Decorate it with @Service(). ' +
+        'If it already is, the application resolves two copies of @onebun/core — deduplicate the dependency.',
     );
   });
 
@@ -10210,13 +11253,7 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     // extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`"
     abstract class PaymentGateway extends BaseService {}
 
-    @Service()
-    class StripeGateway extends PaymentGateway {
-      constructor() {
-        super();
-        throw new Error('STRIPE_KEY is not set');
-      }
-    }
+    class StripeGateway extends PaymentGateway {}
 
     @Service()
     class CheckoutService extends BaseService {
@@ -10231,12 +11268,211 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     const error = bootError(CheckoutModule);
 
     expect(error).toBeInstanceOf(DependencyResolutionError);
-    expect(error.message).toBe(
+    expect(error.message).toStartWith(
       'Could not resolve dependency PaymentGateway for service CheckoutService.\n' +
         '  - StripeGateway (it extends PaymentGateway) is listed in the providers of CheckoutModule, ' +
-        'but was never constructed: creating it threw, and the error was logged as ' +
-        '"Failed to create service StripeGateway".',
+        'but was never constructed: this copy of @onebun/core sees no @Service() on it',
     );
+  });
+});
+
+/**
+ * @source docs:api/services.md#when-a-constructor-throws
+ */
+describe('When a Constructor Throws (docs/api/services.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+  const NOT_INITIALIZED = 'Configuration not initialized. Provide envSchema in ApplicationOptions.';
+
+  it('fails app.start() with ServiceConstructionError naming the service, its module and the cause', async () => {
+    // From docs: the PaymentService / BillingModule example, started without envSchema.
+    @Service()
+    class PaymentService extends BaseService {
+      readonly apiKey: unknown;
+
+      constructor() {
+        super();
+        this.apiKey = this.config.get('payments.apiKey');
+      }
+    }
+
+    @Module({ providers: [PaymentService] })
+    class BillingModule {}
+
+    const app = new OneBunApplication(BillingModule, {
+      port: 0,
+      loggerLayer: mockLoggerLayer,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    let caught: unknown;
+    try {
+      await app.start();
+    } catch (error) {
+      caught = error;
+    } finally {
+      await app.stop().catch(() => undefined);
+    }
+
+    expect(caught).toBeInstanceOf(ServiceConstructionError);
+    const error = caught as ServiceConstructionError;
+    // From docs: "ServiceConstructionError: Failed to create service PaymentService in module
+    // BillingModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions."
+    expect(String(error)).toBe(
+      `ServiceConstructionError: Failed to create service PaymentService in module BillingModule: Error: ${NOT_INITIALIZED}`,
+    );
+    expect(error.serviceName).toBe('PaymentService');
+    expect(error.moduleName).toBe('BillingModule');
+    expect(error.cause).toBeInstanceOf(Error);
+    expect((error.cause as Error).message).toBe(NOT_INITIALIZED);
+  });
+
+  it('keeps the thrown value as cause, with its class and fields, and its stack frames', () => {
+    // From docs: "`cause` is the thrown value itself, so `error.cause instanceof YourError` holds and
+    // its fields are there" / "`stack` holds the frames of the original throw"
+    class MissingSecretError extends Error {
+      override name = 'MissingSecretError';
+
+      constructor(readonly variable: string) {
+        super(`${variable} is not set`);
+      }
+    }
+
+    @Service()
+    class PaymentService extends BaseService {
+      constructor() {
+        super();
+        throw new MissingSecretError('STRIPE_KEY');
+      }
+    }
+
+    @Module({ providers: [PaymentService] })
+    class BillingModule {}
+
+    let caught: unknown;
+    try {
+      new OneBunModule(BillingModule, mockLoggerLayer);
+    } catch (error) {
+      caught = error;
+    }
+
+    const error = caught as ServiceConstructionError;
+    const frames = (stack: string | undefined): string[] => (stack ?? '').split('\n').filter((line) => /^\s+at /.test(line));
+
+    expect(error).toBeInstanceOf(ServiceConstructionError);
+    expect(error.message).toBe('Failed to create service PaymentService in module BillingModule: MissingSecretError: STRIPE_KEY is not set');
+    expect(error.cause).toBeInstanceOf(MissingSecretError);
+    expect((error.cause as MissingSecretError).variable).toBe('STRIPE_KEY');
+    expect(frames(error.stack)).toEqual(frames((error.cause as Error).stack));
+    expect(frames(error.stack)[0]).toContain('PaymentService');
+  });
+
+  it('fails the same way for a consumer in an importing module, a controller, an @Optional() parameter, or none', () => {
+    // From docs: "It fails the same way whether a consumer is in the same module, in a module that
+    // imports this one, a controller, an `@Optional()` parameter, or nothing at all."
+    const shapes: Array<(broken: Function) => Function> = [
+      (broken) => {
+        @Service()
+        class SameModuleConsumer extends BaseService {}
+        registerDependencies(SameModuleConsumer, [broken]);
+
+        @Module({ providers: [SameModuleConsumer, broken] })
+        class SameModule {}
+
+        return SameModule;
+      },
+      (broken) => {
+        @Module({ providers: [broken], exports: [broken] })
+        class InnerModule {}
+
+        @Service()
+        class ImportingConsumer extends BaseService {}
+        registerDependencies(ImportingConsumer, [broken]);
+
+        @Module({ imports: [InnerModule], providers: [ImportingConsumer] })
+        class OuterModule {}
+
+        return OuterModule;
+      },
+      (broken) => {
+        @Controller('/billing')
+        class BillingController extends BaseController {}
+        registerDependencies(BillingController, [broken]);
+
+        @Module({ controllers: [BillingController], providers: [broken] })
+        class ControllerModule {}
+
+        return ControllerModule;
+      },
+      (broken) => {
+        @Service()
+        class OptionalConsumer extends BaseService {}
+        registerDependencies(OptionalConsumer, [broken]);
+        Optional()(OptionalConsumer, undefined, 0);
+
+        @Module({ providers: [OptionalConsumer, broken] })
+        class OptionalModule {}
+
+        return OptionalModule;
+      },
+      (broken) => {
+        @Module({ providers: [broken] })
+        class NoConsumerModule {}
+
+        return NoConsumerModule;
+      },
+    ];
+
+    for (const shape of shapes) {
+      @Service()
+      class PaymentService extends BaseService {
+        constructor() {
+          super();
+          throw new Error('STRIPE_KEY is not set');
+        }
+      }
+
+      let caught: unknown;
+      try {
+        new OneBunModule(shape(PaymentService), mockLoggerLayer);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ServiceConstructionError);
+      expect((caught as ServiceConstructionError).serviceName).toBe('PaymentService');
+      expect(((caught as Error).cause as Error).message).toBe('STRIPE_KEY is not set');
+    }
+  });
+
+  it('does not wrap an error the framework raises for its own reasons', () => {
+    // From docs: "An error the framework raises for its own reasons — a `OneBunBootstrapError` such
+    // as `DependencyResolutionError`, or an error whose `name` starts with `OneBun` — is not wrapped"
+    const resolutionError = new DependencyResolutionError('ReportingClient', 'HttpTransport', 'service', []);
+    const namedError = new Error('ReportingModule was selected as ANALYTICS but never configured.');
+    namedError.name = 'OneBunUnconfiguredRegistrationError';
+
+    for (const thrown of [resolutionError, namedError]) {
+      @Service()
+      class ReportingService extends BaseService {
+        constructor() {
+          super();
+          throw thrown;
+        }
+      }
+
+      @Module({ providers: [ReportingService] })
+      class ReportingModule {}
+
+      let caught: unknown;
+      try {
+        new OneBunModule(ReportingModule, mockLoggerLayer);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBe(thrown);
+    }
   });
 });
 
@@ -10310,9 +11546,37 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
   });
 
   it('injects undefined, with a warning, for a listed provider that was never constructed', () => {
-    // From docs: "A dependency listed in the module's own `providers` that was never constructed
-    // [...] counts as not available too: the parameter receives `undefined`, and a warning names
-    // the dependency and why it has no instance."
+    // From docs: "A dependency listed in the module's own `providers` that this copy of
+    // `@onebun/core` sees no `@Service()` on counts as not available too: the parameter receives
+    // `undefined`, and a warning names the dependency and why it has no instance."
+    class EmailService extends BaseService {}
+
+    @Service()
+    class NotificationService extends BaseService {
+      constructor(readonly emailService?: EmailService) {
+        super();
+      }
+    }
+
+    // An undecorated class records no constructor types, so its consumer's are registered by hand.
+    registerDependencies(NotificationService, [EmailService]);
+    Optional()(NotificationService, undefined, 0);
+
+    @Module({ providers: [NotificationService, EmailService] })
+    class NotifModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const mod = new OneBunModule(NotifModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+
+    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('EmailService is listed in the providers of NotifModule, but was never constructed');
+  });
+
+  it('does not keep a provider whose constructor throws from failing the boot', () => {
+    // From docs: "A provider whose constructor throws is different: that fails the boot with a
+    // `ServiceConstructionError`, `@Optional()` or not."
     @Service()
     class EmailService extends BaseService {
       constructor() {
@@ -10331,13 +11595,16 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     @Module({ providers: [NotificationService, EmailService] })
     class NotifModule {}
 
-    const recorder = makeRecordingLoggerLayer();
-    const mod = new OneBunModule(NotifModule, recorder.layer);
-    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+    let caught: unknown;
+    try {
+      new OneBunModule(NotifModule, mockLoggerLayer);
+    } catch (error) {
+      caught = error;
+    }
 
-    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('Failed to create service EmailService');
+    expect(caught).toBeInstanceOf(ServiceConstructionError);
+    expect((caught as ServiceConstructionError).serviceName).toBe('EmailService');
+    expect(((caught as Error).cause as Error).message).toBe('SMTP_URL is not set');
   });
 
   it('does not wait for the implementation of an abstract-typed parameter', () => {

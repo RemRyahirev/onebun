@@ -35,8 +35,10 @@ import {
   createErrorResponse,
   createSuccessResponse,
   HttpStatusCode,
+  isHttpClientFailure,
   OneBunBaseError,
   setTraceContextProvider,
+  withoutTransportDetails,
 } from '@onebun/requests';
 
 import { awaitBounded } from '../await-bounded';
@@ -46,6 +48,7 @@ import {
   getControllerInterceptors,
   getControllerMetadata,
   getControllerMiddleware,
+  getMethodGuards,
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
@@ -532,6 +535,28 @@ function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Respons
 }
 
 /**
+ * The response for a value a handler returned that is not a `Response`: the value, whatever it
+ * is, as the `result` of `{ success: true, result }`.
+ *
+ * This is the one success-envelope rule, and both dispatch arms call it — the fast arm and
+ * `executeHandler`, which a route with a decorated parameter or any `@ApiResponse` (a
+ * description-only one included) takes — so the same return value has one wire form on every
+ * route. An object with a `success` key is wrapped like any other: a domain object shaped
+ * `{ success: false, error, code }` answered 200 and sent raw would read as a failed request to
+ * every client that reads the envelope. A body the handler wants sent exactly as it built it is a
+ * `Response`, and that is the only thing passed through.
+ */
+function successEnvelopeResponse(result: unknown, status: number): Response {
+  return new Response(JSON.stringify(createSuccessResponse(result)), {
+    status,
+    headers: {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
+/**
  * Report handler parameters that carry no param decorator.
  *
  * What such a parameter receives depends on which dispatch arm the route lands in, and nothing
@@ -606,6 +631,25 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
   }
 
   return null;
+}
+
+/**
+ * What the "Unhandled error" line of an HTTP-client failure a handler let escape carries beside the
+ * error, whose message is only its `error` name: its `code`, and its `details` as the default filter
+ * sends them to the caller, through the same replacer — an `HTTP_ERROR`'s method and duration, a
+ * transport failure's kind, a redirect's reason. The request URL (its query can carry a token), the
+ * upstream's headers (its `set-cookie` among them) and body, and a OneBun callee's own `details`
+ * stay out: log what you need of them where you catch the error.
+ */
+function clientFailureLogContext(error: unknown): Record<string, unknown> {
+  const { code, details } = error as { code?: unknown; details?: unknown };
+
+  try {
+    return { code, details: JSON.parse(JSON.stringify(details, withoutTransportDetails)) };
+  } catch {
+    // A record that does not serialize must not cost the log line its code
+    return { code };
+  }
 }
 
 /**
@@ -1793,15 +1837,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                         return result;
                       }
 
-                      const successResponse = createSuccessResponse(result);
-
-                      return new Response(JSON.stringify(successResponse), {
-                        status: HttpStatusCode.OK,
-                        headers: {
-                        // eslint-disable-next-line @typescript-eslint/naming-convention
-                          'Content-Type': 'application/json',
-                        },
-                      });
+                      return successEnvelopeResponse(result, HttpStatusCode.OK);
                     }
                   }
                   : (): Promise<Response> => executeHandler(
@@ -2230,7 +2266,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // be constructed with `new guard()` on every request, so a guard extending
           // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
-          const routeGuards = route.guards ?? [];
+          // Method guards are collected up the prototype chain, as queue registration does:
+          // a route that overrides a guarded base method runs the base method's guards first,
+          // then its own. `route.guards` is the declaring method's own list, already included
+          // by the walk; it stays in the merge so a list set on the route entry is kept.
+          const routeGuards = [...getMethodGuards(controllerClass, route.handler), ...(route.guards ?? [])];
           // Deduplicated by identity, as WebSocket already did. A guard named on both the
           // controller and one of its routes used to run twice per request: doubled database or
           // cache work, doubled denial lines in the log, and a decision that is only idempotent
@@ -2889,6 +2929,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * returns something that is neither a Response nor `undefined` is reported the same way.
      * Applying filters on more paths widens the blast radius of a buggy user filter, so that
      * fallback is part of the design rather than a bonus.
+     *
+     * `Unhandled error in <Controller>.<handler>:` is written only on the way to the default
+     * filter — every filter declined, or one misbehaved — and never for an `HttpException` or a
+     * `OneBunBaseError`, except an HTTP-client failure the handler let escape, which is logged
+     * with its code and details. An error a filter answered is not logged here at all.
      */
     async function applyExceptionFilters(
       error: unknown,
@@ -2896,15 +2941,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       routeMeta: RouteMetadata,
       controllerName: string,
     ): Promise<Response> {
-      // Log the unexpected bucket only: HttpException and OneBunBaseError carry a
-      // deliberate status and are ordinary control flow, not incidents.
-      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
-        appLogger.error(
-          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      }
-
       const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
       // The field is declared wide because a decorator may write CLASSES into it; what reaches
       // the pipeline is the resolved form, built by `ownerModule.resolveFilters` during route
@@ -2948,6 +2984,30 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // Reached only when the filter misbehaved: stop consulting the chain, since a filter
         // that cannot be trusted to answer cannot be trusted to have declined either.
         break;
+      }
+
+      // No filter of the application answered, so the error is unhandled. Logged here and not
+      // on entry: an error a filter answered is the application's own control flow — a domain
+      // refusal mapped to a 4xx — and logging it at error level would bury the real failures.
+      // HttpException and OneBunBaseError carry a deliberate status and are not incidents
+      // either. Except a failure of the HTTP client the handler let escape — a refused
+      // connection, an upstream 5xx or 401: it is a OneBunBaseError, but nobody here chose its
+      // status, so it is logged like an unexpected error. The logger writes an error's message,
+      // only its name here, and its stack, so its code and the details its caller may read go
+      // along as context; its transport details do not. After a misbehaving filter this line
+      // follows that filter's own, so the error it was handed is not lost behind the filter's
+      // failure.
+      if (isHttpClientFailure(error)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+          clientFailureLogContext(error),
+        );
+      } else if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
 
       return await appDefaultExceptionFilter.catch(error, ctx);
@@ -3288,44 +3348,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
-      // If the result is already in standardized format, return it as JSON
-      if (
-        typeof validatedResult === 'object' &&
-        validatedResult !== null &&
-        'success' in validatedResult
-      ) {
-        let serMark: ProfileMark | undefined;
-        if (profiler) {
-          serMark = profiler.start('framework', 'response:serialize');
-        }
-        const resp = new Response(JSON.stringify(validatedResult), {
-          status: responseStatusCode,
-          headers: {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Content-Type': 'application/json',
-          },
-        });
-        if (serMark) {
-          profiler!.end(serMark);
-        }
-
-        return resp;
-      }
-
-      // Otherwise, wrap in standardized success response
+      // Every value that is not a Response is wrapped, the same way the fast arm wraps it, an
+      // object with a `success` key included — see successEnvelopeResponse. A declared response
+      // schema validated the value above, so it describes the `result` inside the envelope, not
+      // the envelope.
       let serializeMark: ProfileMark | undefined;
       if (profiler) {
         serializeMark = profiler.start('framework', 'response:serialize');
       }
-      const successResponse = createSuccessResponse(validatedResult);
-
-      const resp = new Response(JSON.stringify(successResponse), {
-        status: responseStatusCode,
-        headers: {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'Content-Type': 'application/json',
-        },
-      });
+      const resp = successEnvelopeResponse(validatedResult, responseStatusCode);
       if (serializeMark) {
         profiler!.end(serializeMark);
       }

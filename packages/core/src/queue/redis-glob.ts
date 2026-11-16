@@ -3,8 +3,8 @@
  *
  * Redis has no subject language: `SCAN … MATCH` takes a glob over key names, where `*` spans any
  * run of characters, separators included. OneBun patterns are token-based — `.` separates tokens,
- * `*` matches exactly one, `{name}` captures one, `#` matches the rest — so a glob can only ever
- * be a SUPERSET of what a pattern means.
+ * `*` matches exactly one, `{name}` captures one, a last-token `#` or `>` matches the rest — so a
+ * glob can only ever be a SUPERSET of what a pattern means.
  *
  * That is the whole design: the glob narrows the keyspace Redis has to walk, and the in-process
  * matcher built from the original pattern decides what actually matches. `events.*` translates to
@@ -23,8 +23,9 @@ const PARAMETER_TOKEN = /\{[^.}]*\}/;
  * Translates a OneBun queue pattern into a Redis key glob.
  *
  * - a token containing a `{name}` parameter becomes `*`;
- * - a trailing `#` becomes `*`;
- * - `*` and literal tokens pass through unchanged;
+ * - a trailing `#` becomes `*`, and so does a trailing `>`, its NATS spelling;
+ * - `*` and literal tokens pass through unchanged — a `>` anywhere but the last token is a literal
+ *   character, as it is to the matcher, and means nothing to a glob either;
  * - a `#` anywhere other than as the final token throws.
  *
  * The throw is not a Redis limitation — a glob like `*.created` would work perfectly well. It is
@@ -44,7 +45,7 @@ export function toRedisQueueGlob(pattern: string): string {
 
   return tokens
     .map((token, index) => {
-      if (token === '#' && index === lastIndex) {
+      if ((token === '#' || token === '>') && index === lastIndex) {
         return '*';
       }
 

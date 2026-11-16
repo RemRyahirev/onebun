@@ -50,7 +50,7 @@ A typical NestJS project with BullMQ, caching, rate limiting, and sessions opens
 
 ### Guards that work everywhere
 
-In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(AuthGuard)` works on HTTP routes, WebSocket message handlers (`@OnMessage`) and queue consumers (`@Subscribe`) — one decorator, class-level or method-level, with the same constructor dependency injection on all three. Guards receive the universal `ExecutionContext`; narrow it with `isHttpContext()` / `isWsContext()` / `isQueueContext()`, because a guard that reads `getRequest()` has no request to read on a queue message. See [Guards — One decorator, three transports](/api/guards#one-decorator-three-transports) for what a guard sees and what denial does on each.
+In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(MyGuard)` works on HTTP routes, WebSocket message handlers (`@OnMessage`) and queue consumers (`@Subscribe`) — one decorator, class-level or method-level, with the same constructor dependency injection on all three. Guards receive the universal `ExecutionContext`; narrow it with `isHttpContext()` / `isWsContext()` / `isQueueContext()`, because a guard that reads `getRequest()` has no request to read on a queue message. See [Guards — One decorator, three transports](/api/guards#one-decorator-three-transports) for what a guard sees and what denial does on each.
 
 `@UseGuards` guards `@OnMessage` and `@Subscribe` handlers since `@onebun/core` 0.5.0.
 
@@ -256,7 +256,7 @@ import {
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
 
-import { AuthGuard } from './auth.guard';
+import { AuthorizationHeaderGuard } from './auth.guard';
 import { UserService } from './user.service';
 import {
   createUserSchema, type CreateUserBody,
@@ -290,14 +290,14 @@ export class UserController extends BaseController {
   }
 
   @Post('/')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   @ApiResponse(201, { schema: userSchema })
   async create(@Body(createUserSchema) body: CreateUserBody) {
     return this.userService.create(body);
   }
 
   @Put('/:id')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: UpdateUserBody,
@@ -306,7 +306,7 @@ export class UserController extends BaseController {
   }
 
   @Delete('/:id')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   async remove(@Param('id') id: string) {
     await this.userService.remove(id);
     return { deleted: true };
@@ -424,7 +424,7 @@ export class AuthGuard implements CanActivate {
 import { createHttpGuard } from '@onebun/core';
 
 // Function-based (simplest)
-export const AuthGuard = createHttpGuard(async (context) => {
+export const AuthorizationHeaderGuard = createHttpGuard(async (context) => {
   const req = context.getRequest();
   return !!req.headers.get('Authorization');
 });

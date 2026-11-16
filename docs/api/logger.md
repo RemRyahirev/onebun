@@ -394,6 +394,19 @@ bootstrapLogger.info('Bootstrapping complete');
 }
 ```
 
+### Output Streams
+
+The console transport writes each record as one line, terminated by a newline, through the process streams, in both formats:
+
+| Level | Stream |
+|-------|--------|
+| `trace`, `debug`, `info` | `process.stdout` |
+| `warn`, `error`, `fatal` | `process.stderr` |
+
+A closed output pipe (for example `app | head`) drops the lines without an error and does not end the process; the transport ignores only the `EPIPE` error of its two streams.
+
+A write to a pipe is buffered by the stream until the reader catches up. A log line is therefore not a reliable readiness signal for another process; probe the service (for example over HTTP) instead.
+
 ## Enabling JSON Logging with Trace Context
 
 To get structured JSON logs with trace context for production observability, you need to:

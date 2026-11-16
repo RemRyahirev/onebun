@@ -15,6 +15,7 @@ Unified HTTP client service for OneBun framework with comprehensive error handli
 - **Timeout management** with request-level overrides
 - **Query parameter handling** with automatic encoding
 - **JSON request/response** handling with automatic parsing
+- **Binary request bodies**: `Uint8Array`, `ArrayBuffer` and `Blob` sent byte for byte
 
 ## Installation
 
@@ -105,6 +106,24 @@ const user = await client.patch<User, Partial<UpdateUserData>>('/users/1', {
   email: 'new@example.com'
 });
 ```
+
+### Binary Request Bodies
+
+A `Uint8Array` (a `Buffer` is one), an `ArrayBuffer` or a `Blob` (a `Bun.file()` is one) is sent as
+its bytes, not through `JSON.stringify`, labelled `application/octet-stream` — a `Blob` with its own
+type. A `Content-Type` in the request's headers, in any letter case, is the only one sent. Retries,
+307/308 redirects and `onebun` signatures carry the same bytes: a `Blob` is read once, before the
+first attempt, and a `Uint8Array` or an `ArrayBuffer` is sent without a copy — leave it unchanged
+until the call settles, or a retry sends, and signs, the change.
+
+```typescript
+await client.put('/uploads/42/parts/1', new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+await client.put('/avatars/42.png', Bun.file('./avatar.png'));
+```
+
+A stream (a `ReadableStream`, a Node.js `Readable`, an async generator object), a typed array other
+than `Uint8Array`, a `DataView` and a `SharedArrayBuffer` fail with `REQUEST_CONFIG_ERROR` before
+anything is sent. See [Sending bytes](https://onebun.dev/api/requests#request-bytes).
 
 ### DELETE Requests with Query Parameters
 
@@ -214,7 +233,7 @@ const client = createHttpClient({
   timeout: 10000,
   headers: {
     'Accept': 'application/json',
-    'Content-Type': 'application/json'
+    'X-Client-Name': 'orders-service'
   },
   auth: {
     type: 'bearer',
@@ -228,6 +247,9 @@ const client = createHttpClient({
   }
 });
 ```
+
+Leave `Content-Type` out of the client's `headers`: each body gets the right one by default, and a
+client-wide `Content-Type` labels every body with that one type, binary ones included.
 
 ### Authentication Types
 
@@ -316,19 +338,33 @@ const users = await client.get<User[], UserQuery>(
 
 ### Promise API Error Handling
 
+Every Promise method (`request`, `get`, `post`, `put`, `patch`, `delete`, `head`, `options`,
+`reqRaw`, `req`) rejects on every failure — a 4xx or 5xx, a timeout, a refused connection — with the
+`OneBunBaseError` subclass the failure's `code` names: `NotFoundError` for 404, `ConflictError` for
+409, `InternalServerError` for 500 and so on, `HttpStatusError` for a status without a class of its
+own (a 418 stays 418), and `TransportError` with `code` 0 for a timeout, an abort or a network
+failure. Each carries the failure's `error`, `code` and `details`; `message` is the `error` name.
+
 ```typescript
+import { NotFoundError, OneBunBaseError, TransportError } from '@onebun/requests';
+
 try {
-  const user = await client.get<User>('/users/1');
+  const user = await client.req<User>('GET', '/users/1');
   console.log('User:', user);
-} catch (error: RequestError) {
-  console.error('Request failed:', {
-    code: error.code,
-    message: error.message,
-    statusCode: error.statusCode,
-    traceId: error.traceId
-  });
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    // error.error: 'HTTP_ERROR', error.code: 404, error.details: the upstream's answer
+  } else if (error instanceof TransportError) {
+    // error.error: 'TIMEOUT_ERROR', 'ABORT_ERROR' or 'FETCH_ERROR'; error.code: 0
+  } else if (error instanceof OneBunBaseError) {
+    console.error('Request failed:', { error: error.error, code: error.code, details: error.details });
+  }
 }
 ```
+
+`retryCount` and `traceId` of a failure are on the Effect API's `ErrorResponse`, below. See
+[A failed request rejects](https://onebun.dev/api/requests#a-failed-request-rejects) for the full
+class table.
 
 ### Effect API Error Handling
 

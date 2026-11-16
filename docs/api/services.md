@@ -71,7 +71,7 @@ export class CounterService extends BaseService {
 
 ### Service with Dependencies
 
-Dependencies are automatically injected via constructor. Logger and config are available immediately after `super()`:
+Dependencies are automatically injected via constructor. Logger and config are available immediately after `super()`. A `@Service()` subclass that declares no constructor of its own is injected with the dependencies of the constructor it inherits — see [Inherited Constructors](/api/decorators#inherited-constructors):
 
 ```typescript
 import { Service, BaseService } from '@onebun/core';
@@ -149,6 +149,7 @@ The error message searches all registered modules and reports:
 - Whether the dependency exists but is not exported from its module
 - Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
 - Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
+- Whether it is a parameter of a constructor the class INHERITS: a `@Service()` class that declares no constructor is injected with the dependencies of its parent's (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the first suggestion says so and names the parent — `NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Scheduler (Clock, ReportSink). ...`
 
 Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it does not suppress the "decorate it with `@Service()` and list it in a module's providers" advice, which prints whenever nothing else matched.
 
@@ -209,19 +210,97 @@ Unresolved services: ServiceA, ServiceB
 
 Restructure your code to break the cycle — e.g., extract the shared logic into a third service.
 
+A class in the chain that declares no constructor is injected with the parameters of the one it
+inherits (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the chain names
+it for a dependency it never mentions. The error then carries a note for it in `notes`, printed
+after the unresolved services: `- UserRepo declares no constructor of its own, so it is injected
+with the parameters of the constructor it inherits from RepoBase (EventBus): that is where it needs
+EventBus (EventBusImpl). ...`.
+
 A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
 with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of
-`@onebun/core` sees no `@Service()` on it (it is undecorated, or decorated by a second copy of the
-framework), or creating it threw — the original error is logged as `Failed to create service <Name>`:
+`@onebun/core` sees no `@Service()` on it — it is undecorated, or decorated by a second copy of the
+framework:
 
 ```
 DependencyResolutionError: Could not resolve dependency UserRepository for service UserService.
-  - UserRepository is listed in the providers of UserModule, but was never constructed: creating it threw, and the error was logged as "Failed to create service UserRepository".
+  - UserRepository is listed in the providers of UserModule, but was never constructed: this copy of @onebun/core sees no @Service() on it, so it was skipped. Decorate it with @Service(). If it already is, the application resolves two copies of @onebun/core — deduplicate the dependency.
 ```
 
 For an abstract-typed parameter the dependency named is the parameter's type, and the hint names the
 provider extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`. An
-`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional).
+`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional). A provider
+whose constructor throws is not reported this way at all — see
+[When a Constructor Throws](#when-a-constructor-throws).
+
+### When a Constructor Throws
+
+A provider whose constructor throws ends the boot at the throw, with a `ServiceConstructionError`
+that names the service and its module, followed by the constructor's own error:
+
+```
+ServiceConstructionError: Failed to create service PaymentService in module BillingModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions.
+```
+
+```typescript
+import { BaseService, Module, OneBunApplication, Service, ServiceConstructionError } from '@onebun/core';
+
+@Service()
+export class PaymentService extends BaseService {
+  private readonly apiKey: string;
+
+  constructor() {
+    super();
+    // Throws when the application was created without envSchema
+    this.apiKey = this.config.get('payments.apiKey');
+  }
+}
+
+@Module({ providers: [PaymentService] })
+export class BillingModule {}
+
+const app = new OneBunApplication(BillingModule, { port: 0 });
+
+try {
+  await app.start();
+} catch (error) {
+  if (error instanceof ServiceConstructionError) {
+    error.serviceName; // 'PaymentService'
+    error.moduleName;  // 'BillingModule'
+    error.cause;       // the Error the constructor threw, unchanged
+  }
+}
+```
+
+- `cause` is the thrown value itself, so `error.cause instanceof YourError` holds and its fields are
+  there.
+- `stack` holds the frames of the original throw, so the first one points at the constructor line
+  that threw rather than at the framework.
+- It fails the same way whether a consumer is in the same module, in a module that imports this
+  one, a controller, an `@Optional()` parameter, or nothing at all.
+- `TestingModule` included: its logger is silent, but the error is the rejection of `compile()`,
+  not a log line.
+- A throw from what the framework runs on the new instance right after the constructor is
+  reported the same way: the `initializeService()` it calls on a provider that defines one, or
+  wrapping its methods for `tracing.traceAll`.
+
+An error the framework raises for its own reasons — a `OneBunBootstrapError` such as
+`DependencyResolutionError`, or an error whose `name` starts with `OneBun` — is not wrapped: it
+already names what is wrong.
+
+The boot fails while the module tree is still being built, before the application holds it, so
+the rollback of the failed `start()` runs no destroy hook. A provider constructed before the throw,
+in this module or in one it imports, does not get its `onModuleDestroy`, and whatever its
+constructor opened stays open: a timer or a connection keeps the process alive after a caught
+rejection. Open resources in `onModuleInit`, which runs only once every provider is built.
+
+The most common trigger is `this.config.get()` in a constructor of an application created without
+`envSchema`: the configuration is then a stub whose every `get()` throws. See
+[Accessing Configuration](#accessing-configuration).
+
+An application does not boot with a provider whose constructor throws, even when nothing injects
+it or only an `@Optional()` parameter does: fix what the constructor throws on, or remove the
+provider from `providers`.
 
 ### Optional Dependencies
 
@@ -279,7 +358,7 @@ Pipeline elements get the module hooks too, on the instance that actually serves
 :::
 
 ::: tip Cross-Module Lifecycle
-`onModuleInit` is called for services and controllers in **all modules** across the entire import tree — not just the root module. If `AppModule` imports `UserModule` which imports `AuthModule`, then services in all three modules will have their `onModuleInit` called. Deeply nested modules are initialized first (depth-first order).
+`onModuleInit` is called for services and controllers in **all modules** across the entire import tree — not just the root module. If `AppModule` imports `UserModule` which imports `AuthModule`, then services in all three modules will have their `onModuleInit` called: `AuthModule`'s first, then `UserModule`'s, then `AppModule`'s. Every imported module is initialized before the module that imports it — see [Initialization Across Modules](#initialization-across-modules).
 :::
 
 ### Usage
@@ -404,6 +483,80 @@ export class CleanupService extends BaseService
 }
 ```
 
+### Initialization Across Modules
+
+Services' `onModuleInit` hooks run one at a time, one module at a time: **every imported module
+before the module that imports it**. The deepest import goes first and the root module last; within
+a module the hooks run in dependency order. So when a hook runs, the hooks of everything the service
+injects have completed, whether the dependency is a provider of its own module or an export of an
+import:
+
+```typescript
+import { BaseService, Module, Service, type OnModuleInit } from '@onebun/core';
+
+@Service()
+export class ConnectionService extends BaseService implements OnModuleInit {
+  private open = false;
+
+  async onModuleInit(): Promise<void> {
+    // Open the pool here, not in the constructor
+    this.open = true;
+  }
+
+  async query(sql: string): Promise<string[]> {
+    if (!this.open) {
+      throw new Error('Connection is not open yet');
+    }
+
+    return [sql];
+  }
+}
+
+@Module({ providers: [ConnectionService], exports: [ConnectionService] })
+export class DatabaseModule {}
+
+@Service()
+export class CatalogService extends BaseService implements OnModuleInit {
+  private products: string[] = [];
+
+  constructor(private readonly db: ConnectionService) {
+    super();
+  }
+
+  async onModuleInit(): Promise<void> {
+    // DatabaseModule's hooks have completed: the connection is open
+    this.products = await this.db.query('SELECT name FROM products');
+  }
+
+  list(): string[] {
+    return this.products;
+  }
+}
+
+@Module({ imports: [DatabaseModule], providers: [CatalogService] })
+export class AppModule {}
+```
+
+- A `@Global()` module is built before the rest of the tree, so its services are initialized among
+  the first, even when it is listed last in `imports`.
+- A module imported by several others is built and initialized once.
+- Controllers' `onModuleInit` runs after the service hooks of the whole tree.
+- A hook that throws stops the pass there: no later hook runs, none in the modules importing its
+  module in particular, and `start()` rejects. The destroy hooks still run over every instance that
+  was built (see [When `start()` fails](./core.md#when-start-fails)).
+- `TestingModule.create({ providers, imports })` builds its root module from `providers`, so those
+  providers are initialized after everything in `imports`.
+
+Because the root module's hooks run last, a root-module hook cannot prepare state that an imported
+service's `onModuleInit` reads: do that work in the constructor, or move the reading side to
+`onApplicationInit`, which runs after every `onModuleInit`. The same holds for the `providers`
+passed to `TestingModule.create()`.
+
+When an imported module's `onModuleInit` throws — typically a database or cache unreachable at
+boot — no root-module hook has run yet, but the failed `start()` still runs `onModuleDestroy` on
+every service it built. Guard a destroy hook on the state its init hook creates, as
+`DatabaseService` above does with `if (this.pool)`.
+
 ### Lifecycle Order
 
 ```
@@ -414,7 +567,7 @@ STARTUP:
    └─ this.config and this.logger are available after super()
 3. Framework clears init context
 4. Framework calls initializeService() (no-op if already initialized via constructor)
-5. Module init hook → onModuleInit()  (sequential, in dependency order)
+5. Module init hook → onModuleInit()  (sequential: imported modules first, then in dependency order)
 6. Application init hook → onApplicationInit()
 7. HTTP server starts
 
@@ -517,6 +670,11 @@ export class DatabaseService extends BaseService {
   }
 }
 ```
+
+`this.config` is live only when the application passes `envSchema`. Without it, every `get()`
+throws `Configuration not initialized. Provide envSchema in ApplicationOptions.` — from a
+constructor, that fails the boot with a `ServiceConstructionError` naming the service (see
+[When a Constructor Throws](#when-a-constructor-throws)).
 
 ## Service with Tracing
 

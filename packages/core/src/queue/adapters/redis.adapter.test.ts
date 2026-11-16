@@ -15,13 +15,28 @@ import {
   mock,
 } from 'bun:test';
 
+import type { Message } from '../types';
+
+import { RedisClient } from '../../redis/redis-client';
 import { SharedRedisProvider } from '../../redis/shared-redis';
 import { createRedisContainer, type TestContainer } from '../../testing/containers';
+import { QueuePublishError } from '../publish-error';
+import { QueueScheduler } from '../scheduler';
 
 
 import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyRecord = Record<string, any>;
+
+/** Reaches the adapter's raw client and key layout, to write what `publish()` never would. */
+function asAny(obj: unknown): AnyRecord {
+  return obj as AnyRecord;
+}
+
 const CONTAINER_TEST_TIMEOUT_MS = 30_000;
+/** Starting and stopping the Redis container takes far longer than a hook's default 5 s. */
+const CONTAINER_BOOT_MS = 120_000;
 
 /** Poll until `predicate` holds, so a test never depends on a fixed sleep being long enough. */
 async function waitFor(
@@ -52,12 +67,12 @@ describe('RedisQueueAdapter', () => {
     // so take it over explicitly rather than inheriting whatever an earlier FILE left behind.
     await SharedRedisProvider.reset();
     SharedRedisProvider.configure({ url: redis.url });
-  });
+  }, CONTAINER_BOOT_MS);
 
   afterAll(async () => {
     await SharedRedisProvider.reset();
     await redis.stop();
-  });
+  }, CONTAINER_BOOT_MS);
 
   beforeEach(async () => {
     adapter = createRedisQueueAdapter({
@@ -159,11 +174,214 @@ describe('RedisQueueAdapter', () => {
 
     it('should throw when publishing while disconnected', async () => {
       await adapter.disconnect();
-      
+
       await expect(
         adapter.publish('test:topic', { data: 1 }),
       ).rejects.toThrow('not connected');
     });
+  });
+
+  // Every failure provoked on the real server; the driver's error must be the cause, untouched.
+  describe('a failed publish', () => {
+    /** A connection of the test's own, for the commands that set a case up. */
+    let admin: RedisClient;
+
+    beforeAll(async () => {
+      admin = new RedisClient({ url: redis.url });
+      await admin.connect();
+    }, CONTAINER_BOOT_MS);
+
+    afterAll(async () => {
+      await admin.disconnect();
+    }, CONTAINER_BOOT_MS);
+
+    /** The rejection of `publish()`, which every case here expects to be a QueuePublishError. */
+    async function publishFailure(
+      target: RedisQueueAdapter,
+      pattern: string,
+      options?: { delay?: number },
+    ): Promise<QueuePublishError> {
+      const error = await target.publish(pattern, { n: 1 }, options).catch((thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(QueuePublishError);
+
+      return error as QueuePublishError;
+    }
+
+    /** An adapter on a connection of its own, so killing or closing it disturbs no other case. */
+    async function ownAdapter(url: string = redis.url): Promise<RedisQueueAdapter> {
+      const own = new RedisQueueAdapter({ useSharedClient: false, url, keyPrefix: `pf:${Date.now()}:` });
+      await own.connect();
+
+      return own;
+    }
+
+    it('is "unavailable" before connect(), and safe to repeat', async () => {
+      const error = await publishFailure(adapter, 'pf.before');
+
+      expect(error.reason).toBe('unavailable');
+      expect(error.safeToRepeat).toBe(true);
+      expect(error.pattern).toBe('pf.before');
+      expect(error.message).toContain('RedisQueueAdapter not connected');
+    });
+
+    it('is "rejected" when Redis answers with an error reply, and names the key and the reply', async () => {
+      await adapter.connect();
+      const raw = asAny(adapter);
+      // Someone else's string where the topic's list belongs: RPUSH answers WRONGTYPE.
+      await raw.client.set(raw.keys.queue('pf.wrongtype'), 'not a list');
+
+      const error = await publishFailure(adapter, 'pf.wrongtype');
+
+      expect(error.reason).toBe('rejected');
+      expect(error.safeToRepeat).toBe(true);
+      expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_SERVER_ERROR');
+      expect(error.message).toContain('WRONGTYPE');
+      expect(error.message).toContain(raw.keys.queue('pf.wrongtype'));
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    describe('under an ACL user without ZADD and PUBLISH', () => {
+      const user = `pf-${Date.now()}`;
+      let limited: RedisQueueAdapter;
+
+      beforeAll(async () => {
+        await admin.raw('ACL', 'SETUSER', user, 'on', '>pw', '~*', '&*', '+@all', '-zadd', '-publish');
+      }, CONTAINER_BOOT_MS);
+
+      beforeEach(async () => {
+        limited = await ownAdapter(redis.url.replace('redis://', `redis://${user}:pw@`));
+      });
+
+      afterEach(async () => {
+        await limited.disconnect();
+      });
+
+      it('is "rejected" when the write itself is denied (NOPERM on the delayed set)', async () => {
+        const error = await publishFailure(limited, 'pf.denied', { delay: 60_000 });
+
+        expect(error.reason).toBe('rejected');
+        expect(error.message).toContain('NOPERM');
+        expect(error.message).toContain(asAny(limited).keys.delayed);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('resolves once the message is stored, and reports a failed wake as onError instead', async () => {
+        const errors: Error[] = [];
+        limited.on('onError', (error) => errors.push(error));
+
+        const id = await limited.publish('pf.nowake', { n: 1 });
+
+        expect(id).toBeString();
+        const raw = asAny(limited);
+        expect(await raw.client.raw('LLEN', raw.keys.queue('pf.nowake'))).toBe(1);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].message).toContain('could not announce it on the wake channel');
+        expect(String((errors[0].cause as Error).message)).toContain('NOPERM');
+      }, CONTAINER_TEST_TIMEOUT_MS);
+    });
+
+    it('is "unavailable" while the server is a replica (READONLY), and the same publish succeeds once promoted', async () => {
+      const own = await ownAdapter();
+      // What a failover does to the old primary.
+      await admin.raw('REPLICAOF', '127.0.0.1', '1');
+
+      let error: QueuePublishError;
+      try {
+        error = await publishFailure(own, 'pf.readonly');
+      } finally {
+        await admin.raw('REPLICAOF', 'NO', 'ONE');
+      }
+
+      try {
+        expect(error.reason).toBe('unavailable');
+        expect(error.safeToRepeat).toBe(true);
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_SERVER_ERROR');
+        expect(error.message).toContain('READONLY');
+        expect(error.message).toContain('cannot take writes right now');
+        expect(error.message).not.toContain('..');
+        await expect(own.publish('pf.readonly', { n: 1 })).resolves.toBeString();
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" while a script runs past busy-reply-threshold (BUSY), and succeeds after SCRIPT KILL', async () => {
+      const own = await ownAdapter();
+      const scriptRunner = new RedisClient({ url: redis.url });
+      await scriptRunner.connect();
+      await admin.raw('CONFIG', 'SET', 'busy-reply-threshold', '100');
+
+      // Never settles until killed; its rejection then is the expected end of the script.
+      const script = scriptRunner.raw('EVAL', 'while true do end', '0').catch((killed: unknown) => killed);
+      let error: QueuePublishError;
+      try {
+        await waitFor(async () => await admin.raw('PING').then(() => false, (busy: Error) => busy.message.startsWith('BUSY')));
+        error = await publishFailure(own, 'pf.busy');
+      } finally {
+        await admin.raw('SCRIPT', 'KILL').catch(() => undefined);
+        await script;
+        await admin.raw('CONFIG', 'SET', 'busy-reply-threshold', '5000');
+        await scriptRunner.disconnect();
+      }
+
+      try {
+        expect(error.reason).toBe('unavailable');
+        expect(error.message).toContain('BUSY');
+        await expect(own.publish('pf.busy', { n: 1 })).resolves.toBeString();
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unknown" when the connection drops while the command is in flight', async () => {
+      const own = await ownAdapter();
+      const clientId = String(await asAny(own).client.raw('CLIENT', 'ID'));
+
+      // Writes wait while paused, so the RPUSH reaches the server and stays unanswered; then its
+      // connection is killed under it.
+      await admin.raw('CLIENT', 'PAUSE', '10000', 'WRITE');
+      try {
+        const pending = publishFailure(own, 'pf.inflight');
+        await waitFor(async () => String(await admin.raw('CLIENT', 'LIST', 'ID', clientId)).includes('cmd=rpush'));
+        await admin.raw('CLIENT', 'KILL', 'ID', clientId);
+
+        const error = await pending;
+
+        expect(error.reason).toBe('unknown');
+        expect(error.safeToRepeat).toBe(false);
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_CONNECTION_CLOSED');
+        expect(error.message).toContain('may or may not have been stored');
+      } finally {
+        await admin.raw('CLIENT', 'UNPAUSE');
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" when the driver connection is closed for good before the command', async () => {
+      const own = await ownAdapter();
+      // What the client is left in once it gives up reconnecting: every command fails unsent.
+      asAny(own).client.getClient().close();
+
+      try {
+        const error = await publishFailure(own, 'pf.closed');
+
+        expect(error.reason).toBe('unavailable');
+        expect((error.cause as { code?: string }).code).toBe('ERR_REDIS_CONNECTION_CLOSED');
+        expect(error.message).toContain('Nothing was sent');
+      } finally {
+        await own.disconnect();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('is "unavailable" when the client it holds was disconnected underneath it', async () => {
+      const own = await ownAdapter();
+      await asAny(own).client.disconnect();
+
+      const error = await publishFailure(own, 'pf.released');
+
+      expect(error.reason).toBe('unavailable');
+      expect((error.cause as Error).message).toContain('Redis client not connected');
+      await own.disconnect();
+    }, CONTAINER_TEST_TIMEOUT_MS);
   });
 
   describe('end-to-end against a real Redis', () => {
@@ -234,6 +452,25 @@ describe('RedisQueueAdapter', () => {
       expect(received).toEqual([{ jobId: 'a' }]);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
+    it('drains the backlog of every topic a trailing ">" covers, and of the literal topic it spells', async () => {
+      // `wildgt.>` is a pattern subscription: its backlog is found by SCAN, through the glob
+      // `wildgt.*`, and narrowed by the matcher — which reads the trailing `>` as `#`.
+      await adapter.publish('wildgt.a', { n: 1 });
+      await adapter.publish('wildgt.a.b', { n: 2 });
+      await adapter.publish('wildgt.>', { n: 3 });
+      await adapter.publish('wildgtx.a', { n: 4 });
+
+      const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+      await adapter.subscribe('wildgt.>', async (message) => {
+        received.push({ subject: message.subject, params: message.params });
+      });
+
+      await waitFor(() => received.length === 3);
+
+      expect(received.map(entry => entry.subject).sort()).toEqual(['wildgt.>', 'wildgt.a', 'wildgt.a.b']);
+      expect(received.every(entry => Object.keys(entry.params).length === 0)).toBe(true);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
     it('delivers a message published before the subscription existed, exactly once', async () => {
       // The reason the list leg exists at all: pub/sub reaches only subscribers that are already
       // listening, so without the list this message would be lost. It must still arrive once, not
@@ -274,6 +511,174 @@ describe('RedisQueueAdapter', () => {
       // requeued message cannot deliver another subscription's values.
       expect(captured).toEqual([{ id: '123' }]);
     }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reports the topic as the subject, with pattern and params unchanged for a published message', async () => {
+      const received: Array<{ subject?: string; pattern: string; params: Record<string, string>; stream?: string }> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push({
+          subject: message.subject, pattern: message.pattern, params: message.params, stream: message.stream,
+        });
+      });
+
+      await adapter.publish('orders.321', { total: 1 });
+      await adapter.publish('orders.654', { total: 2 }, { delay: 50 });
+      await adapter.publish('orders.987', { total: 3 }, { priority: 5 });
+
+      await waitFor(() => received.length === 3);
+
+      // Direct, delayed and priority publishes all reach the list their envelope names, so the
+      // list topic and the envelope agree on every path `publish()` takes.
+      expect(received.map(m => m.subject).sort()).toEqual(['orders.321', 'orders.654', 'orders.987']);
+      for (const message of received) {
+        expect(message.pattern).toBe(message.subject!);
+        expect(message.params).toEqual({ id: message.subject!.split('.')[1] });
+        expect(message.stream).toBeUndefined();
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('takes pattern and params from the list a message was claimed from, not from its envelope', async () => {
+      // A writer with access to `orders.1`'s list pushes an envelope naming another topic.
+      const subjects: Array<string | undefined> = [];
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        subjects.push(message.subject);
+        captured.push(message.params);
+
+        if (subjects.length === 1) {
+          throw new Error('retry me');
+        }
+      }, { retry: { attempts: 2, delay: 0 } });
+
+      const raw = asAny(adapter);
+      await raw.client.rpush(raw.keys.queue('orders.1'), JSON.stringify({
+        id: 'forged-1', pattern: 'orders.999', data: {}, timestamp: Date.now(), metadata: {},
+      }));
+      await raw.client.publish(raw.keys.wake, 'orders.1');
+
+      await waitFor(() => subjects.length === 2);
+
+      // The retry goes back onto the same list: the claimed topic is the message's topic from
+      // then on, so the envelope cannot move it onto another one either.
+      expect(subjects).toEqual(['orders.1', 'orders.1']);
+      expect(captured).toEqual([{ id: '1' }, { id: '1' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    describe('a message published with undefined data', () => {
+      // `JSON.stringify` drops `data: undefined`, so these entries carry no `data` key at all —
+      // and they are still the framework's own writes, which every check has to let through.
+
+      /** Collects every delivery and every reported error on `adapter`. */
+      function observe(): { received: Message[]; errors: Error[] } {
+        const received: Message[] = [];
+        const errors: Error[] = [];
+        adapter.on('onError', (error) => {
+          errors.push(error);
+        });
+
+        return { received, errors };
+      }
+
+      it('delivers a direct publish on a literal and on a pattern subscription', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.direct', async (message) => {
+          received.push(message);
+        });
+        await adapter.subscribe('emptyp.*', async (message) => {
+          received.push(message);
+        });
+
+        await adapter.publish('empty.direct', undefined);
+        await adapter.publish('emptyp.direct', undefined);
+        await waitFor(() => received.length === 2);
+
+        expect(received.map(m => m.subject).sort()).toEqual(['empty.direct', 'emptyp.direct']);
+        expect(received.every(m => m.data === undefined && typeof m.id === 'string')).toBe(true);
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('delivers a delayed publish', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.delayed', async (message) => {
+          received.push(message);
+        });
+
+        await adapter.publish('empty.delayed', undefined, { delay: 50 });
+        await waitFor(() => received.length === 1);
+
+        expect(received[0].data).toBeUndefined();
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+
+      it('delivers what an interval job whose method returns nothing publishes', async () => {
+        const { received, errors } = observe();
+        await adapter.subscribe('empty.tick', async (message) => {
+          received.push(message);
+        });
+
+        // `runOnStart` defaults to true, so the first tick publishes as soon as the job starts.
+        const scheduler = new QueueScheduler(adapter);
+        scheduler.addIntervalJob('empty-tick', 60_000, 'empty.tick', async () => undefined);
+        scheduler.start();
+
+        try {
+          await waitFor(() => received.length === 1);
+        } finally {
+          scheduler.stop();
+        }
+
+        expect(received[0].data).toBeUndefined();
+        expect(errors).toEqual([]);
+      }, CONTAINER_TEST_TIMEOUT_MS);
+    });
+
+    // A list is a plain key: anything with keyspace access can push onto it. Only what
+    // `publish()` writes may reach a handler; the rest is reported, naming the topic, and the
+    // drain carries on with the next entry.
+    const foreignEntries: Array<[label: string, raw: string]> = [
+      ['an empty object', '{}'],
+      ['an array', '[1]'],
+      ['an object with data but no id or timestamp', '{"data":1}'],
+      ['a number', '42'],
+      ['a string', '"x"'],
+      ['text that is not JSON', 'not json'],
+      ['an envelope whose metadata is not an object', '{"id":"m","timestamp":1,"data":{},"metadata":[]}'],
+      ['an envelope whose attempt is not a number', '{"id":"m","timestamp":1,"data":{},"attempt":"2"}'],
+    ];
+
+    for (const [index, [label, raw]] of foreignEntries.entries()) {
+      for (const subscription of ['literal', 'pattern'] as const) {
+        it(`reports ${label} on a ${subscription} subscription instead of delivering it`, async () => {
+          const topic = `junk.${subscription}.${index}`;
+          const handled: string[] = [];
+          const errors: Error[] = [];
+          adapter.on('onError', (error) => {
+            errors.push(error);
+          });
+
+          await adapter.subscribe(subscription === 'literal' ? topic : `junk.${subscription}.*`, async (message) => {
+            handled.push(message.id);
+          });
+
+          const client = asAny(adapter);
+          await client.client.rpush(client.keys.queue(topic), raw);
+          await client.client.rpush(client.keys.queue(topic), JSON.stringify({
+            id: 'valid-after', pattern: topic, data: {}, timestamp: Date.now(), metadata: {},
+          }));
+          await client.client.publish(client.keys.wake, topic);
+
+          // The valid entry behind the foreign one is the sync point: once it is handled, the
+          // foreign one has been claimed and dealt with.
+          await waitFor(() => handled.length === 1);
+
+          expect(handled).toEqual(['valid-after']);
+          expect(errors).toHaveLength(1);
+          expect(errors[0].message).toContain(`"${topic}"`);
+          expect(errors[0].message).toContain('not handed to any handler');
+        }, CONTAINER_TEST_TIMEOUT_MS);
+      }
+    }
 
     it('captures every parameter of a multi-parameter pattern', async () => {
       // One parameter can be right by coincidence — a regex capturing the wrong segment still
@@ -724,6 +1129,171 @@ describe('RedisQueueAdapter', () => {
       expect(keys).toEqual([]);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
+    it('keeps redelivering under attempts: -1 and never dead-letters by count', async () => {
+      const seen: Array<{ attempt?: number; maxAttempts?: number }> = [];
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.endless', async (message) => {
+        seen.push({ attempt: message.attempt, maxAttempts: message.maxAttempts });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: -1, backoff: 'fixed', delay: 10 }, deadLetter: { queue: 'orders.endless-dead' } });
+
+      await adapter.subscribe('orders.endless-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.endless', { orderId: 21 });
+      // Past the default of 1 and past the `deadLetter.maxRetries` default a cap would fall to.
+      await waitFor(() => seen.length >= 8, 15_000);
+
+      expect(seen.slice(0, 8).map((entry) => entry.attempt)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(seen.every((entry) => entry.maxAttempts === -1)).toBe(true);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reads attempts: 0 and deadLetter.maxRetries: -1 as no limit as well', async () => {
+      let zero = 0;
+      let fromDeadLetter = 0;
+      const reported = new Set<number | undefined>();
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.zero', async (message) => {
+        zero += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 0, delay: 10 }, deadLetter: { queue: 'orders.unlimited-dead' } });
+
+      await adapter.subscribe('orders.maxretries', async (message) => {
+        fromDeadLetter += 1;
+        reported.add(message.maxAttempts);
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.unlimited-dead', maxRetries: -1 } });
+
+      await adapter.subscribe('orders.unlimited-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.zero', { orderId: 1 });
+      await adapter.publish('orders.maxretries', { orderId: 2 });
+      await waitFor(() => zero >= 4 && fromDeadLetter >= 4, 15_000);
+
+      expect([...reported]).toEqual([-1]);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('parks the retry of deadLetter.maxRetries: -1 with no retry for the default delay, never zero', async () => {
+      // A zero wait skips the delayed set and LPUSHes straight back: with no last attempt that is
+      // a message cycling through Redis as fast as it answers.
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      await adapter.subscribe('orders.dl-only', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dl-only-dead', maxRetries: -1 } });
+
+      await adapter.publish('orders.dl-only', { orderId: 8 });
+      await waitFor(() => calls >= 1);
+
+      let parked: string[] = [];
+      await waitFor(async () => {
+        parked = await client.zrangebyscore(delayedKey, '-inf', '+inf');
+
+        return parked.length > 0;
+      });
+      expect(JSON.parse(parked[0]).attempt).toBe(2);
+
+      // Paced by the 100 ms default: a handful of attempts in half a second, not hundreds.
+      await Bun.sleep(500);
+      expect(calls).toBeGreaterThan(1);
+      expect(calls).toBeLessThan(10);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('parks a retry in the delayed set no further out than retry.maxDelay', async () => {
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      // The formula alone would park the first retry 10 s out.
+      await adapter.subscribe('orders.max-delay', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: 2, backoff: 'fixed', delay: 10_000, maxDelay: 900, 
+        }, 
+      });
+
+      await adapter.publish('orders.max-delay', { orderId: 1 });
+      await waitFor(() => calls >= 1);
+
+      // The delayed set is scored by due time: a member at or below now + 2 s was parked by the
+      // ceiling, not by the 10 s the formula gives.
+      let dueSoon: string[] = [];
+      await waitFor(async () => {
+        dueSoon = await client.zrangebyscore(delayedKey, '-inf', String(Date.now() + 2000));
+
+        return dueSoon.length > 0;
+      });
+      expect(JSON.parse(dueSoon[0]).attempt).toBe(2);
+
+      await waitFor(() => calls >= 2, 10_000);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      await expect(adapter.subscribe('orders.bad-max-delay', async () => undefined, { retry: { maxDelay: -1 } }))
+        .rejects.toThrow(/retry\.maxDelay.*"orders\.bad-max-delay"/);
+    });
+
+    it('registers and polls nothing when it refuses an invalid retry.maxDelay', async () => {
+      const internals = adapter as unknown as { subscriptions: unknown[]; startQueuePolling: () => void };
+      let polled = 0;
+      const original = internals.startQueuePolling.bind(adapter);
+      internals.startQueuePolling = () => {
+        polled += 1;
+        original();
+      };
+
+      try {
+        await expect(adapter.subscribe('orders.refused', async () => undefined, { retry: { maxDelay: Number.NaN } }))
+          .rejects.toThrow(/retry\.maxDelay/);
+
+        expect(internals.subscriptions).toHaveLength(0);
+        expect(polled).toBe(0);
+      } finally {
+        internals.startQueuePolling = original;
+      }
+    });
+
+    it('stops an unlimited retry as soon as the handler succeeds', async () => {
+      let calls = 0;
+      let processed = 0;
+      adapter.on('onMessageProcessed', () => {
+        processed += 1;
+      });
+
+      await adapter.subscribe('orders.recovers', async () => {
+        calls += 1;
+        if (calls < 5) {
+          throw new Error('transient');
+        }
+      }, { retry: { attempts: -1, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.recovers', { orderId: 4 });
+      await waitFor(() => processed > 0, 15_000);
+      await Bun.sleep(400);
+
+      expect(calls).toBe(5);
+      expect(processed).toBe(1);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
     it('reports a dead letter that could not be republished instead of losing it silently', async () => {
       const errors: Error[] = [];
       adapter.on('onError', (error) => {
@@ -749,7 +1319,10 @@ describe('RedisQueueAdapter', () => {
         const reported = errors.find((e) => e.message.includes('dead letter'))!;
         expect(reported.message).toContain('orders.dlq-broken');
         expect(reported.message).toContain('orders.dlq-broken-dead');
-        expect((reported.cause as Error).message).toBe('RPUSH exploded');
+        // The republish went through publish(), so its failure arrives as the QueuePublishError
+        // publish() throws, with the write's own error under it.
+        expect(reported.cause).toBeInstanceOf(QueuePublishError);
+        expect(((reported.cause as Error).cause as Error).message).toBe('RPUSH exploded');
       } finally {
         client.rpush = originalRpush;
       }
@@ -799,5 +1372,72 @@ describe('RedisQueueAdapter', () => {
         SharedRedisProvider.createClient = originalCreateClient;
       }
     });
+  });
+});
+
+// Every error reply code the adapter decides on, without a server: the reply is shaped the way Bun
+// rejects a command Redis answered with an error. READONLY and BUSY are provoked for real above.
+describe('RedisQueueAdapter error reply classification', () => {
+  /** An adapter whose RPUSH is answered with `reply`, as Bun reports an error reply. */
+  function answeredWith(reply: string): RedisQueueAdapter {
+    const target = new RedisQueueAdapter({ useSharedClient: false, url: 'redis://unused' });
+    const replyError = Object.assign(new Error(reply), { name: 'RedisError', code: 'ERR_REDIS_SERVER_ERROR' });
+    asAny(target).connected = true;
+    asAny(target).client = {
+      keyPrefix: '',
+      rpush: () => Promise.reject(replyError),
+    };
+
+    return target;
+  }
+
+  async function reasonFor(reply: string): Promise<string> {
+    const error = await answeredWith(reply).publish('orders.created', { n: 1 }).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(QueuePublishError);
+
+    return (error as QueuePublishError).reason;
+  }
+
+  const cannotWriteNow = [
+    'READONLY You can\'t write against a read only replica.',
+    'BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.',
+    'LOADING Redis is loading the dataset in memory',
+    'MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to \'no\'.',
+    'TRYAGAIN Multiple keys request during rehashing of slot',
+    'CLUSTERDOWN The cluster is down',
+    'NOREPLICAS Not enough good replicas to write.',
+    'MISCONF Redis is configured to save RDB snapshots, but it\'s currently unable to persist to disk.',
+  ];
+
+  for (const reply of cannotWriteNow) {
+    it(`reports "${reply.split(' ', 1)[0]}" as "unavailable"`, async () => {
+      expect(await reasonFor(reply)).toBe('unavailable');
+    });
+  }
+
+  const refusals = [
+    'WRONGTYPE Operation against a key holding the wrong kind of value',
+    'NOPERM User limited has no permissions to run the \'rpush\' command',
+    'OOM command not allowed when used memory > \'maxmemory\'.',
+    // Whole-word match: these start with BUSY and are refusals of their own.
+    'BUSYKEY Target key name already exists.',
+    'BUSYGROUP Consumer Group name already exists',
+    'ERR wrong number of arguments for \'rpush\' command',
+  ];
+
+  for (const reply of refusals) {
+    it(`reports "${reply.split(' ', 1)[0]}" as "rejected"`, async () => {
+      expect(await reasonFor(reply)).toBe('rejected');
+    });
+  }
+
+  it('does not double the period a reply ends with', async () => {
+    const error = await answeredWith('NOREPLICAS Not enough good replicas to write.')
+      .publish('orders.created', { n: 1 })
+      .catch((thrown: unknown) => thrown as Error);
+
+    expect((error as Error).message).toContain('NOREPLICAS Not enough good replicas to write. Nothing was stored');
+    expect((error as Error).message).not.toContain('..');
   });
 });

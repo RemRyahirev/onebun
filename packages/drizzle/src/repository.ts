@@ -2,7 +2,11 @@
 // Drizzle ORM uses complex conditional types that require `any` for table type parameters
 // This is a known limitation when working with Drizzle's type system
 
-import { eq, type SQL } from 'drizzle-orm';
+import {
+  type Column,
+  eq,
+  type SQL,
+} from 'drizzle-orm';
 
 import type { IRepository, DatabaseInstance } from './types';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -12,6 +16,7 @@ import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { UniversalTransactionClient } from './builders';
 import { DrizzleService } from './drizzle.service';
 import {
+  findPrimaryKeyColumn,
   getPrimaryKeyColumn,
   type SelectType,
   type InsertType,
@@ -119,10 +124,30 @@ export class BaseRepository<
   }
 
   /**
-   * Get primary key column name from table schema
+   * Get the SQL column name of the primary key (the name in the database, not the property
+   * key of the table object). To address the column in a query use the table's column object
+   * instead, which is what `findById`, `update` and `delete` do.
+   *
+   * @throws Error when the table has no primary key
    */
   protected getPrimaryKeyColumn(): string {
     const pkColumn = getPrimaryKeyColumn(this.table);
+    if (!pkColumn) {
+      throw new Error('Primary key not found for table');
+    }
+
+    return pkColumn;
+  }
+
+  /**
+   * The primary-key column object of the table, taken from the table itself, so it does not
+   * depend on the property key under which the column is declared. Pass it to drizzle
+   * operators such as `eq()`.
+   *
+   * @throws Error when the table has no primary key
+   */
+  private primaryKeyColumnObject(): Column {
+    const pkColumn = findPrimaryKeyColumn(this.table);
     if (!pkColumn) {
       throw new Error('Primary key not found for table');
     }
@@ -154,12 +179,12 @@ export class BaseRepository<
    * Find one record by ID
    */
   async findById(id: unknown): Promise<SelectType<TTable> | null> {
-    const primaryKeyColumn = this.getPrimaryKeyColumn();
+    const primaryKeyColumn = this.primaryKeyColumnObject();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
     const results = await (this.db as any)
       .select()
       .from(this.table)
-      .where(eq((this.table as any)[primaryKeyColumn], id));
+      .where(eq(primaryKeyColumn, id));
 
     // Drizzle returns properly typed results at runtime
     return (results[0] as SelectType<TTable>) || null;
@@ -183,12 +208,12 @@ export class BaseRepository<
    * Update a record by ID
    */
   async update(id: unknown, data: Partial<InsertType<TTable>>): Promise<SelectType<TTable> | null> {
-    const primaryKeyColumn = this.getPrimaryKeyColumn();
+    const primaryKeyColumn = this.primaryKeyColumnObject();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
     const results = await (this.db as any)
       .update(this.table)
       .set(data as any)
-      .where(eq((this.table as any)[primaryKeyColumn], id))
+      .where(eq(primaryKeyColumn, id))
       .returning();
 
     if (!results || results.length === 0) {
@@ -203,11 +228,11 @@ export class BaseRepository<
    * Delete a record by ID
    */
   async delete(id: unknown): Promise<boolean> {
-    const primaryKeyColumn = this.getPrimaryKeyColumn();
+    const primaryKeyColumn = this.primaryKeyColumnObject();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
     const results = await (this.db as any)
       .delete(this.table)
-      .where(eq((this.table as any)[primaryKeyColumn], id))
+      .where(eq(primaryKeyColumn, id))
       .returning();
 
     return Array.isArray(results) && results.length > 0;

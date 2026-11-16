@@ -55,7 +55,7 @@ type ExtractControllerNames<TDef extends ServiceDefinition> =
  * @example
  * ```typescript
  * const client = createServiceClient(usersDefinition, { url: 'http://localhost:3001' });
- * const response = await client.UsersController.getById('123'); // `any`
+ * const user = await client.UsersController.getById('123'); // `unknown`
  * ```
  *
  * @see docs:api/requests.md
@@ -67,15 +67,24 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
 /**
  * Client interface for a single controller. Methods are accessed by their handler names.
  *
- * Every method is `(...args: any[]) => Promise<any>`. Nothing checks the order or types of the
- * arguments against the handler, and the resolved value is not typed by the handler's return type.
- * At run time only a missing (`undefined`) or `null` path parameter value is refused; extra
- * arguments, and those in the position of a parameter the client does not send, are dropped. The
- * method name itself is checked at run time: reading one the controller does not have throws.
+ * Every method is `(...args: any[]) => Promise<unknown>`. Nothing checks the order or types of the
+ * arguments against the handler. The promise resolves with the value the handler returned, typed
+ * `unknown` because nothing derives its type from the handler: annotate or check it before use.
+ * At run time only the path parameter values are checked: each is percent-encoded, and one that no
+ * encoding can send as a single segment (`undefined`, `null`, `''`, `.`, `..`) is refused. The
+ * arguments are the handler's `@Param`, `@Query` and `@Body` parameters in declaration order; a
+ * parameter the client does not send (`@Header`, `@Req`, a custom extractor, ...) takes none, and
+ * extra arguments are dropped. A `@Query` array is sent as `name[]` keys and arrives as an array;
+ * the `@Body` value of a `POST`, `PUT` or `PATCH` is sent as JSON, so a string or a falsy value
+ * arrives as it was passed. The method name itself is checked at run time: reading one the
+ * controller does not have throws.
+ *
+ * `unknown` makes a property read on the unasserted value (`.result`, `.statusCode`) fail to compile
+ * instead of reading `undefined`.
  *
  * @see docs:api/requests.md
  */
 export interface ControllerClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [methodName: string]: (...args: any[]) => Promise<any>;
+  [methodName: string]: (...args: any[]) => Promise<unknown>;
 }

@@ -130,7 +130,10 @@ instance whose `loggerLayer` / processors / registry the next attempt shares.
 To retry, a NEW `OneBunApplication` per attempt is simplest; `start()` again on the same instance
 boots too (it rebuilds what the rollback closed and reuses what you passed in), and a `stop()` after
 that retry really stops it. Destroy hooks run on a failed boot too, even where
-`onModuleInit` never ran: release what exists (`this.pool?.end()`).
+`onModuleInit` never ran: release what exists (`this.pool?.end()`). Not when the boot fails while
+providers are still being constructed (a constructor throws, a provider dependency is missing or
+circular): the rollback runs no destroy hook then, so a provider built before the failure keeps what
+its constructor opened — open connections and timers in `onModuleInit`, never in a constructor.
 
 A `stop()` called while `start()` is still booting (a supervisor giving up, a test's teardown) waits
 for the boot to settle, then does what a `stop()` right after it would: the full sequence after a boot
@@ -188,27 +191,69 @@ aggregate them with `max`, not `sum`. A metric registered directly against prom-
 or pass `metrics: { registry: register }` to put one application back on the global registry.
 
 **Calling another service: `createServiceClient(createServiceDefinition(UsersModule), { url })`.**
-Controllers are keyed by class name and arguments are positional, one per decorated parameter of
-the handler in declaration order: `client.UsersController.findById(id)`. Only `@Param`, `@Query`
-and `@Body` values are sent; a `@Header`, `@Cookie`, `@Req` or custom-extractor parameter still
-takes a position, so `findById(@Header('x-tenant') t, @Param('id') id)` is called as
-`findById(undefined, id)`, and the value in that position is dropped. A path argument is
-inserted into its `:param` segment **unencoded**, and a value that would change the route is
-refused with a `TypeError` before anything is sent: `null`, `undefined`, anything containing `/`,
-`\`, `?` or `#`, and `''`, `.` or `..` (also as `%2e`, or with a tab, newline or trailing space in
-it). For an id that comes from user input, pass `encodeURIComponent(input)`: the router decodes it
-once, so the handler gets the original text. `.` and `..` cannot be sent in a path at all; use a
-query parameter. See `docs/api/requests.md#service-client-path-values`.
+Controllers are keyed by class name and arguments are positional, **one per `@Param`, `@Query` and
+`@Body` parameter** of the handler, in declaration order: `client.UsersController.findById(id)`.
+Only those values are sent. A `@Header`, `@Cookie`, `@Req`, `@Res`, custom-extractor, file or
+form-field parameter takes **no** argument wherever it is declared, so
+`findById(@Header('x-tenant') t, @Param('id') id)` is called as `findById(id)`. A value passed in
+such a parameter's place (`findById(undefined, id)`) is read as the first client value, which only a
+`null`/`undefined` path value refuses — any other value (a tenant id, a token) is silently sent as
+that path, query or body value, so it can land in URLs and logs; send such values via the client's
+`headers`/`auth` option. See `docs/api/requests.md#service-client-arguments`
+(`#service-client-arguments-upgrade` lists, from `_endpoints`, the endpoints whose call skips a
+parameter). The client **percent-encodes every path argument itself** (`encodeURIComponent`), and
+the router decodes it once, so the handler receives exactly what was passed, `/`, `?`, `#`, `\` and
+`%` included: pass user input raw, `findById(input)`, and never encode it yourself — a
+caller-encoded `'a%2Fb'` arrives as `'a%2Fb'`, and typecheck cannot find such a call. Refused with a `TypeError` before anything is sent,
+because no encoding can send them as one segment: `null`, `undefined`, `''`, `.`, `..` and a string
+with an unpaired surrogate; send such a value as a query parameter or in the body. On the callee,
+read the value through `@Param`: the raw request path carries it encoded (`@` as `%40`, `:` as
+`%3A`). See `docs/api/requests.md#service-client-path-values`.
+**Query and body values arrive as passed**: a `@Query` array is sent as one `name[]` key per
+element and the handler receives an array, a one-element one included (`[]`, `null`, `undefined`
+send nothing); on `POST`/`PUT`/`PATCH` the `@Body` value is always sent as JSON, so a string, `0`,
+`false`, `''` and `null` reach `@Body()` unchanged and only `undefined` sends no body (other methods
+send no body and do not serialize it). Pass values, never `JSON.stringify(dto)` (it arrives as a
+string) or `tags.join(',')` (it arrives as one string). A BigInt or cyclic body of a
+`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. So does a body that is bytes or a
+stream — a typed array (a `Buffer` included, despite its `toJSON`), `DataView`, `ArrayBuffer`,
+`SharedArrayBuffer`, `Blob`/`Bun.file()`, `ReadableStream`, Node.js stream, async generator — which
+JSON has no form for (any other value with `toJSON`, e.g. `URLSearchParams`, still goes as its JSON): send bytes through `HttpClient`
+(`createHttpClient`), which sends a `Uint8Array`, `ArrayBuffer` or `Blob` as its bytes. A handler that other HTTP clients
+call too gets a plain `?tags=a,b` as one string: type it `string | string[]`; a `type('string')`
+query schema answers a service client's array with a 400. A `custom` auth `interceptor` sees
+`config.data` as the JSON text that is sent (a string, or `undefined` with no body), not the value: sign it as it is, or
+`JSON.parse` it, change it and `JSON.stringify` it again; the query is in `config.url`, not
+`config.query`. See `docs/api/requests.md#service-client-query-body`.
 The client is a plain value: an `async` factory may return it, and `await`, `JSON.stringify` and
 `String` accept it (`then`, `toJSON` and symbol keys read as `undefined`). Test for a controller
 or method with `'UsersController' in client`: reading a name the definition lacks throws (a
 missing controller's error lists the available ones). See `docs/api/requests.md#service-client-as-value`.
 **The service client is not type-safe.** Names are checked at run time only; the client is
-`Record<string, ControllerClient>` and every method is `(...args: any[]) => Promise<any>`, so a
+`Record<string, ControllerClient>` and every method is `(...args: any[]) => Promise<unknown>`, so a
 misspelled name, a wrong argument or an extra one compiles (extra ones are dropped). The call
-resolves the HTTP client's envelope around the server's `{ success, result }` body: the handler's
-value is `response.result.result`. Annotate the expected type at the call site; nothing checks it.
-See `docs/api/requests.md#service-client-typing`.
+resolves with the value the handler returned (`unknown`: assert `as User` or validate; a `void`
+handler gives `undefined`, a handler's own `Response.json(body)` gives `body`). See
+`docs/api/requests.md#service-client-typing`. `createHttpClient` does NOT unwrap: pointed at a OneBun
+service, `req()` resolves the service's body, its envelope `{ success: true, result }`, so read
+`(await client.req<{ result: User }>('GET', path)).result` (the `result` of `get()` is that
+envelope). The multi-service example does this.
+**A failure rejects with a OneBun error class, never a `FiberFailure`** — for the service client and
+every Promise method of `HttpClient` (`get`, `post`, ..., `req`, `reqRaw`) and `RequestsService`.
+The class is the one `OneBunBaseError.fromErrorResponse` picks for the `code`: a callee's
+`throw new ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 })` arrives as
+`instanceof ConflictError` with `code` 409, `error` and `details` as thrown; a non-OneBun 404 is a
+`NotFoundError` with `error: 'HTTP_ERROR'`; a status without a class of its own is an
+`HttpStatusError` keeping that `code` (a 418 stays 418); a timeout / abort / refused connection is a
+`TransportError` with code `0` (`getTransportFailureKind(error)` reads the kind). All are exported from
+`@onebun/core` except `ValidationError` (import it from `@onebun/requests`: in core the name is the
+validation-issue interface). Catch with `instanceof`; nothing from `effect` is needed.
+A body's `code` counts only when it is 400–599: a OneBun service relaying its own upstream's timeout
+answers 500 with `code: 0` in the body, and that rejects as an `InternalServerError` 500 retried under
+`retryOn`, never a `TransportError`. A callee's `details` are for the caller's code; if the error escapes
+a controller, the default filter sends status and `error` with `details: {}` (and the app logs it).
+`retryCount`/`traceId` of a failure are on the Effect API's `ErrorResponse` only. See `docs/api/requests.md#service-client-results` and
+`#a-failed-request-rejects`.
 
 **WebSocket clients: untyped, and Bun-only.** `createWsClient(createWsServiceDefinition(Module), { url })`
 reaches gateways by class name (a missing one reads as `undefined`); `createNativeWsClient({ url })`
@@ -383,9 +428,18 @@ is built (with two such providers, the one constructed first is injected). The e
 gets `undefined` and a warning. A real cycle throws `CircularDependencyError` whose `chain` names
 only the cycle — break it by extracting a third service, there is no `forwardRef`. A provider
 waiting on a same-module provider that was never constructed (no `@Service()` visible to this copy
-of `@onebun/core`, or its constructor threw — see `Failed to create service <Name>` in the log)
-throws `DependencyResolutionError` naming that dependency; an `@Optional()` parameter gets
-`undefined` and a warning instead.
+of `@onebun/core`) throws `DependencyResolutionError` naming that dependency; an `@Optional()`
+parameter gets `undefined` and a warning instead.
+
+**A constructor that throws fails the boot at the throw** (since 0.9.0), with
+`ServiceConstructionError: Failed to create service <Name> in module <Module>: <Type>: <message>` —
+`cause` is the thrown value unchanged, `stack` is its frames, and `serviceName`/`moduleName` are
+fields. That holds whatever injects the provider, `@Optional()` and nothing at all included, and
+under `TestingModule`'s silent logger too (it is the rejection, not a log line). A throw from the
+framework's step right after the constructor (an `initializeService()` the provider defines, applying
+`tracing.traceAll`) is reported the same way. A framework error thrown from a constructor
+(`DependencyResolutionError`, a `OneBun*`-named one) is not wrapped. An app does not boot with such
+a provider: fix the constructor or drop the provider.
 
 ## Services
 
@@ -433,6 +487,11 @@ Key rules:
   which finds nothing: `getConstructorParamTypes(C)?.flatMap((t, i) => isInjectableParamType(t) ? [] : [i])`.
   The framework warns at startup when such a hole is FOLLOWED by a resolved parameter; read it
   from a test with `TestingModule.captureLogs()`
+- **A `@Service()` subclass that declares no constructor inherits its parent's constructor
+  dependencies** (since 0.9.0) — types, `@Inject` and `@Optional()` together, from the nearest ancestor
+  that declares the constructor; every class in between must be decorated too. A subclass that
+  declares its own constructor gets only its own parameters, and an undecorated one gets none.
+  Same rule for controllers, gateways, middleware, guards, interceptors and filters
 - **Lifecycle interfaces are type-only exports** — import them as `type OnModuleInit`, otherwise
   TS1484 under `verbatimModuleSyntax`, which `bun create @onebun` writes into the scaffolded tsconfig
 - **`implements OnModuleInit` is a style rule, not a runtime requirement.** The framework
@@ -445,6 +504,13 @@ Key rules:
   `createTestService` supports this — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
+- **`onModuleInit` runs imported modules first** (since 0.9.0): every imported module's services
+  before those of the module importing it, the root module's (and `TestingModule.create({ providers })`'s)
+  last, and within a module in dependency order — a hook always finds the hooks of what it injects
+  completed. A root hook therefore cannot prepare what an imported module's hook reads: do that work
+  in the constructor, or read it in `onApplicationInit`. An imported hook that throws at boot leaves
+  every root-module service with `onModuleDestroy` called but `onModuleInit` never run — guard
+  destroy (`if (this.pool)`)
 - `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
   is held until the handlers are registered and then delivered, and the shutdown message goes out
   before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the
@@ -527,7 +593,9 @@ export class ItemController extends BaseController {
 **Important rules:**
 - **Leading slash is optional** in `@Controller()` and route decorators. `@Controller('users')`
   equals `@Controller('/users')`, `@Get(':id')` equals `@Get('/:id')`. NestJS-style paths work as-is.
-- Return plain data from controller methods — auto-wrapped to `{ success: true, result: data }`
+- Return plain data from controller methods — auto-wrapped to `{ success: true, result: data }`.
+  Every non-`Response` value is wrapped on every route, including one with its own `success` key
+  (since 0.9.0); a custom body needs `Response.json(body, { status })` — `this.json()` wraps too
 - Throw `HttpException` for errors — auto-converted to `{ success: false, error: message, code: statusCode }`
 - Use `OneBunRequest` (not `Request`) with `@Req()` decorator
 - ArkType schema `infer` types should be exported from the validation file as named types,
@@ -615,7 +683,7 @@ module exports only `OneBunFile`, `MimeType`, `matchMimeType`, `validateFile`.
 | Error type | HTTP status | Response body |
 |---|---|---|
 | `HttpException` | exception's statusCode | `{ success: false, error: message, code: statusCode }` |
-| `OneBunBaseError` | error's code | `toErrorResponse()`: `{ success: false, error, code, details, originalError }`, minus an HTTP-client error's transport details |
+| `OneBunBaseError` | error's code if 400–599, else 500 (a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx) | `toErrorResponse()`: `{ success: false, error, code, details, originalError }`, minus an HTTP-client error's transport details and an upstream's own `details` (sent as `{}`) |
 | Any other `Error` or thrown value | 500 | `{ success: false, error: 'Internal Server Error', code: 500 }` |
 
 The third row does **not** carry the error's own message. That text is written by whatever threw — a
@@ -635,19 +703,22 @@ of the client's record (`{ ...e.details }`) is yours and is sent whole.
 
 See `references/guards-filters-security.md` for full details on:
 
-- **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `AuthGuard`/`RolesGuard`
-  — both are primitives, not an authorization scheme: `AuthGuard` only checks that a Bearer header
-  is present, and `RolesGuard` with no `rolesExtractor` trusts the caller-supplied `x-user-roles`
-  header. Always pass a `rolesExtractor` reading a verified identity
+- **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `BearerPresenceGuard`/`RolesGuard`
+  — both are starter examples, not an authorization scheme: `BearerPresenceGuard` only checks that a
+  Bearer header is present, and `RolesGuard` only compares roles against what its REQUIRED second
+  argument, `rolesExtractor`, returns (`new RolesGuard(['admin'], rolesExtractor)`, always an
+  instance). For production auth, write a `@Service()` guard that injects the verifying service,
+  verifies the token and records the identity with `updateRequestContext({ user })`, then pass
+  `RolesGuard` a `rolesExtractor` reading `getRequestContext()?.user?.roles` — never a request header
 - **Exception Filters**: `ExceptionFilter`, `@UseFilters()`, `createExceptionFilter()`, `defaultExceptionFilter`
 - **Security Middleware**: `cors`, `rateLimit`, `security` options on `ApplicationOptions`
 
 Quick example — guards + filters:
 
 ```typescript
-import { Controller, Get, UseGuards, UseFilters, AuthGuard, HttpException } from '@onebun/core';
+import { Controller, Get, UseGuards, UseFilters, BearerPresenceGuard, HttpException } from '@onebun/core';
 
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/api/admin')
 class AdminController extends BaseController {
   @Get('/stats')
@@ -1015,9 +1086,9 @@ class that extends none of them and exposes no `initialize*` method throws, nami
 
 For a full boot, `TestingModule` also sets the init context — hand it the schema:
 `TestingModule.create({ ... }).setOptions({ envSchema }).compile()`. Without `envSchema` the
-constructor's `this.config.get()` throws `Configuration not initialized`, DI logs it to the silent
-test logger and drops the service, and boot fails with `DependencyResolutionError: Could not resolve
-dependency <Service> for controller <Ctrl>` — the message names DI, the cause is the missing schema.
+constructor's `this.config.get()` throws `Configuration not initialized`, and `compile()` rejects
+with `ServiceConstructionError: Failed to create service <Service> in module _TestingAppModule:
+Error: Configuration not initialized. ...` (the stub's error as `cause`), consumer or not.
 
 ### Integration testing — `TestingModule`
 
@@ -1130,13 +1201,17 @@ at least in the areas you're modifying.
 | `await app.stop()` "to clean up" in the catch of a failed `start()`, and no exit | The failed `start()` already released everything, so that `stop()` runs no step again and only closes what you passed in (log transports, `spanProcessors`, `metrics.registry`) — end the bootstrap catch with `process.exit(1)`. To retry instead, build a new `OneBunApplication` per attempt (calling `start()` again on the same instance also works) |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
-| `client.UsersController.findById(input)` with a raw user-supplied id | `findById(encodeURIComponent(input))`. The service client does not encode path values; one containing `/`, `?`, `#` or `\`, or reading as `''`/`.`/`..`, rejects with a `TypeError` and sends nothing, because it would reach a different route |
+| `client.UsersController.findById(undefined, id)` for `findById(@Header('x-tenant') t, @Param('id') id)` | `findById(id)`. Only `@Param`, `@Query` and `@Body` take arguments; the placeholder is read as `id` and refused. A non-null one (`findById('acme', id)`) is sent as `id`, so the call reaches `/users/acme` with no error; with a `@Query`/`@Body` first it is sent as that value. A token or tenant id goes in the client's `headers`/`auth` option |
+| `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. The service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'`, not `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
+| `client.UsersController.create(JSON.stringify(dto))`, or `findByTags(tags.join(','))` with a handler that splits `'a,b'` | `create(dto)` and `findByTags(tags)`. The service client serializes every `@Body` value as JSON itself (a pre-serialized body arrives as a string) and sends a query array as `tags[]` keys, so the handler receives the array. Strings, `0`, `false`, `''` and `null` are valid bodies and arrive unchanged |
+| A service client `auth: { type: 'custom', interceptor: (c) => ({ ...c, data: { ...c.data, tenantId } }) }` | `c.data` is the JSON text that is sent, not the value, so the spread sends the string's characters as keys. `if (typeof c.data === 'string') data = JSON.stringify({ ...JSON.parse(c.data), tenantId })`; sign `c.data` as it is, never `JSON.stringify(c.data)` |
+| `response.result.result` / `.statusCode` on a service-client call, or `Runtime.isFiberFailure` + `Cause.squash` on a client rejection | The call resolves the handler's value itself (`unknown`), and rejects with the error class (`e instanceof ConflictError`, `e.code`, `e.details`) |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |
 | Adding `reflect-metadata` to a OneBun app "for DI", or ordering imports around it | Not needed: `@onebun/core` installs the complete global Reflect Metadata API itself. A library that brings its own (tsyringe, `@simplewebauthn/server`) works in any import order; if the app imports `reflect-metadata` directly, require >= 0.2.2 |
-| `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Constructor types are read OWN, never inherited: a subclass without its own constructor gets no dependencies, and startup warns `Child declares no constructor of its own ...`. Repeat `constructor(dep: Dep) { super(dep); }` and keep the decorator (an undecorated subclass emits no metadata at all, so an undecorated guard, interceptor, filter or middleware needs BOTH the constructor and a decorator: `@Service()`, or `@Middleware()` for middleware). An undecorated class whose own `constructor()` takes no parameters gets the same warning, worded for both shapes (`... (or, without a decorator, one whose parameter types were not recorded) ...`): harmless if that constructor passes the parent's dependencies itself. This holds in any import order of `reflect-metadata` — fix every class that warning names |
-| Undecorated `class StrictGuard extends BaseAuthGuard { constructor(t: TokenStore) { super(t); } }` (guard, interceptor, filter or middleware) | No types are emitted for an undecorated class and DI never borrows the parent's, so it receives NO dependencies; startup warns `StrictGuard declares a constructor with parameters, but no types were emitted ...`. Add `@Service()` to it — `@Middleware()` to middleware, which is what the warning names for it. This holds in any import order of `reflect-metadata`, even when the parameters match the parent's — fix every class that warning names |
+| `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Works (since 0.9.0): a DECORATED class that declares no constructor is injected with the dependencies of the one it inherits — types, `@Inject(Class)`, `@Inject(TOKEN)` and `@Optional()` from the nearest ancestor that declares it (`getConstructorParamTypes(Child)` answers the same). It does NOT work for an undecorated class (give it `@Service()`, or `@Middleware()` for middleware — the decorator alone is enough), for a class with an undecorated class between it and that ancestor (startup warns `Child declares no constructor of its own, but ... <Mid>, which it extends, carries no decorator ...`: decorate `<Mid>`), or for a class that declares its own constructor (it gets its own parameters only; `constructor() { super(new Dep()); }` takes nothing). Any parent parameter that cannot be resolved fails the boot for Child, and each error says the constructor is inherited (`Child declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Parent (...)`): no provider → `DependencyResolutionError` (provide it, or `@Optional()` in the parent); it injects Child back → `CircularDependencyError` (note in `notes`; break the cycle); Child's module selects two registrations of its type → `OneBunAmbiguousRegistrationError` (`@Inject(TOKEN)` in the parent); the parent's `@Inject(TOKEN)` is not selected by Child's module → `OneBunUnselectedRegistrationError` (`forFeature(TOKEN)` there). Declaring a constructor in Child that does not take the parameter avoids all four. A Parent whose `@Optional()` parameter is typed as Parent itself (`constructor(@Optional() next?: Parent)`) boots, but gets `undefined` there, with a warning, while Child gets the Parent; `constructor() { super(); }` in Child gives Parent the Child instead |
+| Undecorated `class StrictGuard extends BaseAuthGuard { constructor(t: TokenStore) { super(t); } }` (guard, interceptor, filter or middleware) | No types are emitted for an undecorated class and DI never hands a class that declares its own constructor its parent's, so it receives NO dependencies; startup warns `StrictGuard declares a constructor with parameters, but no types were emitted ...`. Add `@Service()` to it — `@Middleware()` to middleware, which is what the warning names for it. This holds in any import order of `reflect-metadata`, even when the parameters match the parent's — fix every class that warning names |
 
 ## Checklist for New Services
 

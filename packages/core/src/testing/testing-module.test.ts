@@ -7,6 +7,7 @@ import {
   it,
 } from 'bun:test';
 
+import { Env, TypedEnv } from '@onebun/envs';
 import { HttpStatusCode } from '@onebun/requests';
 
 import { OneBunApplication } from '../application/application';
@@ -22,6 +23,7 @@ import {
   UseFilters,
   UseGuards,
 } from '../decorators/decorators';
+import { DependencyResolutionError, ServiceConstructionError } from '../errors/dependency-errors';
 import { createExceptionFilter } from '../exception-filters/exception-filters';
 import { HttpException } from '../exception-filters/http-exception';
 import { createHttpGuard } from '../http-guards/http-guards';
@@ -519,6 +521,86 @@ describe('TestingModule', () => {
         expect(module.get(OrderB).a).toBe(mock as unknown as OrderA);
       } finally {
         await module.close();
+      }
+    });
+  });
+
+  /**
+   * A provider whose constructor throws used to be logged — to this harness's silent logger — and
+   * dropped, and the boot failed on whatever injected it with a DependencyResolutionError about a
+   * dependency that IS registered. Now compile() rejects with the constructor's own error.
+   */
+  describe('a provider whose constructor throws (WI-326)', () => {
+    const NOT_INITIALIZED = 'Configuration not initialized. Provide envSchema in ApplicationOptions.';
+
+    @Service()
+    class ConfiguredInConstructor extends BaseService {
+      readonly apiKey: unknown;
+
+      constructor() {
+        super();
+        // No envSchema: `this.config` is the NotInitializedConfig stub, whose get() throws.
+        this.apiKey = this.config.get('payments.apiKey');
+      }
+    }
+
+    @Controller('/payments')
+    class PaymentsController extends BaseController {
+      constructor(readonly configured: ConfiguredInConstructor) {
+        super();
+      }
+
+      @Get('/')
+      list() {
+        return [];
+      }
+    }
+
+    const compileError = async (module: TestingModule): Promise<Error> => await module.compile().then(
+      async (compiled) => {
+        await compiled.close();
+        throw new Error('expected compile() to reject');
+      },
+      (error: unknown) => error as Error,
+    );
+
+    it('rejects with the NotInitializedConfig error, under the silent logger (0.8.x: DependencyResolutionError)', async () => {
+      const error = await compileError(TestingModule.create({
+        controllers: [PaymentsController],
+        providers: [ConfiguredInConstructor],
+      }));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(error).not.toBeInstanceOf(DependencyResolutionError);
+      expect(error.message).toBe(
+        `Failed to create service ConfiguredInConstructor in module _TestingAppModule: Error: ${NOT_INITIALIZED}`,
+      );
+      expect(error.cause).toBeInstanceOf(Error);
+      expect((error.cause as Error).message).toBe(NOT_INITIALIZED);
+    });
+
+    it('rejects when nothing injects the provider (0.8.x: compiled without it)', async () => {
+      const error = await compileError(TestingModule.create({ providers: [ConfiguredInConstructor] }));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect((error as ServiceConstructionError).serviceName).toBe('ConfiguredInConstructor');
+      expect((error.cause as Error).message).toBe(NOT_INITIALIZED);
+    });
+
+    it('compiles once envSchema is given', async () => {
+      // TypedEnv keeps its instances process-wide: without this, a config built by an earlier test
+      // from another schema would be handed back.
+      TypedEnv.clear();
+      const module = await TestingModule
+        .create({ controllers: [PaymentsController], providers: [ConfiguredInConstructor] })
+        .setOptions({ envSchema: { payments: { apiKey: Env.string({ default: 'sk_test' }) } } })
+        .compile();
+
+      try {
+        expect(module.get(ConfiguredInConstructor).apiKey).toBe('sk_test');
+      } finally {
+        await module.close();
+        TypedEnv.clear();
       }
     });
   });

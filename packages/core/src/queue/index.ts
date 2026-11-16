@@ -74,10 +74,19 @@ export { toRedisQueueGlob } from './redis-glob';
 // Retry policy shared by the memory and Redis adapters
 export {
   resolveMaxAttempts,
+  isLastAttempt,
   retryDelayMs,
+  validateRetryOptions,
   DEFAULT_RETRY_ATTEMPTS,
   DEFAULT_RETRY_DELAY_MS,
 } from './retry';
+
+// The error every adapter's publish path throws
+export {
+  QueuePublishError,
+  type QueuePublishErrorOptions,
+  type QueuePublishFailureReason,
+} from './publish-error';
 
 // Acknowledgment semantics
 export {
@@ -93,7 +102,7 @@ export {
 // Guards
 export {
   MessageExecutionContextImpl,
-  MessageAuthGuard,
+  MessageAuthorizationPresenceGuard,
   MessageServiceGuard,
   MessageHeaderGuard,
   MessageTraceGuard,

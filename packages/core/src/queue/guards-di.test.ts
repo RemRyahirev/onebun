@@ -36,7 +36,7 @@ import {
   UseGuards,
 } from '../decorators/decorators';
 import { DependencyResolutionError } from '../errors/dependency-errors';
-import { AuthGuard } from '../http-guards/http-guards';
+import { BearerPresenceGuard } from '../http-guards/http-guards';
 import { Controller as BaseController } from '../module/controller';
 import { clearGlobalServicesRegistry } from '../module/module';
 import { BaseService, Service } from '../module/service';
@@ -192,7 +192,7 @@ class GuardedQueueController extends BaseController {
     ran.throws = (ran.throws ?? 0) + 1;
   }
 
-  @UseGuards(AuthGuard)
+  @UseGuards(BearerPresenceGuard)
   @Subscribe('q.http-only-guard')
   async httpOnlyGuard(): Promise<void> {
     ran.httpOnlyGuard = (ran.httpOnlyGuard ?? 0) + 1;
@@ -402,7 +402,7 @@ describe('queue guard dependency resolution failures', () => {
 });
 
 describe('guard narrowing across transports', () => {
-  test('AuthGuard denies a queue context instead of throwing on getRequest()', () => {
+  test('BearerPresenceGuard denies a queue context instead of throwing on getRequest()', () => {
     const queueContext = {
       type: 'queue',
       getMessage: () => undefined,
@@ -412,6 +412,6 @@ describe('guard narrowing across transports', () => {
       getClass: () => class {},
     } as unknown as ExecutionContext;
 
-    expect(new AuthGuard().canActivate(queueContext)).toBe(false);
+    expect(new BearerPresenceGuard().canActivate(queueContext)).toBe(false);
   });
 });

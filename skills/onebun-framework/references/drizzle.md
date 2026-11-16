@@ -416,8 +416,9 @@ application while a transaction is open:
 - Concurrent **async** queries from elsewhere in the application are queued and run after the COMMIT or
   ROLLBACK — never enrolled in the transaction, never rolled back with it. Two transactions are serialized.
 
-**PostgreSQL** — a pooled connection through drizzle's own `transaction()`; nothing is queued, nothing is
-refused, and the SQLite re-entrancy errors cannot occur.
+**PostgreSQL** — a pooled connection through drizzle's own `transaction()`; nothing is queued and the SQLite
+re-entrancy errors cannot occur. The one refusal is a nested transaction asking for settings the outermost one does
+not run under (see [Isolation level and access mode](#isolation-level-and-access-mode-postgresql)).
 
 - A query issued through the service or a repository from **inside** the callback runs ON the transaction and
   is rolled back with it, exactly as on SQLite. Repository methods that take `tx` explicitly land on the same
@@ -432,6 +433,41 @@ refused, and the SQLite re-entrancy errors cannot occur.
   see only their own uncommitted rows, one rollback never touches the other's writes, and a query issued
   outside any transaction goes to the pool even while one is open. Two `DrizzleService` instances never see
   each other's transactions.
+
+### Isolation level and access mode (PostgreSQL)
+
+`transaction(callback, options)` takes `PostgreSQLTransactionOptions` — `isolationLevel`
+(`'read committed' | 'repeatable read' | 'serializable'`) and `accessMode` (`'read write' | 'read only'`). They are
+issued as `SET TRANSACTION` before the callback runs, so the repositories and services called inside run under them
+too. This is the way to get a consistent snapshot: the driver's `getPostgreSQLDatabase().transaction(fn, config)`
+sets no ambient context, so anything reading through `DrizzleService` or a repository would read outside it.
+
+```typescript
+import type { PostgreSQLTransactionOptions } from '@onebun/drizzle';
+
+// One snapshot for a response assembled from several reads
+const snapshot: PostgreSQLTransactionOptions = { isolationLevel: 'repeatable read', accessMode: 'read only' };
+
+const view = await this.db.transaction(async () => ({
+  order: await this.orderRepository.findById(orderId),
+  history: await this.operationRepository.findByOrder(orderId),
+}), snapshot);
+```
+
+- A key left out keeps the server default (normally `read committed`, `read write`); `{}` is the same as no options.
+- `read only` refuses `INSERT` / `UPDATE` / `DELETE` **and** `SELECT ... FOR UPDATE` / `FOR SHARE` — a row lock
+  counts as a write. Under `repeatable read` / `serializable` the transaction can fail with SQLSTATE `40001` — for
+  one, on writing or locking a row changed after its snapshot; retry by calling `transaction()` again.
+- A **nested** `transaction()` is a SAVEPOINT and runs under the OUTERMOST settings. It may repeat them (all or some)
+  or pass none; anything else — including an option the outermost call did not set — throws
+  `DrizzleTransactionError` with `code === 'POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH'` before its callback runs. Put
+  the options on the outermost call. Caught, the outer transaction carries on; uncaught, it rolls the outer back.
+- drizzle's own `transaction(fn, config)` inside the callback — via `getDatabase()`, `getPostgreSQLDatabase()` or
+  `tx.getRawTransaction()` — is a savepoint too and is held to the same rule: a config asking for other settings
+  (or `deferrable`) throws `POSTGRESQL_TRANSACTION_OPTIONS_MISMATCH` instead of being silently dropped. When
+  migrating off that workaround, move the config to the outermost `this.db.transaction(cb, options)`.
+- On **SQLite** any option throws `code === 'SQLITE_TRANSACTION_OPTIONS_UNSUPPORTED'` before the callback runs. An
+  unknown option or value throws `code === 'TRANSACTION_OPTIONS_INVALID'` on both dialects.
 
 `DrizzleTransactionError` is exported from `@onebun/drizzle`; `name` is stable, so it can be matched without
 importing the class.

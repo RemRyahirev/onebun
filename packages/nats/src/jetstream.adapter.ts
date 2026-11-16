@@ -41,9 +41,13 @@ import {
   createQueuePatternMatcher,
   createQueueScheduler,
   inRootTraceScope,
+  isLastAttempt,
   nackedError,
+  QueuePublishError,
   resolveAckMode,
+  resolveMaxAttempts,
   retryDelayMs,
+  validateRetryOptions,
   tracksDelivery,
   wasNacked,
   type NackAwareMessage,
@@ -59,8 +63,13 @@ import {
   stampMetadata,
   type StampMetadata,
 } from './config-stamp';
-import { NatsClient } from './nats-client';
-import { toNatsSubject, widensOnTranslation } from './subject';
+import { NatsClient, toHeaderMap } from './nats-client';
+import { natsPublishError } from './publish-failure';
+import {
+  toNatsSubject,
+  validateNatsSubscriptionPattern,
+  widensOnTranslation,
+} from './subject';
 import {
   natsSubjectCovers,
   natsSubjectsOverlap,
@@ -88,6 +97,7 @@ const RELEASE_TIMEOUT_MS = 5_000;
  * prevent the duplicate it exists to prevent.
  */
 const HANDLER_DRAIN_TIMEOUT_MS = 30_000;
+const NOT_CONNECTED_MESSAGE = 'JetStreamQueueAdapter not connected. Call connect() first.';
 /**
  * nats-server's rejection of a consumer on a workqueue stream whose `deliver_policy` is not `all`.
  * Neither this code nor the next is named by the client's `JetStreamApiCodes`.
@@ -137,6 +147,11 @@ interface ResolvedConsumerConfig {
   deliverPolicy: DeliverPolicy;
   maxAckPending: number;
   ackWait: number;
+  /**
+   * Sent to the server unchanged. A value of zero or below is no limit — nats-server reads
+   * `-1` as "redeliver until acknowledged" and stores `0` as `-1` — so every comparison
+   * against it goes through core's `isLastAttempt()`, never a bare `>=`.
+   */
   maxDeliver: number;
   consumeBatch: number;
   /**
@@ -240,19 +255,45 @@ function durableConsumerName(group: string, filterSubject: string): string {
 /** The wire envelope OneBun publishes. Anything else on the subject is foreign. */
 interface OneBunEnvelope {
   id?: string;
+  /**
+   * Written by `publish()` and never read on delivery: the subject the server delivered the
+   * message on is the topic, and this field is only the publisher's claim about it.
+   */
   pattern?: string;
+  /** Absent when the publisher passed `undefined`: `JSON.stringify` drops the key. */
   data?: unknown;
   timestamp?: number;
   metadata?: MessageMetadata;
 }
 
 /**
- * A JetStream subject can carry messages this framework did not publish. Without this
- * check they reached the handler as `data: undefined`, which reads like an application
- * bug rather than a foreign payload.
+ * Whether a parsed payload is delivered: an object that carries a `data` key, or a plain object
+ * with a string `id` and a numeric `timestamp`.
+ *
+ * The second branch is the shape `publish()` writes when `data` is `undefined`: `JSON.stringify`
+ * drops the key, so `publish(topic, undefined)` — and a `@Cron` or `@Interval` tick whose method
+ * returns nothing, and the dead letter of either — carries no `data`, and its handler receives
+ * `data === undefined`.
+ *
+ * The first branch admits whatever another producer wraps as `{ "data": … }`, with no check on
+ * the other fields: a JetStream stream is an integration surface, and the consume loop fills in a
+ * missing `id`, `timestamp` and `metadata`. The Redis adapter's rule is stricter, because only the
+ * framework writes its queue lists. Anything else — an object with neither, an array, a primitive,
+ * `null` — would reach a handler with an undefined payload that reads like an application bug, so
+ * it is refused.
  */
 function isOneBunEnvelope(value: unknown): value is OneBunEnvelope {
-  return typeof value === 'object' && value !== null && 'data' in value;
+  if (typeof value === 'object' && value !== null && 'data' in value) {
+    return true;
+  }
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const { id, timestamp } = value as { id?: unknown; timestamp?: unknown };
+
+  return typeof id === 'string' && typeof timestamp === 'number';
 }
 
 function poisonMessageError(subject: string, cause: unknown): Error {
@@ -370,21 +411,26 @@ function workQueueNotUniqueRemedy(
   return `${rule} No subscription in this application overlaps ${subscriber}, so the other consumer lives elsewhere — most often a durable an earlier deployment left behind when its group was renamed or its pattern changed, otherwise another service consuming the same subject. List them with nats consumer ls ${streamName}. Remove a stale OneBun durable with deleteDurableConsumer(oldPattern, oldGroup) on this adapter, or nats consumer rm ${streamName} <consumer>. On a workqueue that loses no tasks: unacknowledged messages stay in the stream, and the consumer OneBun creates next, with deliver_policy all, receives them.`;
 }
 
+/**
+ * `cause` is the `QueuePublishError` the republish threw, whose message names what went wrong —
+ * repeated here so the reader does not have to open the cause to learn it.
+ */
 function deadLetterRepublishError(queue: string, pattern: string, cause: unknown): Error {
   return new Error(
     `Failed to republish a message from "${pattern}" to the dead-letter queue "${queue}". `
     + 'The original was NOT terminated — the server will redeliver it or exhaust max_deliver normally, '
     + 'because losing the payload is the one outcome a dead-letter queue exists to prevent. '
-    + 'The most common cause is that no stream binds the dead-letter subject.',
+    + `The republish failed with: ${describeCause(cause)}`,
     { cause },
   );
 }
 
 function foreignEnvelopeError(subject: string): Error {
   return new Error(
-    `A JetStream message on subject "${subject}" parsed as JSON but is not a OneBun envelope: it `
-    + 'carries no "data" field. It was terminated rather than delivered to the handler with an '
-    + 'undefined payload. Another producer is publishing to a subject this application subscribes to.',
+    `A JetStream message on subject "${subject}" parsed as JSON but is not a OneBun envelope — an `
+    + 'object with a "data" field, or with a string "id" and a numeric "timestamp". It was terminated '
+    + 'rather than delivered to the handler with an undefined payload. Another producer is publishing '
+    + 'to a subject this application subscribes to; wrap its payload as {"data": ...} to have it delivered.',
   );
 }
 
@@ -449,8 +495,8 @@ function cycleMessage(
  *
  * The server's rejection names a consumer and a stream and nothing else, which leaves the reader
  * to work out which subscription that was. This states the OneBun pattern, the subject it
- * translated to, the stream it resolved to and every declaration — the shape
- * `publishFailureMessage` already established.
+ * translated to, the stream it resolved to and every declaration — the shape a failed publish's
+ * message has too.
  *
  * Note what this can NOT catch: nats-server accepts a `filter_subject` unrelated to the stream's
  * subjects, so a mis-bound subscription never reaches here at all. This message covers the
@@ -504,13 +550,6 @@ function updateFailureMessage(
 }
 
 /**
- * The server answers a publish to an unbound subject with `jetstream is not enabled`, which
- * names neither the subject nor the streams and sends operators looking for a disabled
- * JetStream. This states what was actually attempted and what this application declares.
- * The original rejection is preserved as `cause` rather than interpolated, so the misleading
- * text never reappears inside the replacement message.
- */
-/**
  * `"NAME" (subject, subject)` for each stream, in declaration order.
  *
  * An empty declaration set is a sentence, not an empty string: every caller interpolates this
@@ -557,8 +596,17 @@ function ambiguousStreamMessage(
   return `"${pattern}" (as NATS subject "${natsSubject}") is claimed by more than one declared stream: ${describeDeclarations(candidates)} — each ${relation} it. Refusing to guess which: the durable consumer name is derived from the group and the pattern and does not include the stream, so resolving differently on a later boot would create the same durable on another stream and orphan the first along with its delivery position. Streams also differ in retention, limits and storage, so the choice is not neutral. Narrow the declarations until exactly one binds this subject.`;
 }
 
-function publishFailureMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
-  return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${describeDeclarations(streams)}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
+/**
+ * What to check when no stream answered for a published subject, appended to that failure only.
+ *
+ * The server answers such a publish with `jetstream is not enabled`, which names neither the subject
+ * nor the streams and sends operators looking for a disabled JetStream — and it gives the same answer
+ * while the stream that binds the subject has no leader. `natsPublishError` rewords that answer and
+ * names both causes; this adds what the application declares. A failure with any other cause — a
+ * timeout, a closed connection, a stream limit — never mentions stream binding.
+ */
+function unboundSubjectAdvice(streams: ResolvedStream[]): string {
+  return `This application declares ${describeDeclarations(streams)}. If it persists, check that a stream on this server binds the subject — the producer and the consumer must declare identical stream definitions — and, on a cluster, that the stream has a leader.`;
 }
 
 function streamNarrowingMessage(streamName: string, dropped: string[], configured: string[]): string {
@@ -627,6 +675,10 @@ interface ResolvedStream extends StreamDefinition {
 class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The subject the server delivered the message on. */
+  readonly subject: string;
+  /** The stream the server delivered it from, read off the reply subject the driver parses. */
+  readonly stream?: string;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -634,6 +686,63 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   metadata: MessageMetadata;
   attempt?: number;
   maxAttempts?: number;
+
+  /**
+   * The wire headers, through the same `toHeaderMap()` the core-NATS path uses.
+   *
+   * An own, enumerable property of every instance, so `{ ...message }` and `Object.assign` carry
+   * it the way they carry the core-NATS adapter's — but converted only when first read, because
+   * every message published with a `messageId` carries `Nats-Msg-Id` and most handlers never
+   * look. Until then it is an accessor installed from the one shared `lazyHeaders` descriptor; the
+   * first read or write replaces it with a plain data property, so every later read returns the
+   * same map. Declared, not defined: a class field would install a data property first.
+   *
+   * A message frozen or sealed before that first read — by a guard, an interceptor, a test —
+   * cannot have the accessor replaced. Its value is kept in `unsettledHeaders` instead, so the
+   * read still answers, and answers with the same map every time.
+   */
+  declare readonly headers?: ReadonlyMap<string, readonly string[]>;
+
+  /** Shared by every instance, so installing it allocates nothing per message. */
+  private static readonly lazyHeaders: PropertyDescriptor = {
+    configurable: true,
+    enumerable: true,
+    get(this: JetStreamMessage<unknown>): ReadonlyMap<string, readonly string[]> | undefined {
+      if (JetStreamMessage.unsettledHeaders.has(this)) {
+        return JetStreamMessage.unsettledHeaders.get(this);
+      }
+
+      const raw = this.jsMsg.headers;
+
+      return JetStreamMessage.settleHeaders(this, raw ? toHeaderMap(raw) : undefined);
+    },
+    set(this: JetStreamMessage<unknown>, value: ReadonlyMap<string, readonly string[]> | undefined): void {
+      JetStreamMessage.settleHeaders(this, value);
+    },
+  };
+
+  /** `headers` of the messages whose accessor could not be replaced; empty unless one was frozen. */
+  private static readonly unsettledHeaders = new WeakMap<
+    JetStreamMessage<unknown>,
+    ReadonlyMap<string, readonly string[]> | undefined
+  >();
+
+  /** Turns the lazy accessor into the plain, writable data property the core-NATS message has. */
+  private static settleHeaders(
+    message: JetStreamMessage<unknown>,
+    value: ReadonlyMap<string, readonly string[]> | undefined,
+  ): ReadonlyMap<string, readonly string[]> | undefined {
+    try {
+      Object.defineProperty(message, 'headers', {
+        configurable: true, enumerable: true, writable: true, value,
+      });
+    } catch {
+      // Frozen or sealed: the accessor is no longer configurable and stays. It reads from here.
+      JetStreamMessage.unsettledHeaders.set(message, value);
+    }
+
+    return value;
+  }
 
   private acked = false;
   private nacked = false;
@@ -653,7 +762,6 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
 
   constructor(
     id: string,
-    pattern: string,
     params: Record<string, string>,
     data: T,
     timestamp: number,
@@ -664,16 +772,23 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
     serverTracksDelivery = true,
   ) {
     this.id = id;
-    this.pattern = pattern;
+    this.pattern = jsMsg.subject;
+    this.subject = jsMsg.subject;
+    Object.defineProperty(this, 'headers', JetStreamMessage.lazyHeaders);
     this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
     this.jsMsg = jsMsg;
     this.redelivered = jsMsg?.info?.redelivered ?? false;
+    this.stream = jsMsg?.info?.stream;
     // Read from the wire in the same place `redelivered` is: the server counts deliveries,
-    // and that count is 1-based, so the documented `attempt >= maxAttempts` comparison
-    // works as written. The cap is threaded in because only the subscription knows it.
+    // and that count is 1-based, so the documented `isLastAttempt(attempt, maxAttempts)`
+    // check works as written. An unlimited consumer's cap arrives as `-1` whatever value at
+    // or below zero its `max_deliver` holds — the value the memory and Redis adapters report
+    // too — and a bare `>=` against it holds on every attempt, which is why the adapter's own
+    // check goes through `isLastAttempt()` as well. The cap is threaded in because only the
+    // subscription knows it.
     this.attempt = jsMsg?.info?.deliveryCount;
     this.maxAttempts = maxAttempts;
     this.deadLetter = deadLetter;
@@ -841,9 +956,10 @@ class JetStreamSubscription implements Subscription {
  * - Scheduled jobs (via in-process scheduler)
  * - Dead letter queue support — `deadLetter.queue` must be a literal subject bound by a
  *   declared stream, and `deadLetter.maxRetries` feeds `max_deliver` behind `retry.attempts`
- * - Retry with acknowledgment — `retry.attempts` becomes the consumer's `max_deliver`, and
- *   `retry.backoff`/`retry.delay` become the delay carried by the nak, so the wait between
- *   attempts is the same ladder the memory and Redis adapters compute
+ * - Retry with acknowledgment — `retry.attempts` becomes the consumer's `max_deliver` (`-1` is
+ *   unlimited, and then no delivery is dead-lettered by count), and `retry.backoff`/`retry.delay`
+ *   become the delay carried by the nak, so the wait between attempts is the same ladder the
+ *   memory and Redis adapters compute
  * - Message persistence
  *
  * Not supported:
@@ -1058,11 +1174,18 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const releases = entries.map(entry => this.releaseSubscription(entry));
     await awaitBounded(Promise.allSettled(releases), RELEASE_TIMEOUT_MS);
 
-    await this.client.disconnect();
-    this.connected = false;
-    this.js = null;
-    this.jsm = null;
-    this.jsmPending = null;
+    // Reset whether or not the client's disconnect rejects: the client has released its
+    // connection either way, and the rejection only reports a drain or close that failed. Left
+    // flagged as connected, the adapter would turn the next `connect()` into a no-op and let
+    // publish and subscribe through to a JetStream context bound to a closed connection.
+    try {
+      await this.client.disconnect();
+    } finally {
+      this.connected = false;
+      this.js = null;
+      this.jsm = null;
+      this.jsmPending = null;
+    }
   }
 
   isConnected(): boolean {
@@ -1073,8 +1196,22 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message to the subject `pattern` translates to.
+   *
+   * @throws {QueuePublishError} When the publish did not complete: `'unavailable'` when the adapter
+   *   is not connected, the connection is closed or draining, or JetStream cannot take writes right
+   *   now (API error 10008); `'rejected'` when the server answered without storing it (no stream
+   *   answered for the subject — none binds it, or it has no leader yet —, a stream limit, a publish
+   *   permission) or the client refused to send it (`max_payload`); `'unknown'` when no
+   *   acknowledgement came back. The driver's error is the `cause`.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     // `||`, not `??`: an empty string is not an id. It must fall back to a generated one
     // AND leave deduplication off, so both halves agree on what "absent" means.
@@ -1089,10 +1226,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       metadata: options?.metadata ?? {},
     };
 
-    const encoder = new TextEncoder();
-
     // Named parameters and `#` have no wire form; this is the only translation.
     const natsSubject = toNatsSubject(pattern);
+    // Serialised outside the `try` below, so a payload `JSON.stringify` refuses throws its own
+    // TypeError instead of being reported as a publish whose outcome is unknown.
+    const payload = new TextEncoder().encode(JSON.stringify(messageData));
 
     // No pre-flight check against the locally declared streams: a subject may legitimately
     // be bound by a stream this application never declares. Only the broker knows, so the
@@ -1103,9 +1241,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const publishOptions = options?.messageId ? { msgID: options.messageId } : undefined;
 
     try {
-      await this.js!.publish(natsSubject, encoder.encode(JSON.stringify(messageData)), publishOptions);
+      await this.js!.publish(natsSubject, payload, publishOptions);
     } catch (cause) {
-      throw new Error(publishFailureMessage(pattern, natsSubject, this.resolvedStreams), { cause });
+      throw natsPublishError(pattern, `JetStream subject "${natsSubject}"`, cause, {
+        noResponders: unboundSubjectAdvice(this.resolvedStreams),
+      });
     }
 
     return messageId;
@@ -1135,10 +1275,16 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   ): Promise<Subscription> {
     this.ensureConnected();
 
+    validateRetryOptions(options?.retry, pattern);
+    // Before anything reaches the server: a pattern no NATS filter can express — a `>` before the
+    // last token, an empty token, whitespace — would never receive a message, and is refused here.
+    validateNatsSubscriptionPattern(pattern);
+
     const jsModule = await getJetStreamModule();
 
     // The filter widens to a NATS subject; `entry.matcher`, built from the original
-    // pattern, narrows it back and extracts the named parameters.
+    // pattern, narrows it back and extracts the named parameters. A native `*` or `>` is the
+    // same wildcard on both sides.
     const filterSubject = toNatsSubject(pattern);
 
     if (options?.deadLetter !== undefined) {
@@ -1276,7 +1422,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('JetStreamQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 
@@ -2271,9 +2417,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
         // Parsing is its own branch. Folding it together with the handler call meant an
         // ack failure was misread as a parse failure and the message destroyed for it.
-        let messageData: OneBunEnvelope;
+        let parsed: unknown;
         try {
-          messageData = JSON.parse(decoder.decode(msg.data)) as OneBunEnvelope;
+          parsed = JSON.parse(decoder.decode(msg.data));
         } catch (error) {
           this.emit('onError', poisonMessageError(msg.subject, error));
           // Terminated, not acked and not retried: a payload that failed to parse will
@@ -2283,14 +2429,20 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           continue;
         }
 
-        if (!isOneBunEnvelope(messageData)) {
+        // Terminated for the same reason as a parse failure: a payload another producer wrote
+        // does not become an envelope on a redelivery.
+        if (!isOneBunEnvelope(parsed)) {
           this.emit('onError', foreignEnvelopeError(msg.subject));
           msg.term();
           continue;
         }
 
-        // Check if pattern matches
-        const match = entry.matcher(messageData.pattern || msg.subject);
+        const messageData = parsed;
+
+        // Matched on the subject the server delivered on, never on the envelope's `pattern`: the
+        // envelope is the publisher's to write, and a client allowed to publish on one subject
+        // could otherwise name another there and pick the handler and its captures.
+        const match = entry.matcher(msg.subject);
         if (!match.matched) {
           // Always ack, including under ackMode 'manual': a message this subscription
           // does not match is not the handler's to acknowledge, and under explicit acks
@@ -2298,13 +2450,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           // max_deliver. Enough of them wedge the consumer permanently.
           // On a workqueue stream this ack DELETES the message. That is why subscribe()
           // refuses there every pattern whose filter is wider than the pattern itself
-          // (`widensOnTranslation`): a whole-token pattern produces no strays to delete.
+          // (`widensOnTranslation`): every other pattern — `*`, a trailing `>` or `#`, a
+          // whole-token `{name}`, a literal token, a glued `*` the server reads literally —
+          // matches every subject its filter delivers, so it produces no strays to delete.
           msg.ack();
           continue;
         }
 
         const id = messageData.id || this.generateMessageId();
-        const messagePattern = messageData.pattern || msg.subject;
         const metadata = messageData.metadata || {};
 
         // Built only when the subscription configured a dead-letter queue AND the broker
@@ -2319,14 +2472,17 @@ export class JetStreamQueueAdapter implements QueueAdapter {
             entry,
             msg,
             {
-              id, pattern: messagePattern, data: messageData.data, metadata, 
+              id, pattern: msg.subject, data: messageData.data, metadata,
             },
             failure,
           );
 
+        // Through the resolver the memory and Redis adapters use, so a `max_deliver` of zero or
+        // below — which the server reads as no limit — is reported as the same `-1` they report.
+        const maxAttempts = resolveMaxAttempts({ attempts: entry.maxDeliver });
+
         const message = new JetStreamMessage(
           id,
-          messagePattern,
           // The consumer's `filter_subject` is the WIDENED subject — `{id}` binds `*` — so
           // the values come from the in-process match that just narrowed it back, at line
           // `entry.matcher(...)` above.
@@ -2335,7 +2491,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           messageData.timestamp || Date.now(),
           metadata,
           msg,
-          entry.maxDeliver,
+          maxAttempts,
           toDeadLetter,
           entry.resolved.tracksDelivery,
         );
@@ -2362,8 +2518,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           if (acknowledgesAutomatically(entry.options)) {
             // On the delivery the server would otherwise make the last, park the payload in
             // the dead-letter queue instead of letting max_deliver exhaust it silently. Below
-            // that threshold this is an ordinary retry.
-            if (toDeadLetter !== undefined && (msg.info?.deliveryCount ?? 1) >= entry.resolved.maxDeliver) {
+            // that threshold — and on every delivery when max_deliver is unlimited — this is
+            // an ordinary retry. The comparison is core's `isLastAttempt()`, the one the memory
+            // and Redis adapters make, so a `max_deliver` of zero or below never dead-letters.
+            if (toDeadLetter !== undefined && isLastAttempt(msg.info?.deliveryCount ?? 1, entry.resolved.maxDeliver)) {
               await toDeadLetter(error as Error);
             } else {
               // The wait between attempts travels WITH the nak, because the server decides
@@ -2376,10 +2534,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
               // would also cut the handler's acknowledgement window to one second — it is a
               // redelivery timescale, not a pause, and it would silently override `ackTimeout`.
               //
-              // A subscription with no `retry` yields 0, and the client's `nak(millis)` tests
-              // the argument for truthiness: `nak(0)` puts the same bare `-NAK` on the wire
-              // that `nak()` does, so the unconfigured path is unchanged byte for byte.
-              msg.nak(retryDelayMs(entry.options?.retry, msg.info?.deliveryCount ?? 1));
+              // A capped subscription with no `retry` yields 0, and the client's `nak(millis)`
+              // tests the argument for truthiness: `nak(0)` puts the same bare `-NAK` on the wire
+              // that `nak()` does, so the unconfigured path is unchanged byte for byte. One with
+              // no limit — `deadLetter.maxRetries` or `consumerConfig.maxDeliver` of zero or
+              // below — takes the default `retry` wait instead, or the server would hand a
+              // failing message straight back for ever.
+              msg.nak(retryDelayMs(entry.options?.retry, msg.info?.deliveryCount ?? 1, maxAttempts));
             }
           }
 

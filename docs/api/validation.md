@@ -510,6 +510,10 @@ export class UserController extends BaseController {
 }
 ```
 
+The schema validates the value the handler returns. The body the client receives is that value
+inside the success envelope, `{ success: true, result: user }` — see
+[One envelope rule](./controllers.md#one-envelope-rule).
+
 ### Complex Nested Schema
 
 ```typescript

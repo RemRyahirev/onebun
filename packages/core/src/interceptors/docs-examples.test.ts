@@ -886,7 +886,7 @@ describe('docs/api/interceptors.md — global and combined interceptors', () => 
 describe('docs/api/interceptors.md — one interceptor across HTTP, WebSocket and Queue', () => {
   const labels: string[] = [];
   const handlerRuns: string[] = [];
-  /** Where the METHOD form of `@UseInterceptors` actually ran, by transport. */
+  /** Where the METHOD form of `@UseInterceptors` ran, by transport. */
   const methodFormRuns: string[] = [];
   const logLines: string[] = [];
 
@@ -925,8 +925,8 @@ describe('docs/api/interceptors.md — one interceptor across HTTP, WebSocket an
       return { items: [1, 2, 3] };
     }
 
-    // Positive control for the queue case below: the SAME interceptor, in the SAME method
-    // form, does run on an HTTP route.
+    // The SAME interceptor in the SAME method form wraps an HTTP route and the queue handler
+    // below.
     @UseInterceptors(methodFormInterceptor)
     @Get('/method-form')
     methodForm() {
@@ -935,8 +935,6 @@ describe('docs/api/interceptors.md — one interceptor across HTTP, WebSocket an
       return { ok: true };
     }
 
-    // The method form on a @Subscribe handler is written to the prototype while queue
-    // registration reads the class — the page says it is silently dropped.
     @UseInterceptors(methodFormInterceptor)
     @Subscribe('xt.job')
     async job(_message: Message): Promise<void> {
@@ -1033,12 +1031,11 @@ describe('docs/api/interceptors.md — one interceptor across HTTP, WebSocket an
   /**
    * @source docs:api/interceptors.md#queue-handler
    */
-  it('wraps @Subscribe handlers from the class level and drops the method form', () => {
+  it('wraps @Subscribe handlers from the class level and from the method level', () => {
     expect(labels).toContain('Queue xt.job');
     expect(handlerRuns.filter((entry) => entry === 'queue')).toEqual(['queue']);
-    // Documented no-op. The SAME interceptor in the SAME method form ran on the HTTP route,
-    // so the empty queue entry is the framework dropping it, not the interceptor never wiring.
-    expect(methodFormRuns).toEqual(['http']);
+    // The method form ran on the HTTP route and on the @Subscribe handler.
+    expect(methodFormRuns).toEqual(['http', 'queue']);
   });
 
   /**

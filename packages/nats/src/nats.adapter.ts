@@ -27,6 +27,7 @@ import {
   createQueueScheduler,
   inRootTraceScope,
   nackedError,
+  QueuePublishError,
   resolveAckMode,
   wasNacked,
   type NackAwareMessage,
@@ -38,7 +39,9 @@ import {
   type NatsMessage,
   type NatsSubscriptionHandle,
 } from './nats-client';
-import { toNatsSubject } from './subject';
+import { toNatsSubject, validateNatsSubscriptionPattern } from './subject';
+
+const NOT_CONNECTED_MESSAGE = 'NatsQueueAdapter not connected. Call connect() first.';
 
 // ============================================================================
 // NATS Message Implementation
@@ -47,6 +50,10 @@ import { toNatsSubject } from './subject';
 class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  /** The subject the server delivered the message on. */
+  readonly subject: string;
+  /** The frame's own header map, converted once by `NatsClient`; absent when it carried none. */
+  readonly headers?: ReadonlyMap<string, readonly string[]>;
   params: Record<string, string>;
   data: T;
   timestamp: number;
@@ -60,14 +67,16 @@ class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
 
   constructor(
     id: string,
-    pattern: string,
+    natsMsg: NatsMessage,
     params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
   ) {
     this.id = id;
-    this.pattern = pattern;
+    this.pattern = natsMsg.subject;
+    this.subject = natsMsg.subject;
+    this.headers = natsMsg.headers;
     this.params = params;
     this.data = data;
     this.timestamp = timestamp;
@@ -262,8 +271,14 @@ export class NatsQueueAdapter implements QueueAdapter {
     }
     this.subscriptions = [];
 
-    await this.client.disconnect();
-    this.connected = false;
+    // Reset whether or not the client's disconnect rejects: the client has released its
+    // connection either way, and the rejection only reports a drain or close that failed. Left
+    // flagged as connected, the adapter would turn the next `connect()` into a no-op.
+    try {
+      await this.client.disconnect();
+    } finally {
+      this.connected = false;
+    }
   }
 
   isConnected(): boolean {
@@ -274,8 +289,24 @@ export class NatsQueueAdapter implements QueueAdapter {
   // Publishing
   // ============================================================================
 
+  /**
+   * Publish a message on core NATS.
+   *
+   * Fire-and-forget: a resolved call means the client accepted the message, not that a subscriber
+   * received it. A message published while the client is reconnecting resolves and can be lost
+   * without an error.
+   *
+   * @throws {QueuePublishError} `'unavailable'` when the adapter is not connected or the connection
+   *   is closed or draining, `'rejected'` when the client refuses to send — a subject or a
+   *   `metadata.headers` entry it cannot carry, a payload above the server's `max_payload`. The
+   *   driver's error is the `cause`.
+   *
+   * @see docs:api/queue.md
+   */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    this.ensureConnected();
+    if (!this.connected) {
+      throw new QueuePublishError(NOT_CONNECTED_MESSAGE, { reason: 'unavailable', pattern });
+    }
 
     const messageId = options?.messageId ?? this.generateMessageId();
     const timestamp = Date.now();
@@ -323,7 +354,11 @@ export class NatsQueueAdapter implements QueueAdapter {
   ): Promise<Subscription> {
     this.ensureConnected();
 
-    // OneBun spells the multi-level wildcard '#' and NATS spells it '>', and NATS has
+    // Core NATS accepts a subscription no subject can match — a `>` before the last token, an
+    // empty token — and then delivers nothing, without a word; such a pattern is refused here.
+    validateNatsSubscriptionPattern(pattern);
+
+    // OneBun spells the multi-level wildcard '#' as well as NATS's '>', and NATS has
     // no form for a named parameter at all — `{id}` widens to '*' and `entry.matcher`
     // narrows it back.
     const natsPattern = toNatsSubject(pattern);
@@ -408,7 +443,7 @@ export class NatsQueueAdapter implements QueueAdapter {
 
   private ensureConnected(): void {
     if (!this.connected) {
-      throw new Error('NatsQueueAdapter not connected. Call connect() first.');
+      throw new Error(NOT_CONNECTED_MESSAGE);
     }
   }
 
@@ -444,15 +479,17 @@ export class NatsQueueAdapter implements QueueAdapter {
     try {
       const messageData = JSON.parse(natsMsg.data);
 
-      // Check if pattern matches
-      const match = entry.matcher(messageData.pattern || natsMsg.subject);
+      // Matched on the subject the server delivered on, never on the envelope's `pattern`: the
+      // envelope is the publisher's to write, and a client allowed to publish on one subject
+      // could otherwise name another there and pick the handler and its captures.
+      const match = entry.matcher(natsMsg.subject);
       if (!match.matched) {
         return;
       }
 
       const message = new NatsQueueMessage(
         messageData.id || this.generateMessageId(),
-        messageData.pattern || natsMsg.subject,
+        natsMsg,
         // `{id}` widened to `*` on the wire, so the broker cannot capture anything — the
         // values come from the in-process match that just narrowed the subject back.
         match.params,

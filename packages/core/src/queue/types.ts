@@ -11,8 +11,8 @@
 /**
  * Message acknowledgment mode
  * - 'auto': Message is automatically acknowledged after successful handler execution. A handler
- *   that throws is retried up to `retry.attempts` times (default 1 — one delivery), with
- *   `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
+ *   that throws is retried up to `retry.attempts` times (default 1 — one delivery; `-1` for no
+ *   limit), with `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
  *   fires on every failed attempt. Once the attempts are exhausted the message is dropped on the
  *   memory adapter; the Redis adapter republishes it to `deadLetter.queue` when one is configured
  *   and drops it otherwise; JetStream dead-letters it.
@@ -76,17 +76,57 @@ export interface MessageMetadata {
  * @see docs:api/queue.md
  */
 export interface Message<T = unknown> {
-  /** Unique message ID */
+  /** Unique message ID, as the publisher wrote it */
   id: string;
 
-  /** Message pattern/topic */
+  /**
+   * The topic the message was delivered on — the same value as `subject` on every built-in
+   * adapter. Never the subscription's own pattern: `@Subscribe('orders.{id}')` receiving
+   * `orders.123` reads `'orders.123'`. The `pattern` field a publisher writes into the message
+   * envelope is not read on delivery.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
   pattern: string;
 
   /**
-   * Values captured by the `{name}` parameters of the pattern this handler subscribed with.
+   * The subject the message was delivered on, as the receiving side observed it.
+   *
+   * On NATS and JetStream it is the subject the server delivered the message on, so it carries
+   * whatever the server's per-subject publish permissions prove about the publisher. On Redis it
+   * is the topic whose list the message was claimed from; on the in-memory adapter, the topic
+   * passed to `publish()`. Set by every built-in adapter; optional in the type so that a
+   * hand-built `Message` — a test double, a custom adapter — still compiles.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly subject?: string;
+
+  /**
+   * The JetStream stream the message was delivered from. `undefined` on every other adapter.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly stream?: string;
+
+  /**
+   * The transport headers the message arrived with: each name, in the case the publisher wrote
+   * it, mapped to every value it carried in arrival order. Set by the NATS and JetStream adapters
+   * when the message carried headers, `undefined` otherwise and on every other adapter.
+   *
+   * Not merged into `metadata.headers`, which is the publisher's own record inside the envelope.
+   * Treat it as read-only.
+   *
+   * @see docs:api/queue.md#message-subject
+   */
+  readonly headers?: ReadonlyMap<string, readonly string[]>;
+
+  /**
+   * Values captured by the `{name}` parameters of the pattern this handler subscribed with,
+   * matched against the delivery subject.
    *
    * `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
-   * Always an object — `{}` for a pattern with no named parameters, and for a `*` or `#`
+   * Always an object — `{}` for a pattern with no named parameters, and for a `*`, `#` or `>`
    * wildcard — so a handler never has to guard the access itself.
    *
    * Captured **per subscription**, not per publish: one topic delivered to two subscriptions
@@ -115,7 +155,11 @@ export interface Message<T = unknown> {
   /** Current attempt number (for retries) */
   attempt?: number;
 
-  /** Maximum attempts allowed */
+  /**
+   * Maximum attempts allowed; `-1` when the subscription sets no limit. Compare it with
+   * `isLastAttempt(attempt, maxAttempts)` — a bare `attempt >= maxAttempts` holds for `-1` on
+   * the first attempt.
+   */
   maxAttempts?: number;
 
   /**
@@ -199,6 +243,8 @@ export interface RetryOptions {
   /**
    * Total deliveries, not extra ones: `attempts: 3` runs the handler at most three times.
    * Defaults to 1 — one delivery and no retry, which is what an unconfigured subscription gets.
+   * `-1` — or any value of 0 or below — means no limit: a failing message is retried until the
+   * handler succeeds, is never dead-lettered by count, and reports `Message.maxAttempts` as `-1`.
    * Honoured by the memory, Redis and JetStream adapters; core NATS tracks no delivery state
    * and ignores it.
    */
@@ -207,6 +253,16 @@ export interface RetryOptions {
   backoff?: 'fixed' | 'linear' | 'exponential';
   /** Base delay in milliseconds (default 100). */
   delay?: number;
+  /**
+   * Ceiling for the wait between attempts, in milliseconds: the wait is
+   * `min(maxDelay, <backoff formula>)`, whichever of `'fixed'`, `'linear'` and `'exponential'` is
+   * set, and on every adapter that honours `retry`. Not set by default: the `'linear'` and
+   * `'exponential'` waits then keep growing for as long as the message keeps failing. A negative,
+   * `NaN` or infinite value is refused when the subscription is registered.
+   *
+   * @see docs:api/queue.md#retry
+   */
+  maxDelay?: number;
 }
 
 /**
@@ -227,6 +283,8 @@ export interface DeadLetterOptions {
    * Deliveries before the message is dead-lettered, used only when `retry.attempts` is absent —
    * the cap resolves as `retry.attempts ?? deadLetter.maxRetries ?? 1` on Redis, and
    * `retry.attempts ?? deadLetter.maxRetries ?? consumerConfig.maxDeliver ?? 3` on JetStream.
+   * A resolved cap of 0 or below means no limit, and no delivery is dead-lettered by count; with
+   * no `retry` set, such a subscription waits the default 100 ms between attempts, never zero.
    */
   maxRetries?: number;
 }
@@ -526,12 +584,17 @@ export interface QueueAdapter {
   /**
    * Publish a message to a pattern
    * @returns Message ID
+   * @throws {QueuePublishError} When the publish did not complete, with a `reason` saying whether
+   *   anything was sent and whether repeating it is safe. A custom adapter throws the same class,
+   *   and reports a failure it cannot classify as `'unknown'`.
    */
   publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string>;
 
   /**
    * Publish multiple messages in a batch
    * @returns Array of message IDs
+   * @throws {QueuePublishError} For the first message whose publish failed, as `publish()` does;
+   *   the messages published before it stay published.
    */
   publishBatch<T>(
     messages: Array<{ pattern: string; data: T; options?: PublishOptions }>
@@ -540,7 +603,7 @@ export interface QueueAdapter {
   // Subscribing
   /**
    * Subscribe to messages matching a pattern
-   * Supports wildcards: 'orders.*', 'events.user.#'
+   * Supports wildcards: 'orders.*', 'events.user.#', and 'events.user.>' as the NATS spelling of '#'
    */
   subscribe<T>(
     pattern: string,

@@ -6,8 +6,38 @@ import {
   type LogTransport,
 } from './types';
 
+/** Streams that already carry the broken-pipe listener. */
+const guardedStreams = new WeakSet<NodeJS.WriteStream>();
+
 /**
- * Console transport for logging
+ * Keeps a closed output pipe (`app | head`) from ending the process. A write to a closed pipe
+ * emits an `EPIPE` 'error' event on the stream; unhandled, it terminates the process, whereas a
+ * `console.*` call drops the line. The listener is installed once per stream and ignores only
+ * `EPIPE`. Any other error is rethrown unless the application has its own 'error' listener on
+ * the stream, so it surfaces exactly as it would without the transport.
+ */
+function guardBrokenPipe(stream: NodeJS.WriteStream): NodeJS.WriteStream {
+  if (!guardedStreams.has(stream)) {
+    guardedStreams.add(stream);
+    const guard = (error: NodeJS.ErrnoException): void => {
+      if (error.code !== 'EPIPE' && stream.listenerCount('error') === 1) {
+        throw error;
+      }
+    };
+    stream.on('error', guard);
+  }
+
+  return stream;
+}
+
+/**
+ * Console transport for logging.
+ *
+ * Writes every record, followed by a newline, through the process streams:
+ * `process.stderr` for `warn`, `error` and `fatal`, `process.stdout` for `info`, `debug` and `trace`.
+ * A closed output pipe (`EPIPE`) drops the line without an error.
+ *
+ * @see docs:api/logger.md
  */
 export class ConsoleTransport implements LogTransport {
   log(formattedEntry: string, entry: LogEntry): Effect.Effect<void> {
@@ -15,22 +45,14 @@ export class ConsoleTransport implements LogTransport {
       switch (entry.level) {
         case LogLevel.Error:
         case LogLevel.Fatal:
-          // eslint-disable-next-line no-console
-          console.error(formattedEntry);
-          break;
         case LogLevel.Warning:
-          // eslint-disable-next-line no-console
-          console.warn(formattedEntry);
+          guardBrokenPipe(process.stderr).write(`${formattedEntry}\n`);
           break;
         case LogLevel.Info:
-          // eslint-disable-next-line no-console
-          console.info(formattedEntry);
-          break;
         case LogLevel.Debug:
         case LogLevel.Trace:
         default:
-          // eslint-disable-next-line no-console
-          console.log(formattedEntry);
+          guardBrokenPipe(process.stdout).write(`${formattedEntry}\n`);
       }
     });
   }
