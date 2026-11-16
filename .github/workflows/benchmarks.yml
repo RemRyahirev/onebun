@@ -61,13 +61,32 @@ jobs:
           chmod +x /usr/local/bin/bombardier
 
       - name: Install benchmark dependencies
+        # Every app is installed from the lockfile committed in its own directory
+        # and fails instead of re-resolving: bun.lock with `bun install
+        # --frozen-lockfile`, package-lock.json with `npm ci` (the SQLite
+        # apps, which run on Node and need better-sqlite3's Node binding).
+        # One command per line: the runner's `bash -e` does not stop on a failed
+        # command in the middle of an `a && b && c` chain.
         run: |
-          cd benchmarks/simple/competitors/hono-bun && bun install
-          cd ../elysia && bun install
-          cd ../nestjs-fastify && bun install && bun run build
-          cd ../../../realistic/nestjs-fastify && bun install && npm install && bun run build
-          cd ../../realistic-pg/nestjs-fastify && bun install && bun run build
-          cd ../nestjs-typeorm && bun install && bun run build
+          cd benchmarks/simple/competitors/hono-bun
+          bun install --frozen-lockfile
+          cd ../elysia
+          bun install --frozen-lockfile
+          cd ../nestjs-fastify
+          bun install --frozen-lockfile
+          bun run build
+          cd ../../../realistic/nestjs-fastify
+          npm ci
+          bun run build
+          cd ../nestjs-typeorm
+          npm ci
+          bun run build
+          cd ../../realistic-pg/nestjs-fastify
+          bun install --frozen-lockfile
+          bun run build
+          cd ../nestjs-typeorm
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Run all benchmarks
         run: ./benchmarks/run-all.sh
